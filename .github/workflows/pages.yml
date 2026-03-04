@@ -1,0 +1,102 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install gomarkdoc
+        run: go install github.com/princjef/gomarkdoc/cmd/gomarkdoc@latest
+
+      - name: Generate API docs
+        run: |
+          mkdir -p _site
+          gomarkdoc --output _site/api.md .
+
+      - name: Build site
+        run: |
+          cat > _site/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>go-evtx</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                     max-width: 760px; margin: 60px auto; padding: 0 20px;
+                     color: #1a1a1a; line-height: 1.6; }
+              h1 { font-size: 2rem; margin-bottom: .25rem; }
+              .sub { color: #555; margin-bottom: 2rem; }
+              .badges img { margin-right: 6px; }
+              .links a { display: inline-block; margin-right: 16px; padding: 8px 18px;
+                         background: #0070f3; color: #fff; border-radius: 6px;
+                         text-decoration: none; font-weight: 600; }
+              .links a.sec { background: #444; }
+              pre { background: #f4f4f4; padding: 16px; border-radius: 6px;
+                    overflow-x: auto; font-size: .9rem; }
+            </style>
+          </head>
+          <body>
+            <h1>go-evtx</h1>
+            <p class="sub">Pure Go library for reading and writing Windows Event Log (.evtx) files.<br>
+              No Windows. No CGO. No external dependencies.</p>
+
+            <p class="badges">
+              <a href="https://github.com/fjacquet/go-evtx/actions/workflows/ci.yml">
+                <img src="https://github.com/fjacquet/go-evtx/actions/workflows/ci.yml/badge.svg" alt="CI">
+              </a>
+              <a href="https://pkg.go.dev/github.com/fjacquet/go-evtx">
+                <img src="https://pkg.go.dev/badge/github.com/fjacquet/go-evtx.svg" alt="Go Reference">
+              </a>
+              <a href="https://goreportcard.com/report/github.com/fjacquet/go-evtx">
+                <img src="https://goreportcard.com/badge/github.com/fjacquet/go-evtx" alt="Go Report Card">
+              </a>
+            </p>
+
+            <pre>go get github.com/fjacquet/go-evtx@latest</pre>
+
+            <p class="links">
+              <a href="https://pkg.go.dev/github.com/fjacquet/go-evtx">API Reference</a>
+              <a class="sec" href="https://github.com/fjacquet/go-evtx">GitHub</a>
+              <a class="sec" href="https://github.com/fjacquet/go-evtx/blob/main/docs/PRD.md">PRD</a>
+            </p>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

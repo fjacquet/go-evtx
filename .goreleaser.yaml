@@ -1,0 +1,44 @@
+version: 2
+
+project_name: go-evtx
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  # go-evtx is a library — no binary to build.
+  # GoReleaser still creates the GitHub release with changelog and source archives.
+  - skip: true
+
+archives:
+  - format: tar.gz
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: fjacquet
+    name: go-evtx
+  draft: false
+  prerelease: auto
+  name_template: '{{ .Tag }}'
+  header: |
+    See [CHANGELOG.md](https://github.com/fjacquet/go-evtx/blob/main/CHANGELOG.md) for full details.
+  footer: |
+    **Full Changelog**: https://github.com/fjacquet/go-evtx/compare/{{ .PreviousTag }}...{{ .Tag }}

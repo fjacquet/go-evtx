@@ -5,7 +5,7 @@
 //
 // Basic usage:
 //
-//	w, err := evtx.New("/var/log/audit.evtx")
+//	w, err := evtx.New("/var/log/audit.evtx", evtx.RotationConfig{})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -34,6 +34,13 @@ import (
 	"time"
 )
 
+// RotationConfig holds periodic flush configuration for the Writer.
+// FlushIntervalSec is the interval between checkpoint writes in seconds.
+// 0 disables the background goroutine; must be >= 0 (negative values are rejected by New).
+type RotationConfig struct {
+	FlushIntervalSec int // 0 = disabled; must be >= 0
+}
+
 // Writer writes Windows .evtx binary format files.
 // All exported methods are safe for concurrent use.
 type Writer struct {
@@ -42,24 +49,60 @@ type Writer struct {
 	records  []byte // accumulated event record bytes for current chunk
 	recordID uint64 // monotonically incrementing record ID, starts at 1
 	firstID  uint64 // first record ID in current chunk
+	// Phase 9 additions:
+	cfg  RotationConfig
+	done chan struct{}
+	wg   sync.WaitGroup
 }
 
 // New creates a Writer that will write to the given path.
 //
 // path must be non-empty. The parent directory is created if it does not
-// exist. The file itself is only written on Close().
-func New(path string) (*Writer, error) {
+// exist. The file itself is written on Close() and on every ticker interval
+// when cfg.FlushIntervalSec > 0.
+func New(path string, cfg RotationConfig) (*Writer, error) {
 	if path == "" {
 		return nil, fmt.Errorf("go_evtx: path must be non-empty")
+	}
+	if cfg.FlushIntervalSec < 0 {
+		return nil, fmt.Errorf("go_evtx: FlushIntervalSec must be >= 0 (got %d)", cfg.FlushIntervalSec)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("go_evtx: create parent directory: %w", err)
 	}
-	return &Writer{
+	w := &Writer{
 		path:     path,
 		recordID: 1,
 		firstID:  1,
-	}, nil
+		cfg:      cfg,
+		done:     make(chan struct{}),
+	}
+	if cfg.FlushIntervalSec > 0 {
+		w.wg.Add(1)
+		go w.backgroundLoop()
+	}
+	return w, nil
+}
+
+// backgroundLoop runs as a goroutine when FlushIntervalSec > 0.
+// It calls flushToFile() under w.mu on every ticker interval.
+// It exits when w.done is closed.
+func (w *Writer) backgroundLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(time.Duration(w.cfg.FlushIntervalSec) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			w.mu.Lock()
+			if len(w.records) > 0 {
+				_ = w.flushToFile()
+			}
+			w.mu.Unlock()
+		case <-w.done:
+			return
+		}
+	}
 }
 
 // WriteRaw appends a pre-encoded BinXML payload to the writer.
@@ -119,16 +162,19 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	return nil
 }
 
-// Close flushes all buffered events to disk and finalises the .evtx file.
+// Close stops the background goroutine (if running), waits for it to exit,
+// then performs a final flush of any remaining buffered events.
 // If no events were written, Close returns nil without creating the file.
+// Close must be called exactly once.
 func (w *Writer) Close() error {
-	w.mu.Lock()
+	close(w.done) // 1. signal goroutine
+	w.wg.Wait()   // 2. wait — WITHOUT holding any lock
+	w.mu.Lock()   // 3. safe to acquire now
 	defer w.mu.Unlock()
-
 	if len(w.records) == 0 {
 		return nil
 	}
-	return w.flushToFile()
+	return w.flushToFile() // 4. final flush
 }
 
 // flushToFile assembles the complete single-chunk .evtx file and writes it.
