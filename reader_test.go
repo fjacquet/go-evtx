@@ -18,7 +18,7 @@ func writeTestFile(t *testing.T, fields map[string]string, eventID int) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.evtx")
-	w, err := New(path)
+	w, err := New(path, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestReadRaw_WriteRaw_RoundTrip(t *testing.T) {
 	// Write raw payload to a new file.
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "copy.evtx")
-	w, err := New(dst)
+	w, err := New(dst, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New dst: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestErrNoMoreRecords(t *testing.T) {
 func TestReadRecord_MultipleRecords(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "multi.evtx")
-	w, err := New(path)
+	w, err := New(path, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

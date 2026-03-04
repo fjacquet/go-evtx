@@ -17,7 +17,7 @@ import (
 
 // TestWriter_New_EmptyPath verifies that New("") returns a non-nil error.
 func TestWriter_New_EmptyPath(t *testing.T) {
-	_, err := New("")
+	_, err := New("", RotationConfig{})
 	if err == nil {
 		t.Fatal("expected error for empty path, got nil")
 	}
@@ -28,7 +28,7 @@ func TestWriter_New_ParentDirCreated(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "nested", "deep", "test.evtx")
 
-	w, err := New(outPath)
+	w, err := New(outPath, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New with nested path: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestWriter_WriteRecord_ProducesValidFile(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "test.evtx")
 
-	w, err := New(outPath)
+	w, err := New(outPath, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestWriter_WriteRecord_ChunkMagic(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "chunk.evtx")
 
-	w, err := New(outPath)
+	w, err := New(outPath, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestWriter_WriteRaw_ProducesValidFile(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "raw.evtx")
 
-	w, err := New(outPath)
+	w, err := New(outPath, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestWriter_EmptyClose(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "empty.evtx")
 
-	w, err := New(outPath)
+	w, err := New(outPath, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestWriter_Concurrent(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "concurrent.evtx")
 
-	w, err := New(outPath)
+	w, err := New(outPath, RotationConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
