@@ -54,6 +54,11 @@ type RotationConfig struct {
 	MaxFileSizeMB    int // 0 = disabled; rotate when file >= N MiB
 	MaxFileCount     int // 0 = unlimited; keep only N newest archives
 	RotationIntervalH int // 0 = disabled; rotate every N hours
+
+	// OnFsync is called after each successful f.Sync() with the time of the sync.
+	// nil = no callback. Useful for exposing fsync timestamp to Prometheus gauges.
+	// Only fires when FlushIntervalSec > 0 (flush goroutine active).
+	OnFsync func(time.Time)
 }
 
 // Writer writes Windows .evtx binary format files.
@@ -414,6 +419,9 @@ func (w *Writer) flushChunkLocked() error {
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: sync: %w", err)
 	}
+	if w.cfg.OnFsync != nil {
+		w.cfg.OnFsync(time.Now())
+	}
 
 	// Reset current chunk buffer.
 	w.records = w.records[:0]
@@ -470,6 +478,9 @@ func (w *Writer) tickFlushLocked() error {
 	// Sync to disk.
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: tick sync: %w", err)
+	}
+	if w.cfg.OnFsync != nil {
+		w.cfg.OnFsync(time.Now())
 	}
 
 	return nil

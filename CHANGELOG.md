@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-05
+
+### Added
+
+- `RotationConfig.OnFsync func(time.Time)` — optional callback invoked after each
+  successful `f.Sync()` in both `flushChunkLocked()` and `tickFlushLocked()`. When nil
+  (the default), behaviour is identical to v0.4.0. Enables callers to track fsync
+  timestamps without importing caller-side packages into go-evtx.
+
+[0.5.0]: https://github.com/fjacquet/go-evtx/compare/v0.4.0...v0.5.0
+
 ## [0.4.0] - 2026-03-05
 
 ### Added
@@ -86,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.5.0...HEAD
 [0.4.0]: https://github.com/fjacquet/go-evtx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fjacquet/go-evtx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fjacquet/go-evtx/compare/v0.1.0...v0.2.0
