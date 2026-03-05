@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-05
+
+### Added
+
+- `RotationConfig.MaxFileSizeMB` — size-based rotation: when the active file reaches N MiB, rotate() is triggered automatically after each `WriteRecord`/`WriteRaw` call
+- `RotationConfig.MaxFileCount` — archive retention: after rotation, archives exceeding N are deleted oldest-first
+- `RotationConfig.RotationIntervalH` — time-based rotation: `backgroundLoop` fires `rotate()` on a per-hour ticker when this field is > 0
+- `Rotate()` public method — manually trigger rotation from any goroutine; safe for concurrent use
+- `rotate()` private method — core rotation logic: flush pending chunk, fsync, close, rename to timestamped archive, open fresh file, reset state, call `cleanOldFiles()`
+- `archivePathFor()` helper — derives archive name: `base-YYYY-MM-DDTHH-MM-SS.evtx` (UTC, hyphens instead of colons)
+- `cleanOldFiles()` helper — glob `base-*.evtx`, sort by mtime, delete oldest beyond `MaxFileCount`
+- `Writer.currentSize int64` — approximate file size tracked via `flushChunkLocked()` for size-based rotation
+- `evtx_unix.go` (!windows) — `syncDir()` using `syscall.Open` + `syscall.Fsync` for directory durability after rename
+- `evtx_windows.go` (windows) — `syncDir()` no-op (NTFS rename is durable without fsync)
+- `rotation_test.go` — 6 TDD tests: `TestWriter_SizeRotation`, `TestWriter_CountRetention`, `TestWriter_TimeRotation`, `TestWriter_ManualRotate`, `TestWriter_RotatedFileValid`, `TestWriter_RotateRace`
+
+### Changed
+
+- `New()` goroutine start condition: `FlushIntervalSec > 0 || RotationIntervalH > 0` (was `FlushIntervalSec > 0` only)
+- `backgroundLoop()` uses nil-channel idiom for optional rotation ticker: receive on nil channel never fires, so disabled tickers add zero overhead
+- `flushChunkLocked()` now updates `w.currentSize += evtxChunkSize` after each committed chunk
+
 ## [0.3.0] - 2026-03-05
 
 ### Added
@@ -64,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/fjacquet/go-evtx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fjacquet/go-evtx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fjacquet/go-evtx/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fjacquet/go-evtx/releases/tag/v0.1.0
