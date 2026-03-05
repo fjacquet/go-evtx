@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Reader` struct with `Open(path)`, `ReadRecord()`, `ReadRaw()`, `Close()`, and `ErrNoMoreRecords` — symmetric read API for `.evtx` files
+- `fromFILETIME` — converts Windows FILETIME to `time.Time`
+- `docs/PRD.md` — Product Requirements Document with functional requirements, limitations, and roadmap
+- GitHub Actions `release.yml` — GoReleaser-based release workflow triggered on `v*` tags
+- GitHub Actions `pages.yml` — Builds and deploys landing page + API docs to GitHub Pages on every push to `main`
+- `.goreleaser.yaml` — GoReleaser v2 configuration (library mode: source archives + auto-changelog)
+- Simplified README with CI / Go Reference / Go Report Card / License badges
+
 ## [0.1.0] - 2026-03-04
 
 ### Added

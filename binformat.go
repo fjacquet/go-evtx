@@ -37,6 +37,12 @@ func toFILETIME(t time.Time) uint64 {
 	return uint64(t.UTC().UnixNano()/100 + filetimeEpochDelta)
 }
 
+// fromFILETIME converts a Windows FILETIME value to a Go time.Time.
+func fromFILETIME(ft uint64) time.Time {
+	ns := (int64(ft) - filetimeEpochDelta) * 100
+	return time.Unix(0, ns).UTC()
+}
+
 // encodeUTF16LE encodes a Go string as a length-prefixed, null-terminated UTF-16LE byte slice.
 //
 // Layout:

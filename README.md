@@ -1,122 +1,93 @@
 # go-evtx
 
-A Go library for writing Windows Event Log (.evtx) binary files without Windows dependencies.
+[![CI](https://github.com/fjacquet/go-evtx/actions/workflows/ci.yml/badge.svg)](https://github.com/fjacquet/go-evtx/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/fjacquet/go-evtx.svg)](https://pkg.go.dev/github.com/fjacquet/go-evtx)
+[![Go Report Card](https://goreportcard.com/badge/github.com/fjacquet/go-evtx)](https://goreportcard.com/report/github.com/fjacquet/go-evtx)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Overview
+A pure Go library for reading and writing Windows Event Log (`.evtx`) binary files — no Windows, no CGO, no external dependencies.
 
-`go-evtx` encodes events as template-based BinXML, the format used by the Windows Event Log subsystem. Generated files are parseable by forensics tools such as [python-evtx](https://github.com/williballenthin/python-evtx) and the Windows Event Viewer.
+Generated files are parseable by [python-evtx](https://github.com/williballenthin/python-evtx), Velociraptor, and Windows Event Viewer.
 
-The library has **zero external dependencies** — it uses only the Go standard library.
+> Full requirements and roadmap: [docs/PRD.md](docs/PRD.md)
 
 ## Install
 
 ```bash
-go get github.com/fjacquet/go-evtx@v0.1.0
+go get github.com/fjacquet/go-evtx@latest
 ```
 
-## Usage
-
-### WriteRecord — high-level API
+## Write events
 
 ```go
-package main
+w, err := evtx.New("/var/log/audit.evtx")
+if err != nil {
+    log.Fatal(err)
+}
+defer w.Close()
 
-import (
-    "log"
-    "time"
+w.WriteRecord(4663, map[string]string{
+    "ProviderName": "Microsoft-Windows-Security-Auditing",
+    "Computer":     "myhost",
+    "TimeCreated":  time.Now().Format(time.RFC3339Nano),
+    "ObjectName":   "/mnt/share/file.txt",
+    "AccessMask":   "0x2",
+})
+```
 
-    "github.com/fjacquet/go-evtx"
-)
+Use `WriteRaw` when you have a pre-encoded BinXML payload (e.g. forwarded from another source). Do not mix `WriteRecord` and `WriteRaw` in the same session.
 
-func main() {
-    w, err := evtx.New("/var/log/audit.evtx")
+## Read events
+
+```go
+r, err := evtx.Open("/var/log/audit.evtx")
+if err != nil {
+    log.Fatal(err)
+}
+defer r.Close()
+
+for {
+    rec, err := r.ReadRecord()
+    if errors.Is(err, evtx.ErrNoMoreRecords) {
+        break
+    }
     if err != nil {
         log.Fatal(err)
     }
-    defer w.Close()
-
-    fields := map[string]string{
-        // System fields
-        "ProviderName": "Microsoft-Windows-Security-Auditing",
-        "Computer":     "myhost.example.com",
-        "TimeCreated":  time.Now().Format(time.RFC3339Nano),
-
-        // Data fields
-        "SubjectUserSid":    "S-1-5-21-1234567890-1234567890-1234567890-1001",
-        "SubjectUserName":   "alice",
-        "SubjectDomainName": "EXAMPLE",
-        "SubjectLogonId":    "0x12345",
-        "ObjectServer":      "Security",
-        "ObjectType":        "File",
-        "ObjectName":        "/mnt/share/document.docx",
-        "HandleId":          "0x1a2b",
-        "AccessList":        "%%4416",
-        "AccessMask":        "0x2",
-        "ProcessId":         "0x0",
-        "ProcessName":       "",
-    }
-
-    if err := w.WriteRecord(4663, fields); err != nil {
-        log.Fatal(err)
-    }
+    fmt.Println(rec.EventID, rec.Provider, rec.Fields["ObjectName"])
 }
 ```
 
-### WriteRaw — pre-encoded BinXML payload
+Use `ReadRaw` to retrieve the raw BinXML payload, which can be passed directly to `WriteRaw` to copy records between files.
 
-Use `WriteRaw` when you have a pre-encoded BinXML payload (e.g. forwarded from another source):
+## Field reference
 
-```go
-// payload must be a valid BinXML fragment (without the event record header).
-// go-evtx wraps it with the record header automatically.
-if err := w.WriteRaw(payload); err != nil {
-    log.Fatal(err)
-}
-```
-
-**Note:** Do not mix `WriteRecord` and `WriteRaw` calls in the same Writer session. Use one or the other.
-
-## Reserved Field Keys
-
-| Key | Description | Type |
-|-----|-------------|------|
-| `ProviderName` | Event provider name | STRING |
-| `Computer` | Computer name | STRING |
-| `TimeCreated` | Timestamp (RFC3339Nano format) | FILETIME |
-
-## Data Field Keys
-
-The following 12 data fields are written to the `<EventData>` section in the order shown:
+**System fields** (reserved keys for `WriteRecord`):
 
 | Key | Description |
 |-----|-------------|
-| `SubjectUserSid` | Security identifier of the subject |
-| `SubjectUserName` | Username of the subject |
-| `SubjectDomainName` | Domain name of the subject |
-| `SubjectLogonId` | Logon session identifier |
-| `ObjectServer` | Server that owns the object |
-| `ObjectType` | Type of the object (e.g. File) |
-| `ObjectName` | Name/path of the object |
-| `HandleId` | Handle identifier |
-| `AccessList` | List of access rights |
-| `AccessMask` | Hexadecimal access mask |
-| `ProcessId` | Process identifier |
-| `ProcessName` | Name of the process |
+| `ProviderName` | Event provider name |
+| `Computer` | Computer name |
+| `TimeCreated` | Timestamp in RFC3339Nano format (defaults to `time.Now()`) |
 
-Missing keys default to empty string.
+**EventData fields** (12, written in this order):
 
-## Common Windows Event IDs
+`SubjectUserSid` · `SubjectUserName` · `SubjectDomainName` · `SubjectLogonId` · `ObjectServer` · `ObjectType` · `ObjectName` · `HandleId` · `AccessList` · `AccessMask` · `ProcessId` · `ProcessName`
 
-| EventID | Description |
-|---------|-------------|
-| 4663 | An attempt was made to access an object |
-| 4660 | An object was deleted |
-| 4670 | Permissions on an object were changed |
+Missing keys default to `""`.
+
+## Common Event IDs
+
+| ID | Description |
+|----|-------------|
+| 4663 | Object access attempt |
+| 4660 | Object deleted |
+| 4670 | Object permissions changed |
 
 ## Limitations
 
-- Single-chunk model: the writer buffers all records in memory and writes them in a single 64 KB chunk on `Close()`. Events beyond ~2,400 per session are silently truncated (logged as a warning). Multi-chunk support is planned for a future release.
-- `WriteRaw` and `WriteRecord` should not be mixed in the same session.
+- **Single-chunk write model**: max ~2,400 events per session; all buffered records are lost on crash. Multi-chunk support is planned for v0.2.0.
+- `WriteRecord` and `WriteRaw` must not be mixed in the same session.
 
 ## License
 
