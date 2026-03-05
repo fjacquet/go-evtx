@@ -63,11 +63,11 @@ func Open(path string) (*Reader, error) {
 
 	hdr := make([]byte, evtxFileHeaderSize)
 	if _, err := f.ReadAt(hdr, 0); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("go_evtx: read file header: %w", err)
 	}
 	if string(hdr[0:8]) != evtxFileMagic {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("go_evtx: not an evtx file: invalid magic")
 	}
 
@@ -79,7 +79,7 @@ func Open(path string) (*Reader, error) {
 		buf:       make([]byte, evtxChunkSize),
 	}
 	if err := r.loadChunk(0); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return r, nil

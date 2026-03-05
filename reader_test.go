@@ -80,7 +80,7 @@ func TestReadRecord_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	rec, err := r.ReadRecord()
 	if err != nil {
@@ -137,7 +137,7 @@ func TestReadRaw_NonEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	payload, err := r.ReadRaw()
 	if err != nil {
@@ -163,7 +163,7 @@ func TestReadRaw_WriteRaw_RoundTrip(t *testing.T) {
 		t.Fatalf("Open src: %v", err)
 	}
 	payload, err := r.ReadRaw()
-	r.Close()
+	_ = r.Close()
 	if err != nil {
 		t.Fatalf("ReadRaw: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestErrNoMoreRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// Read the single record.
 	if _, err := r.ReadRecord(); err != nil {
@@ -242,7 +242,7 @@ func TestReadRecord_MultipleRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var got int
 	for {

@@ -102,11 +102,9 @@ func TestWriter_CountRetention(t *testing.T) {
 		t.Errorf("expected at most 2 archive files (MaxFileCount=2), got %d: %v", len(archives), archives)
 	}
 
-	// Active file must exist.
-	if _, err := os.Stat(outPath); err != nil {
-		// Active file may have been cleaned up by Close if empty.
-		// At minimum, archives must be <= MaxFileCount.
-	}
+	// Active file may have been cleaned up by Close if empty;
+	// at minimum, archives must be <= MaxFileCount (already asserted above).
+	_ = outPath
 }
 
 // TestWriter_TimeRotation verifies that calling Rotate() directly (simulating a
@@ -196,7 +194,7 @@ func TestWriter_ManualRotate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open archive: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var count int
 	for {
@@ -219,7 +217,7 @@ func TestWriter_ManualRotate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open active file: %v", err)
 		}
-		defer r2.Close()
+		defer func() { _ = r2.Close() }()
 	}
 }
 
@@ -264,7 +262,7 @@ func TestWriter_RotatedFileValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open archive: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var count int
 	var prevID uint64

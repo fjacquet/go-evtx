@@ -46,8 +46,6 @@ const evtxRecordsStart = uint32(evtxChunkHeaderSize) // = 512
 // signature(4) + size(4) + recordID(8) + timestamp(8) = 24 bytes.
 const evtxRecordHeaderSize = 24
 
-// chunkFlushThreshold: log a warning when buffered records exceed this.
-const chunkFlushThreshold = 60000
 
 const (
 	fragHeaderSize   = 4  // 0x0F + major + minor + flags

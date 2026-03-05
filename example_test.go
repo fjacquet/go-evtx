@@ -21,7 +21,7 @@ func ExampleWriter_WriteRecord() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 
 	err = w.WriteRecord(4663, map[string]string{
 		"ProviderName": "Microsoft-Windows-Security-Auditing",
@@ -51,7 +51,7 @@ func ExampleWriter_WriteRecord_noFlush() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 
 	if err := w.WriteRecord(4660, map[string]string{
 		"ProviderName": "Microsoft-Windows-Security-Auditing",
@@ -78,7 +78,7 @@ func ExampleReader() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 
 	if err := w.WriteRecord(4663, map[string]string{
 		"ProviderName": "Microsoft-Windows-Security-Auditing",
@@ -96,7 +96,7 @@ func ExampleReader() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	for {
 		rec, err := r.ReadRecord()

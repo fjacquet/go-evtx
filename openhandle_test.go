@@ -48,7 +48,7 @@ func TestWriter_MultiChunk_EventCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var count int
 	var prevID uint64
@@ -164,7 +164,7 @@ func TestWriter_TwoFlushSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var count int
 	for {
@@ -254,7 +254,7 @@ func TestWriter_OpenHandle_NoRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var count int
 	for {

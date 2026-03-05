@@ -99,7 +99,7 @@ func New(path string, cfg RotationConfig) (*Writer, error) {
 	// Write placeholder file header (ChunkCount=0, NextRecordID=1).
 	// This is patched on each flushChunkLocked() call.
 	if _, err := f.Write(buildFileHeader(0, 1)); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("go_evtx: write placeholder header: %w", err)
 	}
 
@@ -291,7 +291,7 @@ func (w *Writer) rotate() error {
 		return fmt.Errorf("go_evtx: rotate open new file: %w", err)
 	}
 	if _, err := f.Write(buildFileHeader(0, 1)); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("go_evtx: rotate write header: %w", err)
 	}
 	w.f = f
@@ -480,12 +480,16 @@ func (w *Writer) tickFlushLocked() error {
 // If no events were written and no chunks committed, Close removes the file from
 // disk (backward compat: empty session leaves no file) and returns nil.
 // Close must be called exactly once.
-func (w *Writer) Close() error {
+func (w *Writer) Close() (err error) {
 	close(w.done) // 1. signal goroutine
 	w.wg.Wait()   // 2. wait — WITHOUT holding any lock
 	w.mu.Lock()   // 3. safe to acquire now
 	defer w.mu.Unlock()
-	defer w.f.Close() // always close the file handle
+	defer func() { // always close the file handle
+		if cerr := w.f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
 
 	// Empty session: no records and no completed chunks.
 	if len(w.records) == 0 && w.chunkCount == 0 {
