@@ -9,16 +9,8 @@ before:
 
 builds:
   # go-evtx is a library — no binary to build.
-  # GoReleaser still creates the GitHub release with changelog and source archives.
+  # GoReleaser creates the GitHub release with changelog; consumers use go get.
   - skip: true
-
-archives:
-  - format: tar.gz
-    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
-    files:
-      - LICENSE
-      - README.md
-      - CHANGELOG.md
 
 changelog:
   use: github

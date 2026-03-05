@@ -1,8 +1,8 @@
 # Product Requirements Document — go-evtx
 
 **Status:** Active
-**Version:** 0.1.0
-**Last updated:** 2026-03-04
+**Version:** 0.2.0
+**Last updated:** 2026-03-05
 
 ---
 
@@ -49,14 +49,32 @@
 | R-05 | Reader supports multi-chunk files (Windows-generated) |
 | R-06 | `Record` exposes: `RecordID`, `Timestamp`, `EventID`, `Level`, `Provider`, `Computer`, `TimeCreated`, `Fields` |
 
-### 3.3 Planned — v0.2.0
+### 3.3 Writer v0.2.0 — delivered
 
 | ID | Requirement |
 |----|-------------|
-| W-09 | Multi-chunk write model: persist an open file handle and flush records incrementally per chunk |
+| W-09 | Multi-chunk write model: open file handle held from `New()` to `Close()`; records flushed incrementally per chunk |
 | W-10 | `f.Sync()` after each chunk flush for durability |
-| W-11 | Configurable chunk size or automatic rotation |
+| W-11 | Configurable flush interval via `RotationConfig{FlushIntervalSec}` (0 = disabled) |
+
+### 3.4 Reader v0.2.0 — delivered
+
+| ID | Requirement |
+|----|-------------|
+| R-01 | `Open(path)` opens an `.evtx` file; validates file magic and chunk count |
+| R-02 | `ReadRecord()` returns the next decoded event as a `Record` struct |
+| R-03 | `ReadRaw()` returns the next raw BinXML payload (symmetric with `WriteRaw`) |
+| R-04 | `ErrNoMoreRecords` is returned when all records have been read |
+| R-05 | Reader supports multi-chunk files (Windows-generated) |
+| R-06 | `Record` exposes: `RecordID`, `Timestamp`, `EventID`, `Level`, `Provider`, `Computer`, `TimeCreated`, `Fields` |
+
+### 3.5 Planned — v0.3.0
+
+| ID | Requirement |
+|----|-------------|
 | R-07 | Streaming read mode (iterator/channel) for large files |
+| W-12 | Enforce `WriteRaw`/`WriteRecord` mutual exclusion at runtime |
+| W-13 | Configurable `EventData` schema beyond fixed 12-field template |
 
 ---
 
@@ -76,10 +94,10 @@
 
 | Limitation | Impact | Planned fix |
 |------------|--------|-------------|
-| Single-chunk write model | Max ~2,400 events per session; all records lost on crash | v0.2.0 (ADR-004) |
-| `WriteRecord`/`WriteRaw` must not be mixed in one session | Caller contract only; not enforced at runtime | v0.2.0 |
-| Fixed 12-field `EventData` schema | Cannot represent arbitrary Windows event schemas | Post-v0.2.0 |
-| BinXML decoder targets our own template format | May misparse complex Windows-native templates | Post-v0.2.0 |
+| `WriteRecord`/`WriteRaw` must not be mixed in one session | Caller contract only; not enforced at runtime | v0.3.0 |
+| Fixed 12-field `EventData` schema | Cannot represent arbitrary Windows event schemas | Post-v0.3.0 |
+| BinXML decoder targets our own template format | May misparse complex Windows-native templates | Post-v0.3.0 |
+| No streaming read API | Full multi-chunk file must be iterated record-by-record | v0.3.0 |
 
 ---
 
@@ -90,3 +108,4 @@ See [`docs/adr/`](adr/) for the full decision log:
 - [ADR-001](adr/ADR-001-pure-go-stdlib-only.md) — Pure Go, stdlib-only, CGO_ENABLED=0
 - [ADR-002](adr/ADR-002-layered-api-writeraw-writerecord.md) — Layered API: WriteRaw + WriteRecord
 - [ADR-003](adr/ADR-003-write-on-close-model.md) — Write-on-Close model (superseded in v0.2.0)
+- [ADR-004](adr/ADR-004-open-handle-incremental-flush.md) — Open-handle incremental flush model (v0.2.0)

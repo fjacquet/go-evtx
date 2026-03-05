@@ -20,7 +20,7 @@ go get github.com/fjacquet/go-evtx@latest
 ## Write events
 
 ```go
-w, err := evtx.New("/var/log/audit.evtx")
+w, err := evtx.New("/var/log/audit.evtx", evtx.RotationConfig{FlushIntervalSec: 30})
 if err != nil {
     log.Fatal(err)
 }
@@ -86,8 +86,9 @@ Missing keys default to `""`.
 
 ## Limitations
 
-- **Single-chunk write model**: max ~2,400 events per session; all buffered records are lost on crash. Multi-chunk support is planned for v0.2.0.
 - `WriteRecord` and `WriteRaw` must not be mixed in the same session.
+- Fixed 12-field `EventData` schema; arbitrary Windows event schemas are not yet supported.
+- BinXML decoder targets the library's own template format; complex Windows-native templates may not parse correctly.
 
 ## License
 
