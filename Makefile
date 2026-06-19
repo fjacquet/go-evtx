@@ -5,6 +5,9 @@ COVER ?= coverage.out
 # Go-1.24-compatible tool pins (go.mod is go 1.24; defaults need Go 1.25).
 GOLANGCI_VERSION ?= v2.8.0
 GORELEASER_VERSION ?= v2.7.0
+# govulncheck @latest (v1.4.0) needs Go >= 1.25; the CI runner pins
+# GOTOOLCHAIN=local at go 1.24, so pin the last Go-1.24-safe release.
+GOVULNCHECK_VERSION ?= v1.1.4
 
 .PHONY: all clean install tools lint format test build vuln sbom security docs coverage-upload release ci
 
@@ -18,7 +21,7 @@ install:
 
 tools:
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
-	go install golang.org/x/vuln/cmd/govulncheck@latest
+	go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 
 lint:
@@ -35,7 +38,7 @@ build:
 	go build -v ./...
 
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 sbom:
 	mkdir -p $(DIST)
