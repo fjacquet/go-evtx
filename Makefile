@@ -8,6 +8,8 @@ GORELEASER_VERSION ?= v2.7.0
 # govulncheck @latest (v1.4.0) needs Go >= 1.25; the CI runner pins
 # GOTOOLCHAIN=local at go 1.24, so pin the last Go-1.24-safe release.
 GOVULNCHECK_VERSION ?= v1.1.4
+# cyclonedx-gomod @latest (v1.10.0) also needs Go >= 1.25; pin Go-1.24-safe.
+CYCLONEDX_GOMOD_VERSION ?= v1.9.0
 
 .PHONY: all clean install tools lint format test build vuln sbom security docs coverage-upload release ci
 
@@ -42,7 +44,7 @@ vuln:
 
 sbom:
 	mkdir -p $(DIST)
-	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest mod -json -output $(DIST)/sbom.cdx.json
+	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@$(CYCLONEDX_GOMOD_VERSION) mod -json -output $(DIST)/sbom.cdx.json
 
 security:  # advisory: reports findings but never blocks the build (CodeQL/osv are the blocking gates)
 	uvx semgrep scan --config auto --skip-unknown-extensions || true
