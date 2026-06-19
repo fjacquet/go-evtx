@@ -1,0 +1,31 @@
+site_name: go-evtx
+site_description: Pure Go library for reading and writing Windows Event Log (.evtx) files.
+repo_url: https://github.com/fjacquet/go-evtx
+repo_name: fjacquet/go-evtx
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - PRD: PRD.md
+  - Architecture Decisions:
+      - ADR-001 Pure Go / stdlib only: adr/ADR-001-pure-go-stdlib-only.md
+      - ADR-002 Layered API (WriteRaw / WriteRecord): adr/ADR-002-layered-api-writeraw-writerecord.md
+      - ADR-003 Write-on-close model: adr/ADR-003-write-on-close-model.md
+      - ADR-004 Open-handle incremental flush: adr/ADR-004-open-handle-incremental-flush.md

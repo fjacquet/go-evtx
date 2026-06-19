@@ -12,6 +12,11 @@
 *.out
 *.prof
 
+# Build / docs artifacts
+dist/
+site/
+*.sarif
+
 # Dependency directories
 vendor/
 
