@@ -29,3 +29,6 @@ nav:
       - ADR-002 Layered API (WriteRaw / WriteRecord): adr/ADR-002-layered-api-writeraw-writerecord.md
       - ADR-003 Write-on-close model: adr/ADR-003-write-on-close-model.md
       - ADR-004 Open-handle incremental flush: adr/ADR-004-open-handle-incremental-flush.md
+
+extra:
+  version: v0.5.1
