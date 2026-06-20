@@ -4,6 +4,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/fjacquet/go-evtx.svg)](https://pkg.go.dev/github.com/fjacquet/go-evtx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/fjacquet/go-evtx)](https://goreportcard.com/report/github.com/fjacquet/go-evtx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/fjacquet/go-evtx?sort=semver)](https://github.com/fjacquet/go-evtx/releases/latest)
+[![License](https://img.shields.io/github/license/fjacquet/go-evtx)](https://github.com/fjacquet/go-evtx/blob/HEAD/LICENSE)
 
 A pure Go library for reading and writing Windows Event Log (`.evtx`) binary files — no Windows, no CGO, no external dependencies.
 
