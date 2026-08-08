@@ -29,8 +29,9 @@ baseline the rest of the release compares against.**
 | 3 | `173fcf2` | 403 records, 21 chunks — byte-identical generator output to row 2 (Task 3 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 4 | `3c9e825` | 403 records, 21 chunks — byte-identical generator output to rows 2-3 (Task 6 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 5 | `ff33b7e` | 403 records, 21 chunks — byte-identical generator output to rows 2-4 (Task 7 Part A touched only the workflow) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — see "Task 7 Part A" below |
+| 6 | `62de633` | 403 records, 21 chunks, max ObjectName **31642** runes — NOT byte-identical to rows 2-5 (B2 shifts every record 4 bytes; see "Task 7 Part B" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to row 5 |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below).
 
 ## Row 2: the fixture
 
@@ -536,3 +537,90 @@ This does not identify *which* record-content defect is responsible — stage
 gives no finer-grained diagnostic than the exception above. It does establish
 *which half of the file* to keep looking in, which is the one fact this task
 set out to recover.
+
+## Task 7 Part B: B1/B2/B3 (fragment header, nested template header, chunk field)
+
+**Change:** three BinXML/chunk-header encoding divergences measured directly
+against `testdata/system.evtx` — B1 (`binxml.go`): fragment header minor
+version `0x00` → `0x01`; B2 (`binxml.go`): template bodies now emit their own
+nested 4-byte fragment header before the first element token; B3
+(`binformat.go`): chunk header `[120:124]` now carries the constant
+`0x00000001` every real chunk carries, written inside `patchChunkCRC` so it
+survives the function's zeroing step. `testdata/binxml-golden.bin`
+regenerated in the same commit (1807 → 1811 bytes). Full detail and the
+direct-against-`system.evtx` verification of each finding is in the Task 7
+implementation commit and report; not repeated here.
+
+Commit `62de633` ("fix: three BinXML/chunk-header divergences from a real
+Windows file (B1-B3)"), pushed to `feat/v0.7.0-format-correctness`.
+
+**Run selection, by head SHA:**
+
+```
+$ git rev-parse HEAD
+62de6330e2fba265dd803e30fea4b1b614f9f20b
+$ gh run view 31272639129 --json status,conclusion,headSha
+{"conclusion":"failure","headSha":"62de6330e2fba265dd803e30fea4b1b614f9f20b","status":"completed"}
+```
+
+**Fixture is NOT byte-identical to rows 2–5, exactly as the task brief
+predicted.** From the `generate` job log:
+
+```
+wrote artifacts/generated.evtx (403 records, max ObjectName 31642 runes)
+```
+
+31642 runes, not 31644: B2 adds 4 bytes to every record's encoded BinXML
+payload, so `cmd/gen-fixture`'s `largestAccepted()` probe (which binary-searches
+the real `maxRecordPayload` ceiling via the public API, deliberately not a
+hardcoded number) settled 2 runes lower. Per the brief, this makes a message
+or record-count comparison to rows 2–5 invalid on its own — only whether the
+file opens, and the stage-1/stage-2 split, stay interpretable across this
+boundary.
+
+python-evtx differential: FAIL, unchanged —
+
+```
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31272639129/job/93141122166>
+
+**`get-winevent` — verbatim:**
+
+```
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+ParentContainsErrorRecordException: D:\a\_temp\a7427665-afab-4590-b7db-f6fe894d10b9.ps1:27
+Line |
+  27 |          $rec = $reader.ReadEvent()
+     |          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31272639129/job/93141122173>
+
+### Reading this result, plainly, without adjusting anything to chase a greener outcome
+
+**Stage split and wording are identical to row 5**, despite the fixture not
+being byte-identical: stage 1 still opens cleanly, stage 2 still throws on
+the very first `ReadEvent()` with the identical exception type and message.
+B1, B2, and B3 did not change the observable `Get-WinEvent` outcome. This is
+one of the outcomes the task brief explicitly named as legitimate ("all
+three fixes changing nothing"), and it is reported as such.
+
+This does **not** mean B1–B3 were wrong — all three were verified directly
+against real chunks/templates in `testdata/system.evtx` (not inferred), and
+`TestFixture_TemplateTableBucketRule` (all 146 real templates) and the
+hash-table integration test still pass after B2's 4-byte offset shift,
+confirming the encoder's own internal consistency held. It means .NET's
+`EventLogReader` either does not check these three particular fields, or
+checks them but the true blocker lies elsewhere in the first record and
+these three fixes are necessary-but-not-sufficient. The stage-1/stage-2 split
+from Part A remains the standing, confirmed fact: the failure is still in
+decoding record 0, not in opening the file. What differs about that record's
+content and blocks the .NET reader is still open — F8 (missing `xmlns`) and
+the sparse `<System>` block (5 of the real file's 14 elements) are the
+next candidates the "Reading this result" section above already named,
+neither of which this task touched.
