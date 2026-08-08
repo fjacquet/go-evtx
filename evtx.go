@@ -649,6 +649,11 @@ func (w *Writer) flushChunkLocked() error {
 	copy(chunkBytes[0:], chunkHeader)
 	copy(chunkBytes[recordsStart:], records)
 
+	// Populate the two per-chunk hash tables from the nodes this chunk's
+	// records emitted. MUST precede patchChunkCRC — the chunk header checksum
+	// covers chunk[128:512], which is exactly the region written here.
+	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
+
 	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
 	patchChunkCRC(chunkBytes)
 
@@ -711,6 +716,14 @@ func (w *Writer) tickFlushLocked() error {
 	chunkBytes := make([]byte, evtxChunkSize)
 	copy(chunkBytes[0:], chunkHeader)
 	copy(chunkBytes[recordsStart:], records)
+
+	// Populate the two per-chunk hash tables from the nodes accumulated so
+	// far in this (still-open) chunk. MUST precede patchChunkCRC — the chunk
+	// header checksum covers chunk[128:512], which is exactly the region
+	// written here. Unlike flushChunkLocked, this does NOT reset
+	// w.chunkNames/w.chunkTemplates: the chunk is still in progress, exactly
+	// as w.records is left intact for further appends.
+	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
 
 	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
 	patchChunkCRC(chunkBytes)

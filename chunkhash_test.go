@@ -255,3 +255,40 @@ func TestFillHashTables_NoRefsLeavesTablesZero(t *testing.T) {
 		}
 	}
 }
+
+// TestFillHashTables_TerminatorIsActuallyWritten guards against a gap every
+// other test in this file leaves open: they all start from a chunk built
+// with make([]byte, evtxChunkSize), which is already zero, and the encoder
+// pre-zeros a fresh NameNode/TemplateNode's next_offset field before
+// fillHashTables ever runs. So a chain-terminator assertion of "next_offset
+// == 0" passes whether fillOneTable actually executed
+// `binary.LittleEndian.PutUint32(chunk[ref.offset:], 0)` or the line were
+// deleted entirely — nothing distinguishes "wrote 0" from "was already 0".
+//
+// That gap is inert today only because both flush paths in evtx.go allocate
+// chunkBytes fresh with make() on every call. It stops being inert the
+// moment anyone pools that 64 KiB allocation and reuses a buffer that still
+// carries stale, non-zero bytes from a previous chunk — at which point a
+// silently-deleted terminator write would leave a dangling pointer into the
+// old chunk's contents.
+//
+// This test pre-fills the node offset with non-zero bytes before calling
+// fillHashTables, so only a genuine write proves the terminator behavior.
+func TestFillHashTables_TerminatorIsActuallyWritten(t *testing.T) {
+	chunk := make([]byte, evtxChunkSize)
+	const off = 600
+	// Poison the node's next_offset field (and a little beyond, to catch an
+	// off-by-few in the write width) with a value that is emphatically not
+	// zero and could not be mistaken for an unrelated field's coincidental 0.
+	for i := off; i < off+8; i++ {
+		chunk[i] = 0xFF
+	}
+
+	h := sdbmHash("Provider")
+	fillHashTables(chunk, []chunkRef{{key: h, offset: off}}, nil)
+
+	if next := binary.LittleEndian.Uint32(chunk[off:]); next != 0 {
+		t.Errorf("tail node next_offset = 0x%08x, want 0 — fillHashTables did not "+
+			"write the chain terminator over the pre-existing non-zero bytes", next)
+	}
+}
