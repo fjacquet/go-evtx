@@ -33,8 +33,9 @@ baseline the rest of the release compares against.**
 | 7 | `4510103` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to row 6 (Task 7c changed two bytes' *value* per element, not any length; see "Task 7c" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-6 |
 | 8 | `9b8e974` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-7 (Task 7e changes 4 bytes' *value* per element — the data_size field — not any length; see "Task 7e" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-7 |
 | 9 | `7631f93` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-8 (Task 7f reorders and gives a real value to attr_list_size — a field-ordering fix, not a length change; see "Task 7f" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-8 |
+| 10 | `3b3f575` | 403 records, 22 chunks, max ObjectName **31573** runes — NOT byte-identical to rows 6-9 (F8 adds 139 bytes to `<Event>`'s own encoding — the xmlns attribute plus its attr_list_size — pushing the fixture from 21 to 22 chunks and settling `largestAccepted()` lower; see "Task 8" below) | **PASS: `OK: 403 records, all chunk checksums verify`** | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-9 |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below).
 
 **Parser version.** All seven rows above were produced by `python-evtx==0.8.1`
 — confirmed by grepping each run's job log for uv's `+ python-evtx==X.Y.Z`
@@ -1201,3 +1202,281 @@ adds a multi-attribute element. Not confirmed rigorously (only one
 element's two attributes checked) and not acted on — flagging it, in the
 same spirit Task 7e flagged this task's own defect, rather than letting it
 sit unrecorded.
+
+## Task 8: F8 (missing `xmlns` on the `<Event>` root)
+
+**The last candidate that is semantic, not structural.** F3 through F11 each
+corrected how bytes are laid out — a wrong value, a misplaced field, a
+missing header. F8 is different: without
+`xmlns="http://schemas.microsoft.com/win/2004/08/events/event"` on the root
+element, go-evtx's `<Event>` is in no XML namespace at all. A namespace-aware
+consumer that queries with a namespaced XPath — PowerShell's `.ToXml()`,
+.NET's `EventLogRecord`, python-evtx, Event Viewer's own XML view — finds no
+elements to match, regardless of whether the underlying bytes decode
+correctly. `scripts/verify_python_evtx.py` queries exactly this way —
+`ns = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}` then
+`root.iterfind(".//e:Data", ns)` — which is precisely why every row above
+shows `ObjectName 0/403`: not because the fields weren't there, but because
+nothing in the document matched the namespaced query.
+
+**Measured directly against `testdata/system.evtx`, not assumed.** The
+brief's premise — 45 occurrences of the schema URI, once per template — was
+independently reconfirmed by scanning the fixture's UTF-16LE encoding
+directly: **45** occurrences of the URI, first at absolute file offset 4738.
+Working outward from there (chunk 0's first `<Event>`, at chunk-relative
+offset 578, absolute 4674) to decode the whole attribute byte-for-byte:
+
+| Field | Absolute offset | Bytes | Decoded |
+|---|---|---|---|
+| `<Event>` token | 4674 | `41` | `OpenElementAttrs` |
+| `dependency_id` | 4675 | `ff ff` | not set |
+| `data_size` | 4677 | `5d 05 00 00` | 1373 |
+| `name_offset` | 4681 | `4d 02 00 00` | 589 (chunk-relative) = `token_pos+11` |
+| NameNode | 4685 | `00000000 bc0f 0500 "Event" 0000` | hash `0x0cba`, "Event" |
+| `attr_list_size` | 4705 | `87 00 00 00` | **135** |
+| Attribute token | 4709 | `06` | `AttributeToken` |
+| `name_offset` | 4710 | `6a 02 00 00` | 618 (chunk-relative) — points at 4714, immediately following |
+| NameNode | 4714 | `00000000 bc0f 0500 "xmlns" 0000` | hash `0x0fbc`, "xmlns" |
+| ValueText token | 4734 | `05` | literal value |
+| value type | 4735 | `01` | STRING |
+| `char_count` | 4736 | `35 00` | **53** (no null terminator) |
+| chars | 4738 | 106 bytes UTF-16LE | `http://schemas.microsoft.com/win/2004/08/events/event` |
+| next byte | 4844 | `02` | `CloseStartElementTag` — confirms `attr_list_size` |
+
+Summed, the attribute's own bytes (`06` + `name_offset`(4) + NameNode(20) +
+ValueText(1+1+2+106)) total exactly **135** — the same number the file
+stores in `attr_list_size` — and `attr_region_start(4709) + 135 = 4844`
+lands exactly on the `CloseStartElementTag` byte. Three independent facts
+(the attribute's own byte sum, the stored `attr_list_size`, and the
+structural close-tag position) agree, which is what "measured, not assumed"
+means in this series: this is not an inference from the spec, it is arithmetic
+against the real file's own bytes, done before any code changed.
+
+Two things this table confirms beyond the brief's own two traps:
+
+- **`ValueText` (token `0x05`, type `0x01`) carries no null terminator** —
+  53 UTF-16LE code units, exactly `len("http://schemas.microsoft.com/win/2004/08/events/event")`,
+  with nothing after the last character. This is the opposite convention
+  from `NameNode` and substitution string values, both of which do carry a
+  trailing `00 00`. Missing this would have produced a payload 2 bytes too
+  long and an `attr_list_size` off by 2.
+- **`xmlns`'s own `NameNode` is inline**, immediately after the Attribute
+  token's 4-byte `name_offset` field — the same "self-referencing" layout
+  `writeAttributeSub` already uses, not a shared/back-referenced entry in the
+  chunk's common-string table.
+
+**Implementation: one new writer, no substitution slot.** `binxml.go` gained
+`writeAttributeLiteral` (Attribute token + inline NameNode + `writeValueText`)
+alongside the existing `writeAttributeSub` (Attribute token + inline NameNode
++ `NormalSubstitution`) — same shape, different tail, so the two attribute
+kinds share `writeNameNode` and nothing else needs to change. `xmlns`'s value
+is fixed in every record, so it is written inline rather than occupying a
+30th substitution slot, which would have shifted the index map `CLAUDE.md`
+documents and every index `binxml_reader.go` reads by. `<Event>` moves from
+`pushOpenElement(..., false, ...)` (token `0x01`) to `pushOpenElementAttrs`
+(token `0x41`), gaining an `attr_list_size` computed by `closeAttrList` —
+the exact mechanism Task 7f (F11) built for `<Provider>`/`<TimeCreated>`/
+`<Data>`, reused rather than duplicated. `attrListPos`'s declaration moved
+up one block so `<Event>` could use it too; no second back-patch path was
+added.
+
+**Knock-on, found and fixed in this task: `dependency_test.go`'s byte
+scanner had a latent false-positive class.** The scanner treats any
+`0x01`/`0x41` byte followed by a "plausible" (small) 4-byte field as an
+`OpenStartElement` header. `<Event>`'s new 135 bytes shift every later
+offset in the payload; after the shift, the `<Provider>` element's own
+`Name` attribute happened to get `name_offset = 0x0601` — low byte `0x01` —
+immediately followed by its `NameNode`'s `next_offset` field, which
+`writeNameNode` always writes as `0`, i.e. a "plausible" zero-size element
+span. `go test -race ./... -count=1` caught this immediately (one `Errorf`,
+`found` still correctly counting all 20 real elements). Rather than patch
+around this one collision, the scanner now recognizes `0x06` (`Attribute`)
+tokens and skips their structure — but only after confirming the field
+really is a `name_offset`, by checking it holds the *exact* absolute address
+its `NameNode` sits at (`base+i+5`). An unguarded byte-value check alone is
+not enough: `0x06` is a common byte in ordinary text and substitution value
+data (an early version of the fix, matching on the byte value alone,
+mis-skipped past two real elements — `found` dropped to 18 instead of 20 —
+because it occasionally matched inside unrelated data and computed a bogus
+skip length from a decoded "char_count" that happened to be large). The
+exact-address check eliminates that: 15 genuine Attribute tokens detected
+(14 pre-existing + `xmlns`), zero false positives, `found` back to the
+correct 20.
+
+**Reader: confirmed unaffected, not assumed.** `binxml_reader.go` decodes
+`data_length` from the fixed `TemplateNode` header offset (`payload[34:38]`)
+and jumps straight to the substitution array — it never walks element or
+attribute tokens, so an attribute added to the template body changes nothing
+about how records are read; `data_length` simply reflects the longer body
+automatically. Confirmed by running the round-trip tests
+(`TestReadRecord_RoundTrip`, `TestReadRecord_MultipleRecords`) rather than
+inferring it from the code, per the brief's "confirm rather than assume"
+instruction.
+
+**Node-offset re-verification, run deliberately** (the hash-table
+integration test decodes bytes at every reported `NameNode` offset and
+recomputes the hash, so a wrong offset — 4 bytes off, landing mid-`NameNode`
+— produces a hash mismatch, not merely a wrong string):
+
+```text
+=== RUN   TestBuildBinXML_ReportsNameOffsets
+--- PASS: TestBuildBinXML_ReportsNameOffsets (0.00s)
+=== RUN   TestBuildBinXML_TemplateSelfPointer
+--- PASS: TestBuildBinXML_TemplateSelfPointer (0.00s)
+=== RUN   TestWrittenFile_ChunkTablesArePopulated
+    hashtable_integration_test.go:66: 12 names reachable through the table
+--- PASS: TestWrittenFile_ChunkTablesArePopulated (0.02s)
+=== RUN   TestWrittenFile_ChunkHeaderCRCCoversTables
+--- PASS: TestWrittenFile_ChunkHeaderCRCCoversTables (0.01s)
+=== RUN   TestWriteOpenElement_AttrListSizeAfterNameNode
+    attrlist_test.go:119: 15 attribute-bearing elements carry a correctly-placed, non-zero attr_list_size
+--- PASS: TestWriteOpenElement_AttrListSizeAfterNameNode (0.00s)
+=== RUN   TestWriteOpenElement_DependencyIDIsUnset
+    dependency_test.go:110: 20 OpenStartElement tokens carry the 0xffff sentinel
+--- PASS: TestWriteOpenElement_DependencyIDIsUnset (0.00s)
+```
+
+12 reachable names, not 11 (Task 7f's count): `xmlns` is the one new unique
+name added to the chunk's string table (`Event`, `System`, `Provider`,
+`Name`, `EventID`, `Level`, `TimeCreated`, `SystemTime`, `Computer`,
+`EventData`, `Data`, `xmlns` = 12); 15 attribute-bearing elements, not 14
+(the pre-existing 14 plus `<Event>` itself).
+
+**Golden file: length changed, exactly as predicted — unlike the last three
+tasks.** `testdata/binxml-golden.bin` went from 1811 to **1950 bytes**, +139:
+the attribute's own 135 bytes (`06` + `name_offset`(4) + NameNode(20) +
+ValueText(1+1+2+106)) plus the 4 new bytes of `<Event>`'s own
+`attr_list_size` field (which did not exist at all when `<Event>` had no
+attributes). Captured via the documented procedure — a throwaway
+`TestCaptureGolden` (written, run once to overwrite
+`testdata/binxml-golden.bin` via `goldenFields()`'s frozen timestamp, then
+removed; never committed).
+
+**Verification, all four gates:**
+
+```console
+$ go build ./...
+$ GOOS=windows go build ./...
+$ go test -race ./... -count=1
+ok  	github.com/fjacquet/go-evtx	15.141s
+?   	github.com/fjacquet/go-evtx/cmd/gen-fixture	[no test files]
+$ go vet ./...
+$ golangci-lint run
+0 issues.
+```
+
+Commit `3b3f575` ("fix: declare the event schema namespace on the Event root
+(F8)"), pushed to `feat/v0.7.0-format-correctness`.
+
+**Run selection, by head SHA, not recency:**
+
+```console
+$ git rev-parse HEAD
+3b3f575449baabe1032c67518c76399039c4608d
+$ gh api repos/fjacquet/go-evtx/actions/runs/31277415872 --jq '.head_sha'
+3b3f575449baabe1032c67518c76399039c4608d
+$ gh api repos/fjacquet/go-evtx/actions/runs/31277416044 --jq '.head_sha'
+3b3f575449baabe1032c67518c76399039c4608d
+```
+
+Both `Format Verify` (`31277415872`) and the standard `CI` workflow
+(`31277416044`, build/test/lint on push) confirmed at this exact commit.
+`CI` completed with `success` (`ci / ci` and `security / security` both
+succeeded). `Format Verify`'s overall conclusion is `failure` — but that
+conclusion is the `get-winevent` job alone; its other two jobs
+(`generate`, `python-evtx-differential`) both succeeded, per-job:
+
+```console
+$ gh run view 31277415872 --json jobs --jq '.jobs[] | {name, conclusion}'
+{"name":"generate","conclusion":"success"}
+{"name":"python-evtx-differential","conclusion":"success"}
+{"name":"get-winevent","conclusion":"failure"}
+```
+
+**Fixture is NOT byte-identical to rows 6-9**, exactly as this section's
+change predicts. From the `generate` job log:
+
+```text
+wrote artifacts/generated.evtx (403 records, max ObjectName 31573 runes)
+...
+go_evtx_chunk_flushed path=artifacts/generated.evtx chunk=21 total_chunks=22
+```
+
+31573 runes (down from 31642) and **22 chunks (up from 21)**: F8 adds 139
+bytes to every record's encoded BinXML payload, so `largestAccepted()`'s
+binary search against the real writer settles on a shorter maximum
+`ObjectName`, and the two chunk-fill boundary records (each already sized to
+~55% of the *old* maximum) now push one additional chunk boundary. Per the
+brief and every prior task in this series, this makes any record-count or
+message comparison to rows 2-9 invalid on its own — only the open/read stage
+split, and now the python-evtx result, stay interpretable across this
+boundary.
+
+Job log (`generate`):
+<https://github.com/fjacquet/go-evtx/actions/runs/31277415872/job/93153166636>
+
+### python-evtx differential: PASS — the breakthrough this task's brief named
+
+```text
+OK: 403 records, all chunk checksums verify
+```
+
+**The `ObjectName` count that has been `got 0, want 403` since the very
+first baseline (row 1, before this release even started counting rows) is
+now correct.** `scripts/verify_python_evtx.py` queries
+`root.iterfind(".//e:Data", {"e": "http://schemas.microsoft.com/win/2004/08/events/event"})`
+— a namespaced XPath that matched nothing against every prior row's
+namespace-less `<Event>`, regardless of whether the underlying `Data`
+elements and their content were otherwise correct (they were: F1-F11 had
+already fixed every structural divergence this differential could see,
+which is exactly why it had been silently masking a defect the checker
+itself could not observe until its own query started matching). Declaring
+`xmlns` did not change a single byte of `<Data>`'s own encoding — it changed
+whether `ET.fromstring`'s namespace-aware `iterfind` can see `<Data>` at
+all.
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31277415872/job/93153230092>
+
+**`get-winevent` — verbatim:**
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31277415872/job/93153230098>
+
+### Reading this result, plainly, without adjusting anything to chase a greener outcome
+
+**Two numbers, and they move in opposite directions. Both are reported in
+full, neither softened.**
+
+**`STAGE2 READ`: still zero.** Stage 1 still opens cleanly; stage 2 still
+throws on the very first `ReadEvent()`, identical exception type, identical
+wording, identical record count (0), as every row since row 5. F8 was, by
+this task's own framing, the strongest remaining *a priori* case for a hard
+`.NET` `EventLogReader` abort — the one candidate that changes what the
+document *is* rather than how its bytes are laid out — and it still did not
+move `STAGE2 READ` off zero. Twelve single-defect or single-structural tasks
+in this release (F1/F3-F11, B1-B3, F8) have now each independently corrected
+a real, measured divergence from the real file, and none has changed
+`Get-WinEvent`'s record-1 rejection.
+
+**python-evtx `ObjectName`: `got 0, want 403` → `PASS`, unchanged since the
+very first baseline until this exact task.** This is not a null result and
+is not presented as one: it is a real, reportable outcome, predicted by the
+brief before the fix was written, and confirmed against an independent
+parser implementation (not go-evtx reading its own output). It proves the
+namespace declaration is now correct and that a real, independent,
+namespace-aware XML consumer can extract field values from go-evtx's output
+for the first time in this release.
+
+**Together, these two results say something Windows-only or python-evtx-only
+measurements could not say alone: whatever blocks `Get-WinEvent` is not the
+missing namespace, and is not upstream of `<EventData>`'s own content
+either** — python-evtx parses the full document, including every `<Data>`
+element deep inside `<EventData>`, without error. The defect `.NET`'s
+`EventLogReader` throws on remains open. The brief's own remaining named
+candidates — the sparse `<System>` block (5 of the real file's 14 elements)
+and S5 (go-evtx never emits `OptionalSubstitution`) — are untouched by this
+task and, after F8's elimination, are what remain.
