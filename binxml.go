@@ -7,7 +7,9 @@
 //	[FragmentHeader: 4B]
 //	[TemplateInstanceNode: 10B]
 //	[TemplateNode header: 24B]
-//	[Template body: variable — XML structure with NormalSubstitution tokens]
+//	[Template body: nested FragmentHeader (4B) + XML structure with
+//	 NormalSubstitution tokens — verified against a real template in
+//	 testdata/system.evtx]
 //	[Substitution array: count + value_specs + value_data]
 //
 // Template structure per MS-EVEN6 / libevtx:
@@ -123,9 +125,13 @@ func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32
 	out := &bytes.Buffer{}
 
 	// 1. Fragment header (4 bytes).
+	//
+	// B1: minor version is 0x01, not 0x00. Verified against testdata/system.evtx:
+	// the byte sequence 0f 01 01 00 (major 1, minor 1) occurs 3312 times, the
+	// 0x00-minor form only 7 (coincidental byte alignments, not real headers).
 	out.WriteByte(binXMLFragmentHeader)
 	out.WriteByte(0x01) // major version
-	out.WriteByte(0x00) // minor version
+	out.WriteByte(0x01) // minor version
 	out.WriteByte(0x00) // flags
 
 	// 2. TemplateInstanceNode (10 bytes).
@@ -174,6 +180,19 @@ func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32
 // emitted along the way, in emission order.
 func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b := &bytes.Buffer{}
+
+	// B2: every real template body opens with its own nested fragment header,
+	// before the first element token — verified against testdata/system.evtx
+	// (the template at chunk offset 24508 has data_length 52 and its body at
+	// 24532 starts "0f 01 01 00 01 ff"). This shifts every offset inside the
+	// body by 4 bytes; writeOpenElement/writeAttributeSub/writeNameNode below
+	// compute offsets as baseOffset + b.Len(), so they follow automatically
+	// (confirmed by TestFixture_TemplateTableBucketRule and the hash-table
+	// integration test, which walk the real and written tables respectively).
+	b.WriteByte(binXMLFragmentHeader)
+	b.WriteByte(0x01) // major version
+	b.WriteByte(0x01) // minor version
+	b.WriteByte(0x00) // flags
 
 	// <Event>
 	writeOpenElement(b, "Event", false, baseOffset, names)

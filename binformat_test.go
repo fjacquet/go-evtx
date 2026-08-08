@@ -230,6 +230,11 @@ func TestPatchChunkCRC(t *testing.T) {
 		t.Error("patchChunkCRC left [124:128] all zeros")
 	}
 
+	// B3: [120:124] must carry the constant observed in every real chunk.
+	if got := binary.LittleEndian.Uint32(chunk[120:]); got != evtxChunkUnknownField120 {
+		t.Errorf("chunk[120:124] = %d, want %d", got, evtxChunkUnknownField120)
+	}
+
 	// Recompute independently and compare
 	h := crc32.New(crc32.IEEETable)
 	// Note: chunk[120:128] is zeroed by patchChunkCRC before computing,

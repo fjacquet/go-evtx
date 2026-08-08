@@ -119,17 +119,28 @@ func buildFileHeader(chunkCount uint16, nextRecordID uint64, flags uint32) []byt
 	return buf
 }
 
-// patchChunkCRC computes and writes the chunk header CRC32.
+// evtxChunkUnknownField120 (B3) is a constant observed at chunk header
+// [120:124] in every one of the nine chunks in testdata/system.evtx
+// (0x00000001), which go-evtx never wrote. libyal's spec labels the field
+// "Unknown", so this is a lower-confidence, parity-only fix: included because
+// the real file both carries it and has a verifying header CRC, but a null
+// result here would not be surprising the way B1/B2 would be.
+const evtxChunkUnknownField120 = uint32(1)
+
+// patchChunkCRC computes and writes the chunk header CRC32, and the
+// evtxChunkUnknownField120 constant alongside it.
 //
-// Per EVTX spec the HeaderCRC32 covers bytes [0:120] and [128:512],
-// skipping the Flags+CRC32 region [120:128].
+// Per EVTX spec the HeaderCRC32 covers bytes [0:120] and [128:512], skipping
+// [120:128] — so [120:124] can be set to any value here without affecting
+// the checksum. It must be set HERE, not by an earlier caller: this function
+// used to zero the whole [120:128] region before computing, which would
+// destroy a value written before the call. Ordering it here instead of at
+// each flush call site keeps that trap from being reintroduced.
 //
 // chunk must be at least 512 bytes.
 func patchChunkCRC(chunk []byte) {
-	// Zero out the flags and CRC field before computing.
-	for i := 120; i < 128; i++ {
-		chunk[i] = 0
-	}
+	binary.LittleEndian.PutUint32(chunk[120:], evtxChunkUnknownField120) // [120:124]: B3
+	binary.LittleEndian.PutUint32(chunk[124:], 0)                       // [124:128]: CRC32 placeholder, zero during calculation
 	h := crc32.New(crc32.IEEETable)
 	h.Write(chunk[0:120])
 	h.Write(chunk[128:512])
