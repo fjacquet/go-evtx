@@ -32,8 +32,9 @@ baseline the rest of the release compares against.**
 | 6 | `62de633` | 403 records, 21 chunks, max ObjectName **31642** runes — NOT byte-identical to rows 2-5 (B2 shifts every record 4 bytes; see "Task 7 Part B" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to row 5 |
 | 7 | `4510103` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to row 6 (Task 7c changed two bytes' *value* per element, not any length; see "Task 7c" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-6 |
 | 8 | `9b8e974` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-7 (Task 7e changes 4 bytes' *value* per element — the data_size field — not any length; see "Task 7e" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-7 |
+| 9 | `7631f93` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-8 (Task 7f reorders and gives a real value to attr_list_size — a field-ordering fix, not a length change; see "Task 7f" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-8 |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below).
 
 **Parser version.** All seven rows above were produced by `python-evtx==0.8.1`
 — confirmed by grepping each run's job log for uv's `+ python-evtx==X.Y.Z`
@@ -953,3 +954,250 @@ and blocks the .NET reader remains open — F8 (missing `xmlns` on `<Event>`),
 the sparse `<System>` block (5 of the real file's 14 elements), and S5
 (go-evtx never emits `OptionalSubstitution`, per the tokendiff report) are
 the remaining named candidates, none of which this task touched.
+
+## Task 7f: F11 (`attr_list_size` misplaced, and zero)
+
+**A different class of defect than every task before it.** F3 through F10
+were each a wrong *value* in a correctly-placed field — a parser could read
+past one and keep going. F11 is a field-ordering defect: `attr_list_size`
+sat before the inline `NameNode` in go-evtx's output and after it in real
+files. A parser reading go-evtx's stream took the NameNode's `next_offset`
+(always 0) as `attr_list_size`, concluded the element had no attributes, and
+then looked for the next token at the NameNode's hash bytes — a hard
+desynchronisation on the first element of every record, immediately, not a
+value it could shrug off. Task 7e had already found and flagged this exact
+divergence as out-of-scope while building its `data_size`-blind parser; this
+task picks it up.
+
+**Step 1: measured fresh, before any code changed.** A throwaway probe
+(`scratchpad/attrlist_probe.py`, this session's scratchpad, not committed)
+parsed chunk 0 of `testdata/system.evtx` directly (no `python-evtx`
+dependency) and, for each of the three `0x41` elements the brief named,
+decoded `name_offset`, the NameNode it points at, and the four bytes
+immediately following the NameNode's end:
+
+| Element | token pos | `name_offset` | `token+11` | NameNode ends | bytes there | `attr_list_size` |
+|---|---|---|---|---|---|---|
+| `<Event>` | 578 | 589 | 589 (match) | 609 | `87 00 00 00 06 6a 02 00` | 135 |
+| `<Provider>` | 783 | 794 | 794 (match) | 820 | `b6 00 00 00 46 3d 03 00` | 182 |
+| `<TimeCreated>` | 1286 | 1297 | 1297 (match) | 1329 | `27 00 00 00 06 3a 05 00` | 39 |
+
+`name_offset == token_pos + 11` held for all three (the brief's claim,
+independently reconfirmed), and a NameNode decoded correctly at each. This
+matches the fixed 11-byte header (`token+dep_id+data_size+name_offset`) — the
+**same** size the without-attributes form already used; real Windows does
+not grow the fixed header for the with-attributes case, it moves
+`attr_list_size` out of it instead.
+
+**The value rule, derived by arithmetic, not guessed.** The brief asked what
+`attr_list_size` actually counts. Using Task 7e's already-confirmed
+`data_size` formula (`element_start + 7 + data_size` = structural end) as an
+independent cross-check:
+
+| Element | `attr_region_start` (NameNode end + 4) | `attr_list_size` | `attr_region_start + attr_list_size` | byte there | structural end (`start+7+data_size`) |
+|---|---|---|---|---|---|
+| `<Event>` | 613 | 135 | 748 | `0x02` (CloseStartElementTag — `<Event>` has children) | 1958 |
+| `<Provider>` | 824 | 182 | 1006 | `0x03` (CloseEmptyElementTag — self-closing) | 1007 |
+| `<TimeCreated>` | 1333 | 39 | 1372 | `0x03` (CloseEmptyElementTag — self-closing) | 1373 |
+
+In every case, `attr_region_start + attr_list_size` landed **exactly** on
+the `Close(Start|Empty)ElementTag` byte that follows the attribute list —
+not on `data_size`'s structural end (`<Event>`'s 748 vs. 1958 makes the
+distinction unambiguous: `attr_list_size` is emphatically not a second copy
+of `data_size`). **`attr_list_size` counts only the attribute list itself —
+from immediately after its own 4 bytes up to, but not including, the
+Close(Start|Empty)ElementTag** — not the element's children, not its own
+`EndElementTag`; those are already covered by `data_size`, which spans the
+whole element. The file did not contradict the brief on either the position
+or the "size disagreeing with its content" framing of the value; both were
+confirmed exactly, with zero exceptions across the three elements measured.
+
+**Step 2: the failing test**, `TestWriteOpenElement_AttrListSizeAfterNameNode`
+(new file, `attrlist_test.go`), asserted `name_offset == tokenPos+11`, a
+NameNode decoding there, and a non-zero `attr_list_size` landing on a
+`CloseStartElementTag` (`0x02` — go-evtx never emits the self-closing
+`0x03` form; every element it writes closes via `0x02` and a later, separate
+`EndElementTag`). Run against the pre-fix encoder, all 14 attribute-bearing
+elements failed on the first assertion:
+
+```text
+offset 108: name_offset (payload-relative) = 123, want 119 (token+11)
+... (14 total, one per attrs element)
+no OpenElementAttrs (0x41) tokens examined — the scan is wrong
+```
+
+**Step 3: reorder, and compute the size.** `writeOpenElement` now writes the
+NameNode immediately after `name_offset` (`headerSize` is `11` for both
+branches — the `if hasAttrs { headerSize = 15 }` branch is gone, since the
+NameNode sits at the same fixed offset either way) and, only for
+attribute-bearing elements, reserves `attr_list_size`'s 4 bytes right after
+the NameNode, before returning to the caller to write the attributes.
+
+**Back-patching reused, not reinvented**, per the brief's explicit
+instruction. `dataSizePatch` (Task 7e) is generalized to `fieldPatch`: `pos`
+now means the exact buffer offset of the 4-byte field to patch, not a token
+position with an implicit `+3` applied at write time — `writeEndElement`
+now stores `pos+3` itself (the `data_size` field's own offset) instead of
+the bare token position, and the single apply loop at the end of
+`buildTemplateBody` writes `buf[p.pos:]` uniformly for both fields, with no
+per-field-type branching. A new `closeAttrList` helper queues an
+`attr_list_size` patch once the caller has written that element's
+attributes but before writing the `CloseElement` byte — `pushOpenElement`
+gained a sibling, `pushOpenElementAttrs`, which is the only new call-site
+shape needed (3 source lines touched: `<Provider>`, `<TimeCreated>`, and the
+12-iteration `<Data>` loop); the 6 attribute-free elements (`<Event>`,
+`<System>`, `<EventID>`, `<Level>`, `<Computer>`, `<EventData>`) are
+untouched, still calling the original `pushOpenElement`.
+
+**Step 4: node offsets re-verified, run deliberately.** Moving the NameNode
+four bytes earlier for attribute-bearing elements changes every offset
+`writeNameNode` reports for those 14 elements (it records
+`binXMLBase + b.Len()` at call time). Ran, not merely assumed unaffected:
+
+```text
+=== RUN   TestBuildBinXML_ReportsNameOffsets
+--- PASS: TestBuildBinXML_ReportsNameOffsets (0.00s)
+=== RUN   TestBuildBinXML_TemplateSelfPointer
+--- PASS: TestBuildBinXML_TemplateSelfPointer (0.00s)
+=== RUN   TestWrittenFile_ChunkTablesArePopulated
+    hashtable_integration_test.go:66: 11 names reachable through the table
+--- PASS: TestWrittenFile_ChunkTablesArePopulated (0.02s)
+=== RUN   TestWrittenFile_ChunkHeaderCRCCoversTables
+--- PASS: TestWrittenFile_ChunkHeaderCRCCoversTables (0.01s)
+```
+
+`TestWrittenFile_ChunkTablesArePopulated` decodes bytes at each reported
+bucket offset and recomputes `sdbmHash` on the decoded name, so a wrong
+offset — 4 bytes off, landing mid-NameNode instead of at its start — would
+have produced a hash mismatch, not merely a wrong string. It passed clean.
+
+**Knock-on: `dependency_test.go`'s skip distance.** Its byte-scan skip past a
+recognized element's own header, added in Task 7e to dodge a false-positive
+inside `data_size`'s own bytes, still hardcoded the old `11`/`15` split by
+`hasAttrs`. The 15-byte branch is now wrong (it would skip 4 bytes into the
+NameNode instead of stopping exactly at its start) even though the test
+happened to still pass — the NameNode's leading `next_offset=0` bytes did
+not coincidentally trigger the guard it was protecting against. Fixed to a
+flat `11` for both branches, matching `writeOpenElement`, per the brief's
+"check every use" instruction; confirmed with `go test -race ./... -count=1`
+afterward.
+
+**Golden file: length unchanged, exactly as predicted.**
+`testdata/binxml-golden.bin` was 1811 bytes before this change and 1811
+bytes after — the same fields, reordered and correctly valued, no bytes
+added or removed. Captured via the frozen-timestamp procedure
+(`goldenFields()`, a throwaway `TestCaptureGolden` removed after use).
+
+**Verification, all four gates:**
+
+```console
+$ go build ./...
+$ GOOS=windows go build ./...
+$ go test -race ./... -count=1
+ok  	github.com/fjacquet/go-evtx	14.926s
+?   	github.com/fjacquet/go-evtx/cmd/gen-fixture	[no test files]
+$ golangci-lint run
+golangci-lint: No issues found
+```
+
+```text
+=== RUN   TestWriteOpenElement_AttrListSizeAfterNameNode
+    attrlist_test.go:119: 14 attribute-bearing elements carry a correctly-placed, non-zero attr_list_size
+--- PASS: TestWriteOpenElement_AttrListSizeAfterNameNode (0.00s)
+```
+
+Commit `7631f93` ("fix: move attr_list_size after the inline NameNode, give
+it a real value (F11)"), pushed to `feat/v0.7.0-format-correctness`.
+
+**Run selection, by head SHA, not recency:**
+
+```console
+$ git rev-parse HEAD
+7631f93cd7c9e81c0f3d02fd4c92f0c6a518f92e
+$ gh api repos/fjacquet/go-evtx/actions/runs/31276703107 --jq '.head_sha'
+7631f93cd7c9e81c0f3d02fd4c92f0c6a518f92e
+$ gh api repos/fjacquet/go-evtx/actions/runs/31276703263 --jq '.head_sha'
+7631f93cd7c9e81c0f3d02fd4c92f0c6a518f92e
+```
+
+Both `Format Verify` (`31276703107`) and the standard `CI` workflow
+(`31276703263`, build/test/lint on push) confirmed at this exact commit.
+`CI` completed with `success`.
+
+**Fixture identity, confirmed from the `generate` job log:**
+
+```text
+wrote artifacts/generated.evtx (403 records, max ObjectName 31642 runes)
+```
+
+**Byte-identical to rows 6-8** (`31642` runes, same 403 records, same 21
+chunks) — exactly as predicted, since this task reorders and revalues 4
+bytes per attribute-bearing element without changing any element's total
+length, so `cmd/gen-fixture`'s `largestAccepted()` probe settles on the
+identical ceiling it found for rows 6-8.
+
+Job log (`generate`):
+<https://github.com/fjacquet/go-evtx/actions/runs/31276703107/job/93151332956>
+
+python-evtx differential: FAIL, unchanged —
+
+```text
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Expected: `python-evtx`'s own decoder walks the token stream by following
+`data_size`/offsets structurally in its own way and was never shown to be
+sensitive to `attr_list_size`'s position either.
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31276703107/job/93151400077>
+
+**`get-winevent` — verbatim, the load-bearing result of this task:**
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31276703107/job/93151400094>
+
+### Reading this result, plainly, without adjusting anything to chase a greener outcome
+
+**STAGE2 READ: FAILED after 0 records — still zero. No breakthrough.** Stage
+1 still opens cleanly; stage 2 still throws on the very first `ReadEvent()`,
+identical exception type, identical wording, identical record count (0), as
+rows 5-8, against a fixture byte-identical to rows 6-8.
+
+This is reported as a **null result, without softening**, same as every task
+before it in this release. F11 was, by the framing in this task's own brief,
+qualitatively different from F3-F10: not a wrong value a tolerant parser
+might skip past, but a field-ordering defect that desynchronises the token
+stream on the very first element of every record — the strongest
+*a priori* case yet for a hard, immediate `.NET` `EventLogReader` abort.
+Measured directly against the real file (not inferred), fixed exactly as
+measured, confirmed not to move any downstream offset incorrectly (Step 4),
+and it still did not change `STAGE2 READ` at all. Nine single-field or
+single-structural tasks in this release have now each independently changed
+a real, measured divergence from the real file, and none has moved
+`STAGE2 READ` off zero. What differs about record 0's content and blocks the
+.NET reader remains open — F8 (missing `xmlns` on `<Event>`), the sparse
+`<System>` block (5 of the real file's 14 elements), and S5 (go-evtx never
+emits `OptionalSubstitution`) are the remaining named candidates, none
+touched by this task.
+
+**New, out-of-scope finding, flagged for a future task.** While measuring
+`attr_list_size`'s value (the second table above), the `<Provider>`
+element's attribute token byte was found to be `0x46`, not the `0x06`
+go-evtx always writes — while the *second* attribute in the same element
+(`<Provider>`'s `Guid`) is `0x06`, matching go-evtx exactly. This looks like
+the same "high bit signals more follows" pattern already confirmed for
+`OpenStartElement` (`0x01` → `0x41` when attributes are present): `0x46`
+plausibly marks a non-last attribute in a multi-attribute list, `0x06` the
+last one. go-evtx's own template never writes more than one attribute per
+element, so every `writeAttributeSub` call it makes is, structurally, always
+the "last" one — meaning `0x06` may already be correct for every attribute
+go-evtx currently emits, and this would only matter if a future template
+adds a multi-attribute element. Not confirmed rigorously (only one
+element's two attributes checked) and not acted on — flagging it, in the
+same spirit Task 7e flagged this task's own defect, rather than letting it
+sit unrecorded.
