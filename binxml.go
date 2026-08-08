@@ -347,8 +347,16 @@ func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase ui
 	} else {
 		b.WriteByte(binXMLOpenElement) // 0x01
 	}
-	writeUint16LE(b, 0) // dependency_id
-	writeUint32LE(b, 0) // data_size (unused by python-evtx)
+	// 0xffff is the "not set" sentinel (libyal EVTX docs: "-1 (0xffff) => not
+	// set"). Writing 0 here does not mean "no dependency" — it is a valid
+	// identifier referring to template value 0, which is a claim we have no
+	// basis to make about every element. Confirmed against testdata/system.evtx:
+	// unconditional elements (<Provider>, <TimeCreated>, <Correlation>, ...)
+	// all carry 0xffff; only elements that wrap an OptionalSubstitution (0x0E)
+	// token carry that substitution's own index instead. go-evtx never emits
+	// OptionalSubstitution, so every element it writes is unconditional.
+	writeUint16LE(b, 0xffff) // dependency_id: not set
+	writeUint32LE(b, 0)      // data_size (unused by python-evtx)
 
 	headerSize := uint32(11) // token(1) + dep_id(2) + data_size(4) + name_offset(4)
 	if hasAttrs {
