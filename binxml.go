@@ -184,13 +184,15 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	// dataSizeStack tracks the chunk-relative token position of every
 	// OpenStartElementTag whose EndElementTag has not yet been written, in
 	// nesting order (innermost last) — pushed by writeOpenElement, popped by
-	// writeEndElement. dataSizePatches accumulates one (pos, size) pair per
-	// popped element; bytes.Buffer offers no in-place mutation of bytes
-	// already written, so the patches are applied to the finished []byte
-	// once, just before this function returns, rather than as each element
-	// closes.
+	// writeEndElement. patches accumulates one (pos, size) back-patch per
+	// completed field — one per popped OpenStartElementTag (data_size) plus
+	// one per closed attribute list (attr_list_size, Task 7f/F11) — where pos
+	// is the exact buffer offset of the 4-byte field itself. bytes.Buffer
+	// offers no in-place mutation of bytes already written, so the patches
+	// are applied to the finished []byte once, just before this function
+	// returns, rather than as each field becomes known.
 	var dataSizeStack []uint32
-	var dataSizePatches []dataSizePatch
+	var patches []fieldPatch
 
 	// B2: every real template body opens with its own nested fragment header,
 	// before the first element token — verified against testdata/system.evtx
@@ -214,37 +216,40 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(binXMLCloseElement)
 
 	//     <Provider Name="%0"/>
-	dataSizeStack = pushOpenElement(b, "Provider", true, baseOffset, names, dataSizeStack)
+	var attrListPos uint32
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Provider", baseOffset, names, dataSizeStack)
 	writeAttributeSub(b, "Name", 0, binXMLTypeString, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <EventID>%1</EventID>
 	dataSizeStack = pushOpenElement(b, "EventID", false, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
 	writeSubstitution(b, 1, binXMLTypeUint16)
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Level>%2</Level>
 	dataSizeStack = pushOpenElement(b, "Level", false, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
 	writeSubstitution(b, 2, binXMLTypeUint16)
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <TimeCreated SystemTime="%3"/>
-	dataSizeStack = pushOpenElement(b, "TimeCreated", true, baseOffset, names, dataSizeStack)
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "TimeCreated", baseOffset, names, dataSizeStack)
 	writeAttributeSub(b, "SystemTime", 3, binXMLTypeFiletime, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Computer>%4</Computer>
 	dataSizeStack = pushOpenElement(b, "Computer", false, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
 	writeSubstitution(b, 4, binXMLTypeString)
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//   </System>
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//   <EventData>
 	dataSizeStack = pushOpenElement(b, "EventData", false, baseOffset, names, dataSizeStack)
@@ -254,18 +259,19 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	for i := 0; i < 12; i++ {
 		nameIdx := uint16(5 + i*2)
 		valueIdx := uint16(6 + i*2)
-		dataSizeStack = pushOpenElement(b, "Data", true, baseOffset, names, dataSizeStack)
+		dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Data", baseOffset, names, dataSizeStack)
 		writeAttributeSub(b, "Name", nameIdx, binXMLTypeString, baseOffset, names)
+		patches = closeAttrList(b, attrListPos, patches)
 		b.WriteByte(binXMLCloseElement)
 		writeSubstitution(b, valueIdx, binXMLTypeString)
-		dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+		dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 	}
 
 	//   </EventData>
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	// </Event>
-	dataSizeStack, dataSizePatches = writeEndElement(b, dataSizeStack, dataSizePatches)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	// EndOfStream (terminates template body's _children loop).
 	b.WriteByte(0x00)
@@ -280,27 +286,64 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	}
 
 	buf := b.Bytes()
-	for _, p := range dataSizePatches {
-		binary.LittleEndian.PutUint32(buf[p.pos+3:], p.size)
+	for _, p := range patches {
+		binary.LittleEndian.PutUint32(buf[p.pos:], p.size)
 	}
 	return buf
 }
 
-// dataSizePatch records where to write a back-patched data_size once the
-// template body is complete: buf[pos+3:pos+7] = size (little-endian).
-type dataSizePatch struct {
-	pos  uint32 // position, within the template body buffer, of the OpenStartElementTag token byte
-	size uint32 // computed data_size value
+// fieldPatch records where to write a back-patched 4-byte little-endian field
+// once the template body is complete: buf[pos:pos+4] = size. Used for both
+// data_size (written by writeEndElement once an OpenStartElementTag's
+// EndElementTag is known) and attr_list_size (written by closeAttrList once
+// an element's attribute list is known to be complete) — both are only
+// knowable after content that comes later in the stream has been written, so
+// both go through the same accumulate-then-apply mechanism rather than two
+// separate ones.
+type fieldPatch struct {
+	pos  uint32 // exact buffer offset of the 4-byte field to patch
+	size uint32 // computed value
 }
 
 // pushOpenElement calls writeOpenElement and pushes the token position it
 // reports onto stack, returning the updated stack. A thin wrapper rather than
 // inlining `stack = append(stack, writeOpenElement(...))` at every call site,
 // so buildTemplateBody's element list reads the same as it did before this
-// task (one line per open, one line per close).
+// task (one line per open, one line per close). For an element with
+// attributes, use pushOpenElementAttrs instead — it also surfaces the
+// attr_list_size back-patch position that this wrapper discards.
 func pushOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase uint32, refs *[]chunkRef, stack []uint32) []uint32 {
-	pos := writeOpenElement(b, name, hasAttrs, binXMLBase, refs)
+	pos, _ := writeOpenElement(b, name, hasAttrs, binXMLBase, refs)
 	return append(stack, pos)
+}
+
+// pushOpenElementAttrs is pushOpenElement for an element that has attributes:
+// it additionally returns the buffer position of attr_list_size's own 4
+// bytes, so the caller can write the attribute list and then pass that
+// position to closeAttrList once it knows where the list ends.
+func pushOpenElementAttrs(b *bytes.Buffer, name string, binXMLBase uint32, refs *[]chunkRef, stack []uint32) (newStack []uint32, attrListPos uint32) {
+	tokenPos, attrListPos := writeOpenElement(b, name, true, binXMLBase, refs)
+	return append(stack, tokenPos), attrListPos
+}
+
+// closeAttrList records a back-patch for attr_list_size — the byte count of
+// the attribute list that was just written — once the caller has finished
+// writing that element's attributes (writeAttributeSub calls) but BEFORE
+// writing the Close(Start|Empty)ElementTag that follows.
+//
+// Measured, not assumed (Task 7f's Step 1 probe, testdata/system.evtx chunk
+// 0): for the three 0x41 elements checked — <Event> at 578 (closes via 0x02,
+// since it has children), <Provider> at 783 and <TimeCreated> at 1286 (both
+// close via 0x03, self-closing) — attr_region_start + attr_list_size landed
+// exactly on that closing-tag byte in every case, with attr_region_start
+// being the offset immediately after attr_list_size's own 4 bytes. So
+// attr_list_size counts only the attribute list itself: not the
+// Close(Start|Empty)ElementTag, and not any children or the element's own
+// EndElementTag — those are already accounted for by data_size, which spans
+// the element's entire content.
+func closeAttrList(b *bytes.Buffer, attrListPos uint32, patches []fieldPatch) []fieldPatch {
+	size := uint32(b.Len()) - (attrListPos + 4)
+	return append(patches, fieldPatch{pos: attrListPos, size: size})
 }
 
 // writeEndElement writes an EndElementTag (0x04) and pops the position of the
@@ -320,13 +363,13 @@ func pushOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase uin
 // must be matched by exactly one writeEndElement call, in strict LIFO order.
 // buildTemplateBody's structure (every element closes via EndElementTag
 // before its parent does) guarantees this.
-func writeEndElement(b *bytes.Buffer, stack []uint32, patches []dataSizePatch) ([]uint32, []dataSizePatch) {
+func writeEndElement(b *bytes.Buffer, stack []uint32, patches []fieldPatch) ([]uint32, []fieldPatch) {
 	b.WriteByte(binXMLEndElement)
 	n := len(stack)
 	pos := stack[n-1]
 	stack = stack[:n-1]
 	size := uint32(b.Len()) - (pos + 7)
-	patches = append(patches, dataSizePatch{pos: pos, size: size})
+	patches = append(patches, fieldPatch{pos: pos + 3, size: size}) // pos+3 = data_size field's own offset (past token+dep_id)
 	return stack, patches
 }
 
@@ -403,12 +446,19 @@ func writeSubstitutionArray(b *bytes.Buffer, subs []substitutionEntry) {
 // returns the token byte's position within b (i.e. b.Len() as it stood
 // before this call — a local offset into the template-body buffer, NOT
 // adjusted by binXMLBase), so a caller building a stack of open elements
-// (buildTemplateBody, via pushOpenElement) can later back-patch this token's
-// data_size field once its EndElementTag is known: the patch is applied to
-// the finished template-body byte slice as buf[pos+3:pos+7], so pos must
-// stay in that slice's own coordinate space. data_size is written as 0
-// here — a placeholder patched in by writeEndElement/buildTemplateBody's
-// final patch pass, never left as 0 in the returned payload.
+// (buildTemplateBody, via pushOpenElement/pushOpenElementAttrs) can later
+// back-patch this token's data_size field once its EndElementTag is known:
+// the patch is applied to the finished template-body byte slice at the exact
+// field offset, so pos must stay in that slice's own coordinate space.
+// data_size is written as 0 here — a placeholder patched in by
+// writeEndElement/buildTemplateBody's final patch pass, never left as 0 in
+// the returned payload.
+//
+// For an element with attributes, attrListPos is the buffer position of
+// attr_list_size's own 4 bytes (also written as a 0 placeholder here, patched
+// by closeAttrList once the attribute list is known); for an element without
+// attributes attrListPos is meaningless and always 0 — hasAttrs tells the
+// caller which applies.
 //
 // Layout without attrs (0x01):
 //
@@ -416,9 +466,22 @@ func writeSubstitutionArray(b *bytes.Buffer, subs []substitutionEntry) {
 //
 // Layout with attrs (0x41):
 //
-//	[token: 1B] [dep_id: 2B] [data_size: 4B] [name_offset: 4B] [attr_list_size: 4B] [NameNode]
-func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase uint32, refs *[]chunkRef) uint32 {
-	tokenPos := uint32(b.Len())
+//	[token: 1B] [dep_id: 2B] [data_size: 4B] [name_offset: 4B] [NameNode] [attr_list_size: 4B] [attributes…]
+//
+// F11 (Task 7f): real Windows places the inline NameNode immediately after
+// name_offset in BOTH forms and puts attr_list_size after it, right before
+// the attribute list. go-evtx used to write attr_list_size first (still
+// always 0) and the NameNode after — a parser reading go-evtx's stream took
+// the NameNode's next_offset (always 0) as attr_list_size, concluded the
+// element had no attributes, and desynchronised immediately. Measured against
+// testdata/system.evtx chunk 0 (Task 7f's Step 1 probe, task-7f-report.md):
+// three 0x41 elements (<Event> at 578, <Provider> at 783, <TimeCreated> at
+// 1286) all have name_offset == token_pos + 11, a NameNode decoding there,
+// and a non-zero attr_list_size sitting immediately after that NameNode ends.
+// Because the NameNode now always sits at the same fixed offset regardless of
+// hasAttrs, headerSize is 11 for both branches — it no longer varies.
+func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase uint32, refs *[]chunkRef) (tokenPos, attrListPos uint32) {
+	tokenPos = uint32(b.Len())
 	if hasAttrs {
 		b.WriteByte(binXMLOpenElementAttrs) // 0x41
 	} else {
@@ -435,20 +498,18 @@ func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase ui
 	writeUint16LE(b, 0xffff) // dependency_id: not set
 	writeUint32LE(b, 0)      // data_size: placeholder, back-patched by writeEndElement
 
-	headerSize := uint32(11) // token(1) + dep_id(2) + data_size(4) + name_offset(4)
-	if hasAttrs {
-		headerSize = 15 // + attr_list_size(4)
-	}
+	const headerSize = 11 // token(1) + dep_id(2) + data_size(4) + name_offset(4) — NameNode always sits here now, for both branches
 	nameNodeOffset := binXMLBase + tokenPos + headerSize
 	writeUint32LE(b, nameNodeOffset)
 
-	if hasAttrs {
-		writeUint32LE(b, 0) // attribute_list_size (python-evtx ignores the value)
-	}
-
 	writeNameNode(b, name, binXMLBase, refs)
 
-	return tokenPos
+	if hasAttrs {
+		attrListPos = uint32(b.Len())
+		writeUint32LE(b, 0) // attr_list_size: placeholder, back-patched by closeAttrList once the attribute list is written
+	}
+
+	return tokenPos, attrListPos
 }
 
 // writeAttributeSub writes an Attribute token with inline NameNode, followed by

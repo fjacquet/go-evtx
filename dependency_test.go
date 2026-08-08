@@ -38,17 +38,21 @@ func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 			// 0x01/0x41 partway through — e.g. data_size 0x0133 stores 0x01
 			// at i+4 — which this loop would otherwise revisit on the very
 			// next iterations and misread as a second, bogus element header
-			// nested inside this element's own fixed header fields. Skip
-			// past this element's own header (token+dep_id+data_size+
-			// name_offset[+attr_list_size]) so only bytes that could
-			// plausibly start another token are considered; the NameNode,
-			// attributes, and any real nested children that follow are
-			// still scanned normally.
-			headerSize := 11 // token(1) + dep_id(2) + data_size(4) + name_offset(4)
-			if tok == binXMLOpenElementAttrs {
-				headerSize = 15 // + attr_list_size(4)
-			}
-			i += headerSize - 1 // loop's own i++ accounts for the last byte
+			// nested inside this element's own fixed header fields. Skip past
+			// this element's own fixed header (token+dep_id+data_size+
+			// name_offset) so only bytes that could plausibly start another
+			// token are considered; the NameNode, attr_list_size (Task 7f
+			// moved it after the NameNode; it too now carries a real,
+			// content-derived value instead of the 0 it used to be),
+			// attributes, and any real nested children that follow are still
+			// scanned normally.
+			//
+			// headerSize is 11 for BOTH the with- and without-attributes forms
+			// (Task 7f/F11): real Windows places the NameNode at the same
+			// fixed offset either way, and go-evtx now matches — see
+			// writeOpenElement's doc comment in binxml.go.
+			const headerSize = 11 // token(1) + dep_id(2) + data_size(4) + name_offset(4)
+			i += headerSize - 1   // loop's own i++ accounts for the last byte
 			continue
 		}
 		// A 0x01/0x41 byte can occur inside string data, so only flag a
