@@ -31,8 +31,9 @@ baseline the rest of the release compares against.**
 | 5 | `ff33b7e` | 403 records, 21 chunks — byte-identical generator output to rows 2-4 (Task 7 Part A touched only the workflow) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — see "Task 7 Part A" below |
 | 6 | `62de633` | 403 records, 21 chunks, max ObjectName **31642** runes — NOT byte-identical to rows 2-5 (B2 shifts every record 4 bytes; see "Task 7 Part B" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to row 5 |
 | 7 | `4510103` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to row 6 (Task 7c changed two bytes' *value* per element, not any length; see "Task 7c" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-6 |
+| 8 | `9b8e974` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-7 (Task 7e changes 4 bytes' *value* per element — the data_size field — not any length; see "Task 7e" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-7 |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below).
 
 **Parser version.** All seven rows above were produced by `python-evtx==0.8.1`
 — confirmed by grepping each run's job log for uv's `+ python-evtx==X.Y.Z`
@@ -779,3 +780,176 @@ reader remains open — F8 (missing `xmlns` on `<Event>`) and the sparse
 `<System>` block (5 of the real file's 14 elements) remain the leading
 candidates named in the "Task 7 Part A" reading above, neither of which
 this task touched.
+
+## Task 7e: F10 (`OpenStartElementTag.data_size` hardcoded to zero)
+
+**Found differently from every task before it.** Not by parity with
+`testdata/system.evtx` alone, but by decoding one of go-evtx's own records
+and a real Windows record token-by-token with a fresh standalone decoder and
+diffing the whole streams (`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/tokendiff-report.md`,
+not part of this task's own deliverables). That investigation's finding F1 —
+`data_size` is unconditionally `0` on every `OpenStartElementTag`, while real
+Windows always writes a content-derived, non-zero value — is the "arithmetic
+against Microsoft's own normative specification" this task's brief
+described, not merely parity with one vendored file.
+
+**Step 1: the formula, measured fresh before any code changed.** A throwaway
+probe (`scratchpad/datasize-probe/probe.py`, not committed) parsed chunk 0 of
+`testdata/system.evtx` with a decoder that **never reads `data_size`**: it
+finds each element's own end purely by matching its `OpenStartElementTag` to
+its own `CloseEmptyElementTag` (`0x03`) or `EndElementTag` (`0x04`),
+recursing through children by token structure alone. That independently
+derived "structural end" was then compared against
+`element_start + 7 + data_size` computed from the header field the parser
+never consulted.
+
+Run against **two different records** (different templates, one using
+inline `NameNode`s throughout, the other using chunk-relative back-references
+for every name — S10 in the tokendiff report), at three nesting depths each:
+
+| Record | Elements checked | Depths | Formula matched structural end |
+|---|---|---|---|
+| `EventRecordID 12049` (chunk-rel. record offset 512) | 17 (`<Event>`, `<System>`, `<UserData>`, and 14 `<System>` children incl. `<Provider>`, `<EventID>`, `<TimeCreated>`, `<Security>`, ...) | 0, 1, 2 | **17/17** |
+| `EventRecordID 12050` (chunk-rel. record offset 2688) | 16 (same shape, all names back-referenced instead of inline) | 0, 1, 2 | **16/16** |
+
+Sample rows (record 12049; full table in the task report):
+
+| Element | `element_start` | `data_size` | `element_start+7+data_size` | Structural end (data_size-blind) | Match |
+|---|---|---|---|---|---|
+| `<Provider>` | 783 | 217 | 1007 | 1007 | yes |
+| `<System>` | 749 | 1158 | 1914 | 1914 | yes |
+| `<Event>` | 578 | 1373 | 1958 | 1958 | yes |
+
+**Zero exceptions across 33 elements.** The task brief's formula —
+`data_size = end_of_closing_tag − (element_start + 7)` — held exactly, matching
+both `testdata/system.evtx` and the brief's independently-cited MS-EVEN6
+worked example (`<Event>` at `0x1E`, `data_size 0x4E3`,
+`0x1E + 7 + 0x4E3 = 0x508`). The real file did not contradict the formula in
+the plan; it confirmed it, so the formula was implemented as given.
+
+**Incidental finding, out of scope, not fixed.** While writing the
+data_size-blind parser, real `<Event>`'s `OpenStartElementTag` (with attrs)
+turned out to place the inline `NameNode` immediately after `name_offset`,
+with `attr_list_size` coming *after* the `NameNode`, right before the
+attribute list — not `name_offset` → `attr_list_size` → `NameNode`, the order
+`writeOpenElement` has always written. Confirmed directly against the real
+`<Event>` element (`name_offset=589`, pointing immediately past the 11-byte
+fixed header; the plausible `attr_list_size` value, 135/`0x87`, sits at 609,
+right after the 20-byte "Event" `NameNode` ends). This does not affect
+`data_size` and was left untouched — Task 7e's scope is the `data_size`
+field only — but it is a real, measured divergence a future task should
+pick up.
+
+**Implementation.** `writeOpenElement` now returns the chunk-body-local
+position of the token byte it wrote. `buildTemplateBody` keeps a LIFO stack
+of those positions (`pushOpenElement` pushes); every point that used to write
+a bare `EndElementTag` now calls `writeEndElement`, which pops the matching
+position and records a `(pos, size)` patch. `bytes.Buffer` has no in-place
+mutation, so patches are applied to the finished `[]byte` in one pass, just
+before `buildTemplateBody` returns — no caller ever observes an unpatched
+body. Every element go-evtx writes closes via `EndElementTag` (never
+`CloseEmptyElementTag`, per the existing S2 finding, out of this task's
+scope), so one patch mechanism covers all 20 elements; nesting is handled
+entirely by stack order, and `TestWriteOpenElement_DataSizeNesting`
+(`datasize_test.go`) independently confirms every inner element's span ends
+at or before its enclosing element's, guarding the LIFO pairing itself.
+
+**Knock-on fix, required for the test gate, not itself part of F10.**
+`dependency_test.go`'s byte-scan (Task 7c) re-examined bytes inside an
+already-recognized element's own fixed header on the next several loop
+iterations, relying on a weak "does the following u32 look like a plausible
+size" guard to avoid misreading them as a second element. That guard was
+harmless while `data_size` was always `0`, but a real `data_size`'s own
+bytes can equal `0x01`/`0x41` partway through — `<System>`'s `data_size`
+`0x0133` stores `0x01` at its second byte — and get misread as a bogus
+nested header, producing `TestWriteOpenElement_DependencyIDIsUnset: offset
+78: OpenStartElement dependency_id = 0x0000, want 0xffff`. Fixed by skipping
+past a recognized element's own fixed header once found, rather than
+re-scanning it; confirmed the false positive reproduces without the fix and
+disappears with it.
+
+**Golden file: length unchanged, as predicted.** `testdata/binxml-golden.bin`
+was 1811 bytes before this change and 1811 bytes after — only 4 bytes'
+*value* per `OpenStartElementTag` change (20 of them), no bytes added or
+removed.
+
+Commit `9b8e974` ("fix: write a real data_size on every OpenStartElementTag
+(F10)"), pushed to `feat/v0.7.0-format-correctness`.
+
+**Run selection, by head SHA:**
+
+```console
+$ git rev-parse HEAD
+9b8e9742037c31f8d7e0b54fd99ee743d5811b51
+$ gh api repos/fjacquet/go-evtx/actions/runs/31275896296 --jq '.head_sha'
+9b8e9742037c31f8d7e0b54fd99ee743d5811b51
+```
+
+**Fixture identity, confirmed from the `generate` job log:**
+
+```text
+wrote artifacts/generated.evtx (403 records, max ObjectName 31642 runes)
+```
+
+**Byte-identical to rows 6-7** (`31642` runes, same 403 records, same 21
+chunks) — exactly as predicted, since this task changes 4 bytes' *value*
+per element (`data_size`), not any length, so `cmd/gen-fixture`'s
+`largestAccepted()` probe settles on the identical ceiling it found for
+rows 6-7. The comparison below is therefore fully valid.
+
+Job log (`generate`):
+<https://github.com/fjacquet/go-evtx/actions/runs/31275896296/job/93149235633>
+
+python-evtx differential: FAIL, unchanged —
+
+```text
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Expected: python-evtx's own source never reads `data_size`
+(`# TODO: use this size() field`), so it cannot be sensitive to this fix
+either way.
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31275896296/job/93149323499>
+
+**`get-winevent` — verbatim, the load-bearing result of this task:**
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+ParentContainsErrorRecordException: D:\a\_temp\0d8c7f97-8048-4c90-9be8-54e28c1ceaf2.ps1:27
+Line |
+  27 |          $rec = $reader.ReadEvent()
+     |          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31275896296/job/93149323486>
+
+### Reading this result, plainly, without adjusting anything to chase a greener outcome
+
+**STAGE2 READ: FAILED after 0 records — no breakthrough.** Stage 1 still
+opens cleanly; stage 2 still throws on the very first `ReadEvent()`, same
+exception type, same exact wording, same record count (0), as rows 5-7,
+against a fixture byte-identical to rows 6-7. The `data_size` fix — this
+release's strongest candidate by its own framing, the only one so far
+verified by exact arithmetic against Microsoft's own normative spec text
+rather than only by parity with one vendored file — did not change the
+observable `Get-WinEvent` outcome at all.
+
+This is a **null result and is reported as such, without softening.** F10
+was real and rigorously confirmed (33/33 elements across two differently
+structured real records, at three nesting depths, using a decoder that
+never itself reads `data_size` — plus exact agreement with MS-EVEN6's own
+worked example), and fixing a length field that lied about its own content
+was, on every piece of documented BinXML/parser-design reasoning available
+to this investigation, the single most likely candidate for a hard abort.
+It was not what blocks `EventLogReader.ReadEvent()` on record 0. Seven
+single-field tasks and this eighth, higher-confidence one have now each
+independently changed a real, measured divergence from the real file and
+none has moved `STAGE2 READ` off zero. What differs about record 0's content
+and blocks the .NET reader remains open — F8 (missing `xmlns` on `<Event>`),
+the sparse `<System>` block (5 of the real file's 14 elements), and S5
+(go-evtx never emits `OptionalSubstitution`, per the tokendiff report) are
+the remaining named candidates, none of which this task touched.
