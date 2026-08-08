@@ -14,7 +14,7 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-go@v6
         with: { go-version-file: go.mod }
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Generate fixture
         run: |
           mkdir -p artifacts
@@ -24,7 +24,12 @@ jobs:
           uv venv
           uv pip install python-evtx
           uv run python scripts/verify_python_evtx.py artifacts/generated.evtx artifacts/expected.json
+      # always(): the fixture is generated before the checker runs, so it
+      # should still be uploaded even when the checker step fails (a FAIL is
+      # exactly the result this workflow exists to capture) — otherwise the
+      # get-winevent job below would have nothing to download.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: generated-evtx
           path: artifacts/
@@ -32,6 +37,10 @@ jobs:
 
   get-winevent:
     needs: python-evtx-differential
+    # !cancelled(): run even when python-evtx-differential fails. A failing
+    # checker is the expected pre-fix result, not a reason to skip the
+    # Windows leg — both jobs' real output is the deliverable of this task.
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
