@@ -33,6 +33,22 @@ func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 		dep := binary.LittleEndian.Uint16(res.payload[i+1:])
 		if dep == 0xffff {
 			found++
+			// Task 7e gave data_size a real, content-derived value. That
+			// value's own bytes (payload[i+3:i+7]) can coincidentally equal
+			// 0x01/0x41 partway through — e.g. data_size 0x0133 stores 0x01
+			// at i+4 — which this loop would otherwise revisit on the very
+			// next iterations and misread as a second, bogus element header
+			// nested inside this element's own fixed header fields. Skip
+			// past this element's own header (token+dep_id+data_size+
+			// name_offset[+attr_list_size]) so only bytes that could
+			// plausibly start another token are considered; the NameNode,
+			// attributes, and any real nested children that follow are
+			// still scanned normally.
+			headerSize := 11 // token(1) + dep_id(2) + data_size(4) + name_offset(4)
+			if tok == binXMLOpenElementAttrs {
+				headerSize = 15 // + attr_list_size(4)
+			}
+			i += headerSize - 1 // loop's own i++ accounts for the last byte
 			continue
 		}
 		// A 0x01/0x41 byte can occur inside string data, so only flag a
