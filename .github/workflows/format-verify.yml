@@ -29,3 +29,38 @@ jobs:
           name: generated-evtx
           path: artifacts/
           retention-days: 7
+
+  get-winevent:
+    needs: python-evtx-differential
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@v5
+        with:
+          name: generated-evtx
+          path: artifacts
+      - name: Parse with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = (Get-Content artifacts/expected.json | ConvertFrom-Json)
+
+          # Get-WinEvent returns a scalar for a single record; coerce to an array.
+          $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction Stop)
+
+          if ($events.Count -ne $expected.record_count) {
+              throw "record count mismatch: got $($events.Count), want $($expected.record_count)"
+          }
+
+          # Count alone proves nothing — a parser returning the right number of
+          # empty records would pass. Check content survives the round trip.
+          $first = $events[0]
+          $xml = [xml]$first.ToXml()
+          $objectName = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ObjectName' }).'#text'
+          if ($objectName -ne $expected.object_names[0]) {
+              throw "ObjectName mismatch: got '$objectName', want '$($expected.object_names[0])'"
+          }
+
+          Write-Host "OK: $($events.Count) records, ObjectName round-trips"
