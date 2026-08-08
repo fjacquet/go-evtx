@@ -1,0 +1,31 @@
+name: Format Verify
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  python-evtx-differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod }
+      - uses: astral-sh/setup-uv@v8
+      - name: Generate fixture
+        run: |
+          mkdir -p artifacts
+          go run ./cmd/gen-fixture -out artifacts
+      - name: Parse with python-evtx
+        run: |
+          uv venv
+          uv pip install python-evtx
+          uv run python scripts/verify_python_evtx.py artifacts/generated.evtx artifacts/expected.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-evtx
+          path: artifacts/
+          retention-days: 7
