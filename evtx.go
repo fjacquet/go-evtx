@@ -556,8 +556,11 @@ func (w *Writer) queueFsyncLocked() {
 }
 
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
-// padded 65536-byte EVTX chunk. It increments w.chunkCount, patches the file
-// header at offset 0, calls f.Sync(), and resets w.records and w.firstID.
+// padded 65536-byte EVTX chunk, patches the file header at offset 0, and calls
+// f.Sync(). Only once the chunk is durable does it commit w.chunkCount,
+// w.currentSize, w.records, and w.firstID together — if any I/O step fails,
+// none of that in-memory state has moved, so the call is genuinely retriable
+// and a retry cannot write the same records into a second chunk slot.
 //
 // Must be called with w.mu held. Does nothing if len(w.records) == 0.
 func (w *Writer) flushChunkLocked() error {
@@ -587,24 +590,23 @@ func (w *Writer) flushChunkLocked() error {
 		return fmt.Errorf("go_evtx: write chunk %d: %w", w.chunkCount, err)
 	}
 
-	// Track file size: each committed chunk adds evtxChunkSize bytes.
-	w.currentSize += int64(evtxChunkSize)
-
-	// Increment chunk count and patch the file header.
-	w.chunkCount++
-	if _, err := w.f.WriteAt(buildFileHeader(w.chunkCount, w.recordID), 0); err != nil {
+	// Patch the file header to acknowledge the new chunk, then make it durable.
+	nextChunkCount := w.chunkCount + 1
+	if _, err := w.f.WriteAt(buildFileHeader(nextChunkCount, w.recordID), 0); err != nil {
 		return fmt.Errorf("go_evtx: patch file header: %w", err)
 	}
-
-	// Sync to disk.
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: sync: %w", err)
 	}
-	w.queueFsyncLocked()
 
-	// Reset current chunk buffer.
+	// The chunk is durable. Commit every piece of in-memory state together, so
+	// a failure above leaves nothing mutated and the operation is genuinely
+	// retriable — which is what rotate()'s non-sticky Step 1 already assumes.
+	w.chunkCount = nextChunkCount
+	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
 	w.firstID = w.recordID
+	w.queueFsyncLocked()
 
 	slog.Info("go_evtx_chunk_flushed",
 		"path", w.path,
