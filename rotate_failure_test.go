@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRotate_FailurePoisonsWriter makes the parent directory read-only so the
@@ -138,8 +139,7 @@ func TestArchivePathFor_NanosecondResolution(t *testing.T) {
 	}
 	// base- + YYYY-MM-DDTHH-MM-SS.nnnnnnnnn + .evtx
 	stamp := strings.TrimSuffix(strings.TrimPrefix(got, "/var/log/audit-"), ".evtx")
-	if len(stamp) != len("2006-01-02T15-04-05.000000000") {
-		t.Errorf("timestamp %q has length %d, want %d (nanosecond resolution)",
-			stamp, len(stamp), len("2006-01-02T15-04-05.000000000"))
+	if _, err := time.Parse("2006-01-02T15-04-05.000000000", stamp); err != nil {
+		t.Errorf("timestamp %q does not match layout 2006-01-02T15-04-05.000000000: %v", stamp, err)
 	}
 }
