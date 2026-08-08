@@ -312,6 +312,24 @@ Recorded so they are not rediscovered as new:
 - `encodeUTF16LE` (`binformat.go:53`) is referenced only by its own test.
 - `go.mod` declares `go 1.24`; the consumer is on 1.26.5.
 
+## Inherited knowledge from cee-exporter
+
+cee-exporter is retiring its `.planning/` process directory, which holds
+roughly 7,200 lines of phase research — a large share of it EVTX binary format
+knowledge written while the writer still lived in that repo: BinXML encoding,
+chunk layout, CRC ordering constraints, the rotation design, and a pitfalls
+catalogue.
+
+That material belongs here now, since this repo owns the format. Receive it
+during the v0.6.0 cycle as reference documentation under `docs/`, and prune
+what the audit has since disproven — several of those notes describe
+placeholder-header and flush behaviour that this spec changes.
+
+Treat it as prior art to verify, not as truth. The pitfalls catalogue predates
+every finding in this document and caught none of them.
+
+The corresponding work item is T8 in the cee-exporter spec.
+
 ## Coupling to cee-exporter
 
 Two sync points only:
