@@ -25,6 +25,7 @@ package evtx
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -178,13 +180,22 @@ func (w *Writer) backgroundLoop() {
 		case <-flushC:
 			w.mu.Lock()
 			if len(w.records) > 0 {
-				_ = w.tickFlushLocked()
+				if err := w.tickFlushLocked(); err != nil {
+					// The only persistence path with no caller to return to.
+					// Poison the writer rather than let the next WriteRecord
+					// report success for data that never reached disk.
+					w.err = fmt.Errorf("go_evtx: background flush: %w", err)
+					slog.Error("go_evtx_background_flush_failed", "path", w.path, "err", err)
+				}
 			}
 			w.mu.Unlock()
 		case <-rotC:
 			w.mu.Lock()
-			_ = w.rotate()
+			err := w.rotate()
 			w.mu.Unlock()
+			if err != nil {
+				slog.Error("go_evtx_scheduled_rotate_failed", "path", w.path, "err", err)
+			}
 		case <-w.done:
 			return
 		}
@@ -307,6 +318,7 @@ func archivePathFor(activePath string) string {
 // rotate() does NOT acquire w.mu itself.
 func (w *Writer) rotate() error {
 	// Step 1: Flush any pending records to disk as a complete chunk.
+	// A failure here is not sticky — the file handle is still valid.
 	if len(w.records) > 0 {
 		if err := w.flushChunkLocked(); err != nil {
 			return fmt.Errorf("go_evtx: rotate flush: %w", err)
@@ -319,34 +331,84 @@ func (w *Writer) rotate() error {
 	}
 
 	// Step 3: Sync and close the current file.
-	if err := w.f.Sync(); err != nil {
-		return fmt.Errorf("go_evtx: rotate sync: %w", err)
-	}
-	if err := w.f.Close(); err != nil {
-		return fmt.Errorf("go_evtx: rotate close: %w", err)
-	}
-
-	// Step 4: Rename active file to a timestamped archive.
+	// From here until the replacement handle is installed, any failure leaves
+	// the writer unable to guarantee durability. Record it permanently rather
+	// than accepting events we cannot persist.
 	archive := archivePathFor(w.path)
-	if err := os.Rename(w.path, archive); err != nil {
-		return fmt.Errorf("go_evtx: rotate rename: %w", err)
+	if err := w.f.Sync(); err != nil {
+		w.err = fmt.Errorf("go_evtx: rotate sync: %w", err)
+		return w.err
+	}
+	if err := w.closeFileLocked(); err != nil {
+		w.err = fmt.Errorf("go_evtx: rotate close: %w", err)
+		return w.err
 	}
 
-	// Step 5: Sync the containing directory (best-effort on Unix; no-op on Windows).
-	if err := syncDir(filepath.Dir(w.path)); err != nil {
-		slog.Warn("go_evtx_rotate_syncdir_warn", "path", w.path, "err", err)
+	// Step 4: Commit the archive with link-then-unlink rather than rename.
+	//
+	// os.Rename REPLACES an existing non-directory destination on Unix, so a
+	// name collision would destroy a committed archive silently. Checking with
+	// os.Stat first does not help: it is a time-of-check/time-of-use race, and
+	// an O_EXCL probe creates the destination without reserving it for the
+	// later rename.
+	//
+	// os.Link fails if the destination exists, atomically and without a race,
+	// using only the standard library. The active path is unlinked afterwards.
+	// The window between the two calls leaves both names pointing at the same
+	// inode, which is harmless — a reader sees a complete file either way.
+	//
+	// Not every filesystem supports hard links (FAT32, some SMB and container
+	// overlay mounts). Where Link is unsupported, fall back to Stat+Rename and
+	// log that the collision guard is now best-effort, rather than failing a
+	// rotation that used to work.
+	if err := os.Link(w.path, archive); err != nil {
+		if !errors.Is(err, errors.ErrUnsupported) && !errors.Is(err, syscall.EPERM) {
+			w.err = fmt.Errorf("go_evtx: rotate link archive %s: %w", archive, err)
+			return w.err
+		}
+		slog.Warn("go_evtx_rotate_link_unsupported",
+			"path", w.path, "err", err,
+			"note", "falling back to rename; archive collision guard is best-effort")
+		if _, serr := os.Stat(archive); serr == nil {
+			w.err = fmt.Errorf("go_evtx: rotate: archive %s already exists", archive)
+			return w.err
+		}
+		if rerr := os.Rename(w.path, archive); rerr != nil {
+			w.err = fmt.Errorf("go_evtx: rotate rename: %w", rerr)
+			return w.err
+		}
+	} else if err := os.Remove(w.path); err != nil {
+		w.err = fmt.Errorf("go_evtx: rotate unlink active file: %w", err)
+		return w.err
 	}
 
-	// Step 6: Open a fresh file at the same path.
+	// Step 5: Open a fresh file at the same path and make its header durable.
+	// Without this Sync the placeholder header lives only in the page cache
+	// until the first chunk flush, so a crash immediately after rotation
+	// leaves a zero-length or partial file where a valid empty one should be.
 	f, err := os.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("go_evtx: rotate open new file: %w", err)
+		w.err = fmt.Errorf("go_evtx: rotate open new file: %w", err)
+		return w.err
 	}
 	if _, err := f.Write(buildFileHeader(0, 1)); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("go_evtx: rotate write header: %w", err)
+		w.err = fmt.Errorf("go_evtx: rotate write header: %w", err)
+		return w.err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		w.err = fmt.Errorf("go_evtx: rotate sync new header: %w", err)
+		return w.err
 	}
 	w.f = f
+	w.fileClosed = false
+
+	// Step 6: Sync the containing directory so both the archive link and the
+	// replacement file are durable (best-effort on Unix; no-op on Windows).
+	if err := syncDir(filepath.Dir(w.path)); err != nil {
+		slog.Warn("go_evtx_rotate_syncdir_warn", "path", w.path, "err", err)
+	}
 
 	// Step 7: Reset writer state for the new file.
 	w.chunkCount = 0
