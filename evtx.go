@@ -378,7 +378,12 @@ func archivePathFor(activePath string) string {
 // rotate() does NOT acquire w.mu itself.
 func (w *Writer) rotate() error {
 	// Step 1: Flush any pending records to disk as a complete chunk.
-	// A failure here is not sticky — the file handle is still valid.
+	// A transient I/O failure here is not sticky — the file handle is still
+	// valid and the caller can retry. flushChunkLocked can also fail
+	// permanently via chunkCapacityLocked's chunk-ceiling guard: at
+	// maxChunksPerFile, w.err is set and this is deliberately sticky, because
+	// no further chunk can ever be written to this file — there is nothing
+	// to retry, unlike a transient error.
 	if len(w.records) > 0 {
 		if err := w.flushChunkLocked(); err != nil {
 			return fmt.Errorf("go_evtx: rotate flush: %w", err)

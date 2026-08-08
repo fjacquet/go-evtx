@@ -28,7 +28,7 @@ baseline the rest of the release compares against.**
 | 2 | `6f3485e` | 403 records, 21 chunks, incl. near-max + chunk-fill boundary | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 3 | `173fcf2` | 403 records, 21 chunks — byte-identical generator output to row 2 (Task 3 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268034433`](https://github.com/fjacquet/go-evtx/actions/runs/31268034433) (row 3, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push).
 
 ## Row 2: the fixture
 
@@ -241,11 +241,17 @@ uint16 `chunkCount` counter had no ceiling before it would silently wrap and
 overwrite chunk 0 (F5). Commit `173fcf2`. `cmd/gen-fixture/main.go` was not
 touched, so this row's fixture is directly comparable to row 2's.
 
-**Fixture identity, confirmed from the `generate` job log, both runs:**
+Measured from CI run [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199),
+head commit `173fcf2` (the fix commit itself — verified by checking the
+run's `headSha` before citing it, see the correction note below).
+
+**Fixture identity, confirmed from that run's `generate` job log:**
 `wrote artifacts/generated.evtx (403 records, max ObjectName 31644 runes)` —
 byte-identical summary line to row 2's (same record count, same probed
 `ObjectName` ceiling, same 21 chunks). The comparison below is therefore
 valid under the content-dependence caveat at the top of this document.
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268668199/job/93130835405>
 
 python-evtx differential: FAIL
 
@@ -254,7 +260,7 @@ FAIL
   - ObjectName count: got 0, want 403
 ```
 
-Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268034433/job/93129315268>
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268668199/job/93130919628>
 
 No chunk-checksum failure line appeared — CRCs remain clean, consistent with
 every prior measurement.
@@ -262,25 +268,54 @@ every prior measurement.
 Get-WinEvent: FAIL
 
 ```
-Get-WinEvent: D:\a\_temp\8c286ff0-5986-45c4-9091-ef9b58f187d0.ps1:6
+Get-WinEvent: D:\a\_temp\7ee74807-309b-4443-87e3-a5e1fab3098f.ps1:6
 Line |
    6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
      | The data is invalid.
 ```
 
-Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268034433/job/93129315256>
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268668199/job/93130919633>
 
 (The `.ps1` temp-file hash in the first line is CI-generated per run and
 carries no significance; every other token is identical to row 2's verbatim
 output.)
+
+**Independently re-confirmed** by CI run
+[`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614),
+head commit `c13b724` (the very next push, docs-only, no writer code
+changed) — same fixture summary line, same `python-evtx` failure, same
+`Get-WinEvent` wording. Two separate runs against two separate commits that
+both contain the F3/F4/F5 fix rule out this specific result being CI-run
+flakiness.
 
 **Change from baseline: none.** Same fixture (byte-identical generator
 summary line), same `Get-WinEvent` open-time exception, same exact wording
 (`"The data is invalid."`), same `python-evtx` failure
 (`ObjectName count: got 0, want 403`), same absence of any CRC failure line.
 Run IDs for the comparison: row 2 = [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745),
-row 3 = [`31268034433`](https://github.com/fjacquet/go-evtx/actions/runs/31268034433).
+row 3 = [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (head `173fcf2`).
+
+**Correction note.** An earlier version of this row cited run `31268034433`,
+whose head was `eec9e1a` — a commit that predates this task's fix by two
+commits and contains none of F3/F4/F5. That citation was wrong: the branch
+had one commit (`e6fb332`) sitting locally-unpushed before this task began,
+so the first `git push` of this task sent two commits to origin in one
+push (`eec9e1a..173fcf2`), and a `gh run list --limit 5` issued immediately
+afterward returned the still-most-recent-at-that-instant run — the one
+GitHub had already created for the pre-existing tip — before the new run
+for `173fcf2` had been created and become visible. The run ID was taken from
+that list by recency (top of a `--limit 5` list) rather than verified
+against `git rev-parse HEAD`, so the mismatch went unnoticed. A
+byte-identical result from a run that never contained the fix proves
+nothing about the fix; it was mechanically certain regardless of whether
+F3/F4/F5 changed anything. This row now cites `31268668199` (head `173fcf2`,
+matched by SHA, not by list position) and its own verbatim job output,
+re-pulled from that run rather than reused from the earlier, misattributed
+citation. **Lesson for later tasks: after a push, select the CI run by
+matching `headSha` to `git rev-parse HEAD` — via `gh run list --json
+headSha,databaseId` filtered for a match, polling if the new run has not
+yet appeared — never by taking the top entry of a recency-sorted list.**
 
 **Reading this result.** F3/F4/F5 were not the open-time blocker.
 `LastEventRecordDataOffset` being a duplicate of `FreeSpaceOffset` was a real
