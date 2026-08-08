@@ -52,9 +52,10 @@ Use `WriteRaw` when you have a pre-encoded BinXML payload (e.g. forwarded from a
 | `ErrRecordTooLarge` | A single record's BinXML payload exceeds 64,996 bytes — the chunk payload capacity less the record header and trailing size. The record is rejected and nothing is written. |
 | `ErrClosed` | `WriteRecord`, `WriteRaw` or `Rotate` was called after `Close`. |
 
-A rotation that fails after closing the active file records a permanent error.
-Every subsequent call returns it — the writer never silently accepts events it
-cannot persist. Recovery requires operator intervention and a new `Writer`.
+A rotation that fails after closing the active file, or a background flush
+that fails, records a permanent error. Every subsequent call returns it — the
+writer never silently accepts events it cannot persist. Recovery requires
+operator intervention and a new `Writer`.
 
 ## Read events
 

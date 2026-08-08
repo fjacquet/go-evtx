@@ -54,6 +54,8 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `state_test.go` | Writer lifecycle guards: double `Close`, write-after-`Close`, sticky-error precedence |
 | `oversize_test.go` | Oversized records rejected, not truncated |
 | `example_test.go` | Godoc examples |
+| `reader_concurrency_test.go` | `Reader` is safe for concurrent use: parallel callers, `r.mu` held for each exported method |
+| `flush_atomicity_test.go` | `flushChunkLocked` commits `chunkCount`/`currentSize`/`records`/`firstID` together or not at all |
 
 **Write data flow:**
 
@@ -100,7 +102,7 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 - **Sticky error.** Once durability can no longer be guaranteed (a rotation that failed after closing the active file, or a failed background flush), `w.err` is set permanently and every entry point returns it. There is no automatic recovery — a half-rotated directory needs an operator and a new `Writer`.
 - `checkStateLocked()` gates `WriteRecord`, `WriteRaw` and `Rotate`. Precedence is part of the API contract: the sticky error outranks `ErrClosed`, so a caller learns that data was lost rather than only that the writer shut down.
 - `closeFileLocked()` closes `w.f` exactly once, guarded by `w.fileClosed`; `rotate()` maintains that flag across the close/reopen.
-- **`OnFsync` fires on every sync** — from `WriteRecord`, `rotate`, `Close` and the background flush tick, not only when `FlushIntervalSec > 0`. It is invoked after `w.mu` is released, so a callback may safely call any `Writer` method; a callback that itself triggers a further flush recurses on its own call stack.
+- **`OnFsync` fires on every sync** — from `WriteRecord`, `rotate`, `Close` and the background flush tick, not only when `FlushIntervalSec > 0`. It is invoked after `w.mu` is released, so a callback may safely call most `Writer` methods — except `Close`: a callback fired from the background goroutine's own fsync drain that calls `Close` deadlocks, because `Close` waits for that same goroutine to exit while it is blocked inside the callback. A callback that itself triggers a further flush recurses on its own call stack.
 - **`Reader` is also concurrency-safe:** a mutex (`r.mu`) is held for the duration of every exported method. `Open` does not lock — it constructs the `Reader` before it can be shared with another goroutine. `nextRecord` and `loadChunk` are unexported helpers carrying `// CALLER MUST HOLD r.mu.`. `nextRecord` copies each payload out of the shared chunk buffer before returning it; that copy is what makes `ReadRaw`'s returned bytes safe to retain past the next call.
 
 ## BinXML substitution index map

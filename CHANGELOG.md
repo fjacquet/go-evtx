@@ -17,8 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   python-evtx dropped the chunk without warning; this library's own reader
   aborted the file and returned zero records, including from undamaged later
   chunks. `WriteRecord` returned `nil`. Such records are now rejected with
-  `ErrRecordTooLarge`. **If you wrote events with fields larger than ~32k
-  characters, affected files are unrecoverable.**
+  `ErrRecordTooLarge`. **If you wrote a record whose encoded BinXML payload
+  exceeded 64,996 bytes, affected files are unrecoverable.** That is a
+  property of the encoded payload, not any single field: BinXML overhead
+  plus several moderately sized fields can exceed the limit even when every
+  individual field is well under it.
 - **A failed rotation silently discarded every subsequent event.** `rotate()`
   left a closed file handle in place when the rename or reopen failed, and
   `WriteRecord` returned `nil` forever after. Failures now set a permanent
