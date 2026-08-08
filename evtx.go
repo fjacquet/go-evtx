@@ -211,12 +211,16 @@ func (w *Writer) WriteRaw(payload []byte) error {
 		}
 	}
 
+	if len(payload) > maxRecordPayload {
+		return fmt.Errorf("%w: payload %d bytes exceeds maximum %d",
+			ErrRecordTooLarge, len(payload), maxRecordPayload)
+	}
+
 	ts := toFILETIME(time.Now())
 	rec := wrapEventRecord(w.recordID, ts, payload)
 
 	// If adding this record would exceed chunk capacity, flush first.
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(w.records)+len(rec) > maxRecords {
+	if len(w.records)+len(rec) > maxChunkPayload {
 		if err := w.flushChunkLocked(); err != nil {
 			return err
 		}
@@ -258,12 +262,21 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
 	payload := buildBinXML(eventID, fields, binXMLChunkOffset)
+
+	// A record larger than a chunk can never be written. Splitting one logical
+	// event across chunks is not valid EVTX, so reject it and write nothing.
+	// Truncating instead would be checksum-invisible: the CRCs would be
+	// computed over the corrupt bytes and verify.
+	if len(payload) > maxRecordPayload {
+		return fmt.Errorf("%w: payload %d bytes exceeds maximum %d",
+			ErrRecordTooLarge, len(payload), maxRecordPayload)
+	}
+
 	ts := toFILETIME(parseTimeCreated(fields))
 	rec := wrapEventRecord(w.recordID, ts, payload)
 
 	// If adding this record would exceed chunk capacity, flush first.
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(w.records)+len(rec) > maxRecords {
+	if len(w.records)+len(rec) > maxChunkPayload {
 		if err := w.flushChunkLocked(); err != nil {
 			return err
 		}
@@ -409,6 +422,22 @@ func (w *Writer) cleanOldFiles() error {
 	return nil
 }
 
+// chunkCapacityLocked reports whether the pending buffer still fits in a chunk.
+//
+// The entry guards in WriteRecord and WriteRaw make an overflow unreachable.
+// If it ever fires, a code change has reintroduced silent truncation — fail
+// permanently rather than write a corrupt chunk whose CRCs verify.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) chunkCapacityLocked() error {
+	if len(w.records) > maxChunkPayload {
+		w.err = fmt.Errorf("go_evtx: internal: chunk buffer %d bytes exceeds capacity %d",
+			len(w.records), maxChunkPayload)
+		return w.err
+	}
+	return nil
+}
+
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
 // padded 65536-byte EVTX chunk. It increments w.chunkCount, patches the file
 // header at offset 0, calls f.Sync(), and resets w.records and w.firstID.
@@ -419,12 +448,10 @@ func (w *Writer) flushChunkLocked() error {
 		return nil
 	}
 
-	// Clamp records to chunk capacity (defensive guard).
-	records := w.records
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(records) > maxRecords {
-		records = records[:maxRecords]
+	if err := w.chunkCapacityLocked(); err != nil {
+		return err
 	}
+	records := w.records
 
 	recordsStart := int(evtxRecordsStart)
 	freeSpaceOffset := uint32(recordsStart + len(records))
@@ -484,11 +511,10 @@ func (w *Writer) tickFlushLocked() error {
 	}
 
 	// Build the in-progress chunk (same layout as flushChunkLocked, but don't commit).
-	records := w.records
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(records) > maxRecords {
-		records = records[:maxRecords]
+	if err := w.chunkCapacityLocked(); err != nil {
+		return err
 	}
+	records := w.records
 
 	recordsStart := int(evtxRecordsStart)
 	freeSpaceOffset := uint32(recordsStart + len(records))
