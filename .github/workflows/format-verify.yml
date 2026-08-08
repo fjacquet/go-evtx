@@ -57,6 +57,40 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          # Stage 1: can the log be opened at all? A FileNotFound/InvalidData
+          # here is an open-time rejection -- the parser never reached a
+          # record. This is diagnostic scaffolding in front of the
+          # Get-WinEvent assertions below, not a replacement for them: the
+          # single $events = @(Get-WinEvent ...) call the assertions use
+          # enumerates eagerly, so it cannot tell an open-time throw from a
+          # record-1 decode throw apart on its own.
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      'artifacts/generated.evtx',
+                      [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # Stage 2: read records one at a time, so a decode failure names
+          # its record.
+          $n = 0
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  $n++
+              }
+              Write-Host "STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
           $expected = (Get-Content artifacts/expected.json | ConvertFrom-Json)
 
           # Get-WinEvent returns a scalar for a single record; coerce to an array.
