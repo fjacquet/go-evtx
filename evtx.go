@@ -52,14 +52,21 @@ import (
 // RotationIntervalH triggers time-based rotation via a background ticker. After each
 // interval (in hours), rotate() is called. 0 = disabled.
 type RotationConfig struct {
-	FlushIntervalSec int // 0 = disabled; must be >= 0
-	MaxFileSizeMB    int // 0 = disabled; rotate when file >= N MiB
-	MaxFileCount     int // 0 = unlimited; keep only N newest archives
+	FlushIntervalSec  int // 0 = disabled; must be >= 0
+	MaxFileSizeMB     int // 0 = disabled; rotate when file >= N MiB
+	MaxFileCount      int // 0 = unlimited; keep only N newest archives
 	RotationIntervalH int // 0 = disabled; rotate every N hours
 
-	// OnFsync is called after each successful f.Sync() with the time of the sync.
-	// nil = no callback. Useful for exposing fsync timestamp to Prometheus gauges.
-	// Only fires when FlushIntervalSec > 0 (flush goroutine active).
+	// OnFsync is called after each successful f.Sync() with the time of the
+	// sync. nil = no callback. Useful for exposing the fsync timestamp to a
+	// Prometheus gauge.
+	//
+	// It fires on every sync — from WriteRecord's chunk flush, from rotate,
+	// from Close, and from the background flush tick — not only when
+	// FlushIntervalSec > 0.
+	//
+	// The callback is invoked after the writer lock is released, so it may
+	// safely call any Writer method.
 	OnFsync func(time.Time)
 }
 
@@ -80,11 +87,12 @@ type Writer struct {
 	// Phase 11 additions:
 	currentSize int64 // approximate file size in bytes, tracked for size-based rotation
 	// v0.6.0 durability state:
-	closed     bool      // set by Close; further writes return ErrClosed
-	closeErr   error     // result of the first Close, returned by later calls
-	closeOnce  sync.Once // ensures the shutdown/finalize sequence runs exactly once
-	err        error     // sticky: durability permanently lost, all calls fail
-	fileClosed bool      // w.f has already been closed (by rotate or by Close)
+	closed       bool        // set by Close; further writes return ErrClosed
+	closeErr     error       // result of the first Close, returned by later calls
+	closeOnce    sync.Once   // ensures the shutdown/finalize sequence runs exactly once
+	err          error       // sticky: durability permanently lost, all calls fail
+	fileClosed   bool        // w.f has already been closed (by rotate or by Close)
+	pendingFsync []time.Time // OnFsync timestamps to fire after w.mu is released
 }
 
 // checkStateLocked reports whether the writer can still accept work.
@@ -105,6 +113,25 @@ func (w *Writer) checkStateLocked() error {
 		return ErrClosed
 	}
 	return nil
+}
+
+// drainFsyncCallbacks invokes any OnFsync callbacks queued while w.mu was held.
+//
+// CALLER MUST NOT HOLD w.mu. Invoking the callback under the lock would
+// deadlock any callback that re-enters the Writer.
+func (w *Writer) drainFsyncCallbacks() {
+	w.mu.Lock()
+	pending := w.pendingFsync
+	w.pendingFsync = nil
+	cb := w.cfg.OnFsync
+	w.mu.Unlock()
+
+	if cb == nil {
+		return
+	}
+	for _, t := range pending {
+		cb(t)
+	}
 }
 
 // New creates a Writer that will write to the given path.
@@ -189,10 +216,12 @@ func (w *Writer) backgroundLoop() {
 				}
 			}
 			w.mu.Unlock()
+			w.drainFsyncCallbacks()
 		case <-rotC:
 			w.mu.Lock()
 			err := w.rotate()
 			w.mu.Unlock()
+			w.drainFsyncCallbacks()
 			if err != nil {
 				slog.Error("go_evtx_scheduled_rotate_failed", "path", w.path, "err", err)
 			}
@@ -209,6 +238,7 @@ func (w *Writer) backgroundLoop() {
 // in a single session; mixing both is not recommended.
 func (w *Writer) WriteRaw(payload []byte) error {
 	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
 
 	if err := w.checkStateLocked(); err != nil {
@@ -258,6 +288,7 @@ func (w *Writer) WriteRaw(payload []byte) error {
 //   - AccessList, AccessMask, ProcessId, ProcessName
 func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
 
 	if err := w.checkStateLocked(); err != nil {
@@ -439,6 +470,7 @@ func (w *Writer) rotate() error {
 // Rotate() is safe to call concurrently with WriteRecord() and WriteRaw().
 func (w *Writer) Rotate() error {
 	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
 	if err := w.checkStateLocked(); err != nil {
 		return err
@@ -466,7 +498,7 @@ func (w *Writer) cleanOldFiles() error {
 
 	// Sort by modification time (oldest first) and delete the excess.
 	type fileInfo struct {
-		path string
+		path  string
 		mtime int64
 	}
 	infos := make([]fileInfo, 0, len(matches))
@@ -502,6 +534,19 @@ func (w *Writer) chunkCapacityLocked() error {
 		return w.err
 	}
 	return nil
+}
+
+// queueFsyncLocked records an fsync timestamp for later delivery to OnFsync.
+//
+// The callback must not run under w.mu — a callback that re-enters the Writer
+// would deadlock — so the timestamp is queued here and fired by
+// drainFsyncCallbacks once the lock is released.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) queueFsyncLocked() {
+	if w.cfg.OnFsync != nil {
+		w.pendingFsync = append(w.pendingFsync, time.Now())
+	}
 }
 
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
@@ -549,9 +594,7 @@ func (w *Writer) flushChunkLocked() error {
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: sync: %w", err)
 	}
-	if w.cfg.OnFsync != nil {
-		w.cfg.OnFsync(time.Now())
-	}
+	w.queueFsyncLocked()
 
 	// Reset current chunk buffer.
 	w.records = w.records[:0]
@@ -608,9 +651,7 @@ func (w *Writer) tickFlushLocked() error {
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: tick sync: %w", err)
 	}
-	if w.cfg.OnFsync != nil {
-		w.cfg.OnFsync(time.Now())
-	}
+	w.queueFsyncLocked()
 
 	return nil
 }
@@ -636,6 +677,7 @@ func (w *Writer) Close() error {
 		w.closeErr = w.finalizeLocked()
 		w.mu.Unlock()
 	})
+	defer w.drainFsyncCallbacks()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.closeErr
