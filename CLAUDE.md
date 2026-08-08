@@ -83,7 +83,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 `rotate()` is transactional: flush pending records → skip if nothing was ever written → `Sync` and close the active file → commit the archive with `os.Link` then unlink the active path (`os.Rename` would silently replace an existing archive; `Link` fails atomically instead, with a `Stat`+`Rename` fallback where hard links are unsupported) → open and `Sync` a replacement file → `syncDir()` → reset counters → enforce `MaxFileCount`.
 
-Archive names are `base-<UTC timestamp>.evtx`; `cleanOldFiles()` finds them with the glob `base + "-*" + ext`.
+Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resolution UTC timestamp — one-second resolution let a burst of rotations collide); `cleanOldFiles()` finds them with the glob `base + "-*" + ext`.
 
 ## Key constraints
 
@@ -100,6 +100,8 @@ Archive names are `base-<UTC timestamp>.evtx`; `cleanOldFiles()` finds them with
 - **Sticky error.** Once durability can no longer be guaranteed (a rotation that failed after closing the active file, or a failed background flush), `w.err` is set permanently and every entry point returns it. There is no automatic recovery — a half-rotated directory needs an operator and a new `Writer`.
 - `checkStateLocked()` gates `WriteRecord`, `WriteRaw` and `Rotate`. Precedence is part of the API contract: the sticky error outranks `ErrClosed`, so a caller learns that data was lost rather than only that the writer shut down.
 - `closeFileLocked()` closes `w.f` exactly once, guarded by `w.fileClosed`; `rotate()` maintains that flag across the close/reopen.
+- **`OnFsync` fires on every sync** — from `WriteRecord`, `rotate`, `Close` and the background flush tick, not only when `FlushIntervalSec > 0`. It is invoked after `w.mu` is released, so a callback may safely call any `Writer` method; a callback that itself triggers a further flush recurses on its own call stack.
+- **`Reader` is also concurrency-safe:** a mutex (`r.mu`) is held for the duration of every exported method. `Open` does not lock — it constructs the `Reader` before it can be shared with another goroutine. `nextRecord` and `loadChunk` are unexported helpers carrying `// CALLER MUST HOLD r.mu.`. `nextRecord` copies each payload out of the shared chunk buffer before returning it; that copy is what makes `ReadRaw`'s returned bytes safe to retain past the next call.
 
 ## BinXML substitution index map
 

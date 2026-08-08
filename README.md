@@ -9,7 +9,7 @@
 
 A pure Go library for reading and writing Windows Event Log (`.evtx`) binary files — no Windows, no CGO, no external dependencies.
 
-Generated files are parseable by [python-evtx](https://github.com/williballenthin/python-evtx), verified manually against the v0.6.0 fixtures.
+Generated files are parseable by [python-evtx](https://github.com/williballenthin/python-evtx), but this is not exercised in CI — tracked for v0.7.0 alongside the `Get-WinEvent` job below.
 
 > **Windows Event Viewer compatibility is not yet verified.** The per-chunk
 > string and template hash tables are currently written as zeros, which some
