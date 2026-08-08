@@ -303,11 +303,15 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 }
 
 // archivePathFor returns the archive path for the given active file path.
-// The archive name is: base-YYYY-MM-DDTHH-MM-SS.ext (UTC timestamp, hyphens for colons).
+//
+// The archive name is base-YYYY-MM-DDTHH-MM-SS.nnnnnnnnn.ext, a UTC timestamp
+// with hyphens for colons. Nanosecond resolution is required: at one-second
+// resolution a burst of rotations produced colliding names and os.Rename
+// destroyed the earlier archives without an error.
 func archivePathFor(activePath string) string {
 	ext := filepath.Ext(activePath)
 	base := activePath[:len(activePath)-len(ext)]
-	ts := time.Now().UTC().Format("2006-01-02T15-04-05")
+	ts := time.Now().UTC().Format("2006-01-02T15-04-05.000000000")
 	return base + "-" + ts + ext
 }
 

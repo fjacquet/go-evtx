@@ -92,3 +92,54 @@ func TestRotate_StickyErrorIsStable(t *testing.T) {
 		t.Errorf("sticky error %q does not mention the failing operation", first)
 	}
 }
+
+// TestRotate_SubSecondBurstKeepsEveryArchive verifies that rotations closer
+// together than one second each produce their own archive. At one-second
+// resolution os.Rename silently destroyed the previous archive.
+func TestRotate_SubSecondBurstKeepsEveryArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.evtx")
+	w, err := New(path, RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const rotations = 3
+	for i := 0; i < rotations; i++ {
+		if err := w.WriteRecord(4663, testFields()); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+		if err := w.Rotate(); err != nil {
+			t.Fatalf("Rotate %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	archives, err := filepath.Glob(filepath.Join(dir, "c-*.evtx"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(archives) != rotations {
+		t.Fatalf("%d rotations produced %d archives (%v): committed audit data was destroyed",
+			rotations, len(archives), archives)
+	}
+}
+
+// TestArchivePathFor_NanosecondResolution pins the filename format.
+func TestArchivePathFor_NanosecondResolution(t *testing.T) {
+	got := archivePathFor("/var/log/audit.evtx")
+	if !strings.HasPrefix(got, "/var/log/audit-") {
+		t.Errorf("archivePathFor = %q, want /var/log/audit- prefix", got)
+	}
+	if !strings.HasSuffix(got, ".evtx") {
+		t.Errorf("archivePathFor = %q, want .evtx suffix", got)
+	}
+	// base- + YYYY-MM-DDTHH-MM-SS.nnnnnnnnn + .evtx
+	stamp := strings.TrimSuffix(strings.TrimPrefix(got, "/var/log/audit-"), ".evtx")
+	if len(stamp) != len("2006-01-02T15-04-05.000000000") {
+		t.Errorf("timestamp %q has length %d, want %d (nanosecond resolution)",
+			stamp, len(stamp), len("2006-01-02T15-04-05.000000000"))
+	}
+}
