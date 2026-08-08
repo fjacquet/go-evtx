@@ -82,13 +82,17 @@ type RotationConfig struct {
 // Writer writes Windows .evtx binary format files.
 // All exported methods are safe for concurrent use.
 type Writer struct {
-	mu         sync.Mutex
-	path       string   // output file path
-	records    []byte   // accumulated event record bytes for current chunk
-	recordID   uint64   // monotonically incrementing record ID, starts at 1
-	firstID    uint64   // first record ID in current chunk
-	f          *os.File // open file handle; created in New(), closed in Close()
-	chunkCount uint16   // number of COMPLETE chunks written to disk so far
+	mu      sync.Mutex
+	path    string // output file path
+	records []byte // accumulated event record bytes for current chunk
+	// lastRecordOffset is the chunk-relative offset where the most recent
+	// record in the pending chunk begins. Committed and reset alongside
+	// w.records; zero when the chunk is empty.
+	lastRecordOffset uint32
+	recordID         uint64   // monotonically incrementing record ID, starts at 1
+	firstID          uint64   // first record ID in current chunk
+	f                *os.File // open file handle; created in New(), closed in Close()
+	chunkCount       uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -165,9 +169,12 @@ func New(path string, cfg RotationConfig) (*Writer, error) {
 		return nil, fmt.Errorf("go_evtx: open file: %w", err)
 	}
 
-	// Write placeholder file header (ChunkCount=0, NextRecordID=1).
+	// Write placeholder file header (ChunkCount=0, NextRecordID=1). The dirty
+	// flag is set from the moment the file is opened for writing, not only
+	// once the first chunk happens to flush — a crash before any chunk lands
+	// must still read back as dirty, not as the placeholder's zero flags.
 	// This is patched on each flushChunkLocked() call.
-	if _, err := f.Write(buildFileHeader(0, 1)); err != nil {
+	if _, err := f.Write(buildFileHeader(0, 1, evtxFlagDirty)); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("go_evtx: write placeholder header: %w", err)
 	}
@@ -283,6 +290,7 @@ func (w *Writer) WriteRaw(payload []byte) error {
 		}
 	}
 
+	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
 	w.recordID++
 	return nil
@@ -344,6 +352,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		rec = wrapEventRecord(w.recordID, ts, payload)
 	}
 
+	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
 	w.recordID++
 	return nil
@@ -442,7 +451,7 @@ func (w *Writer) rotate() error {
 		w.err = fmt.Errorf("go_evtx: rotate open new file: %w", err)
 		return w.err
 	}
-	if _, err := f.Write(buildFileHeader(0, 1)); err != nil {
+	if _, err := f.Write(buildFileHeader(0, 1, evtxFlagDirty)); err != nil {
 		_ = f.Close()
 		w.err = fmt.Errorf("go_evtx: rotate write header: %w", err)
 		return w.err
@@ -466,6 +475,7 @@ func (w *Writer) rotate() error {
 	w.recordID = 1
 	w.firstID = 1
 	w.records = w.records[:0]
+	w.lastRecordOffset = 0
 	w.currentSize = evtxFileHeaderSize
 
 	slog.Info("go_evtx_rotated", "archive", archive, "active", w.path)
@@ -536,20 +546,46 @@ func (w *Writer) cleanOldFiles() error {
 	return nil
 }
 
-// chunkCapacityLocked reports whether the pending buffer still fits in a chunk.
+// chunkCapacityLocked reports whether the pending buffer still fits in a chunk
+// and whether the file has room for another chunk.
 //
-// The entry guards in WriteRecord and WriteRaw make an overflow unreachable.
-// If it ever fires, a code change has reintroduced silent truncation — fail
-// permanently rather than write a corrupt chunk whose CRCs verify.
+// The entry guards in WriteRecord and WriteRaw make the payload-size overflow
+// unreachable. If it ever fires, a code change has reintroduced silent
+// truncation — fail permanently rather than write a corrupt chunk whose CRCs
+// verify.
+//
+// chunkCount is a uint16, so 65535 is the last addressable chunk slot; at
+// 65536 the counter would wrap to 0 and chunkOffset would recompute to the
+// start of chunk 0, silently overwriting it. That is reachable whenever
+// MaxFileSizeMB is 0 (the zero value), since nothing else bounds the file's
+// growth. Fail permanently instead of wrapping.
 //
 // CALLER MUST HOLD w.mu.
 func (w *Writer) chunkCapacityLocked() error {
+	if w.chunkCount >= maxChunksPerFile {
+		w.err = fmt.Errorf("%w: %d chunks", ErrTooManyChunks, w.chunkCount)
+		return w.err
+	}
 	if len(w.records) > maxChunkPayload {
 		w.err = fmt.Errorf("go_evtx: internal: chunk buffer %d bytes exceeds capacity %d",
 			len(w.records), maxChunkPayload)
 		return w.err
 	}
 	return nil
+}
+
+// activeFlagsLocked computes the file header flags to write while the writer
+// is open and accepting further data: the dirty bit is always set — the file
+// has been written to but not cleanly closed — and the full bit joins it once
+// the file has reached the configured size limit.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) activeFlagsLocked() uint32 {
+	flags := evtxFlagDirty
+	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
+		flags |= evtxFlagFull
+	}
+	return flags
 }
 
 // queueFsyncLocked records an fsync timestamp for later delivery to OnFsync.
@@ -585,7 +621,7 @@ func (w *Writer) flushChunkLocked() error {
 
 	recordsStart := int(evtxRecordsStart)
 	freeSpaceOffset := uint32(recordsStart + len(records))
-	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, freeSpaceOffset)
+	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
 	chunkBytes := make([]byte, evtxChunkSize)
 	copy(chunkBytes[0:], chunkHeader)
@@ -602,7 +638,7 @@ func (w *Writer) flushChunkLocked() error {
 
 	// Patch the file header to acknowledge the new chunk, then make it durable.
 	nextChunkCount := w.chunkCount + 1
-	if _, err := w.f.WriteAt(buildFileHeader(nextChunkCount, w.recordID), 0); err != nil {
+	if _, err := w.f.WriteAt(buildFileHeader(nextChunkCount, w.recordID, w.activeFlagsLocked()), 0); err != nil {
 		return fmt.Errorf("go_evtx: patch file header: %w", err)
 	}
 	if err := w.f.Sync(); err != nil {
@@ -615,6 +651,7 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkCount = nextChunkCount
 	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
+	w.lastRecordOffset = 0
 	w.firstID = w.recordID
 	w.queueFsyncLocked()
 
@@ -645,7 +682,7 @@ func (w *Writer) tickFlushLocked() error {
 
 	recordsStart := int(evtxRecordsStart)
 	freeSpaceOffset := uint32(recordsStart + len(records))
-	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, freeSpaceOffset)
+	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
 	chunkBytes := make([]byte, evtxChunkSize)
 	copy(chunkBytes[0:], chunkHeader)
@@ -661,7 +698,7 @@ func (w *Writer) tickFlushLocked() error {
 	}
 
 	// Patch file header with chunkCount+1 to reflect in-progress chunk visibility.
-	if _, err := w.f.WriteAt(buildFileHeader(w.chunkCount+1, w.recordID), 0); err != nil {
+	if _, err := w.f.WriteAt(buildFileHeader(w.chunkCount+1, w.recordID, w.activeFlagsLocked()), 0); err != nil {
 		return fmt.Errorf("go_evtx: tick patch file header: %w", err)
 	}
 
@@ -733,6 +770,25 @@ func (w *Writer) finalizeLocked() error {
 		}
 	}
 
+	// A clean Close clears the dirty flag, so a forensic consumer can tell
+	// this file apart from one truncated by a crash. Every prior header write
+	// (New, flushChunkLocked, tickFlushLocked) left the dirty bit set; this is
+	// the one write that clears it, and only once everything above succeeded
+	// and at least one chunk actually exists on disk.
+	if err == nil && w.chunkCount > 0 {
+		flags := uint32(0)
+		if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
+			flags = evtxFlagFull
+		}
+		if _, herr := w.f.WriteAt(buildFileHeader(w.chunkCount, w.recordID, flags), 0); herr != nil {
+			err = fmt.Errorf("go_evtx: finalize clear dirty flag: %w", herr)
+		} else if serr := w.f.Sync(); serr != nil {
+			err = fmt.Errorf("go_evtx: finalize sync: %w", serr)
+		} else {
+			w.queueFsyncLocked()
+		}
+	}
+
 	if cerr := w.closeFileLocked(); cerr != nil && err == nil {
 		err = cerr
 	}
@@ -753,16 +809,21 @@ func (w *Writer) closeFileLocked() error {
 }
 
 // buildChunkHeader constructs the 512-byte EVTX chunk header.
-func buildChunkHeader(firstRecordID, lastRecordID uint64, freeSpaceOffset uint32) []byte {
+//
+// lastRecordOffset is the chunk-relative offset where the LAST record's data
+// begins — distinct from freeSpaceOffset, which is where the next record
+// would start. A chunk with any records must never write the same value into
+// both fields.
+func buildChunkHeader(firstRecordID, lastRecordID uint64, lastRecordOffset, freeSpaceOffset uint32) []byte {
 	buf := make([]byte, evtxChunkHeaderSize)
 	copy(buf[0:8], evtxChunkMagic)
-	binary.LittleEndian.PutUint64(buf[8:], firstRecordID)    // FirstEventRecordNumber
-	binary.LittleEndian.PutUint64(buf[16:], lastRecordID)    // LastEventRecordNumber
-	binary.LittleEndian.PutUint64(buf[24:], firstRecordID)   // FirstEventRecordIdentifier
-	binary.LittleEndian.PutUint64(buf[32:], lastRecordID)    // LastEventRecordIdentifier
-	binary.LittleEndian.PutUint32(buf[40:], 128)             // HeaderSize
-	binary.LittleEndian.PutUint32(buf[44:], freeSpaceOffset) // LastEventRecordDataOffset
-	binary.LittleEndian.PutUint32(buf[48:], freeSpaceOffset) // FreeSpaceOffset
+	binary.LittleEndian.PutUint64(buf[8:], firstRecordID)     // FirstEventRecordNumber
+	binary.LittleEndian.PutUint64(buf[16:], lastRecordID)     // LastEventRecordNumber
+	binary.LittleEndian.PutUint64(buf[24:], firstRecordID)    // FirstEventRecordIdentifier
+	binary.LittleEndian.PutUint64(buf[32:], lastRecordID)     // LastEventRecordIdentifier
+	binary.LittleEndian.PutUint32(buf[40:], 128)              // HeaderSize
+	binary.LittleEndian.PutUint32(buf[44:], lastRecordOffset) // LastEventRecordDataOffset
+	binary.LittleEndian.PutUint32(buf[48:], freeSpaceOffset)  // FreeSpaceOffset
 	return buf
 }
 

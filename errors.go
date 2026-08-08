@@ -12,6 +12,12 @@ var ErrClosed = errors.New("go_evtx: writer is closed")
 // the record is rejected and nothing is written.
 var ErrRecordTooLarge = errors.New("go_evtx: record exceeds chunk capacity")
 
+// ErrTooManyChunks is returned when a file has reached the maximum number of
+// chunks a uint16 chunk counter can address. Continuing would wrap the counter
+// and overwrite chunk 0. Rotate, or set MaxFileSizeMB so rotation happens
+// first.
+var ErrTooManyChunks = errors.New("go_evtx: file has reached the maximum chunk count")
+
 // maxChunkPayload is the number of bytes available for event records in a
 // single chunk, after the 512-byte chunk header.
 const maxChunkPayload = int(evtxChunkSize - evtxRecordsStart) // 65024
@@ -20,3 +26,8 @@ const maxChunkPayload = int(evtxChunkSize - evtxRecordsStart) // 65024
 // the chunk payload capacity less the 24-byte record header and the 4-byte
 // trailing size copy.
 const maxRecordPayload = maxChunkPayload - evtxRecordHeaderSize - 4 // 64996
+
+// maxChunksPerFile is the largest number of chunks a file may hold. chunkCount
+// is a uint16, so 65535 is the last addressable slot; at 65536 the counter
+// wraps to 0 and chunkOffset recomputes to the start of chunk 0.
+const maxChunksPerFile = 65535

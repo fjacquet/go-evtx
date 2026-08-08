@@ -118,7 +118,7 @@ func TestEncodeUTF16LE(t *testing.T) {
 
 // TestBuildFileHeader verifies the 4096-byte EVTX file header.
 func TestBuildFileHeader(t *testing.T) {
-	result := buildFileHeader(1, 42)
+	result := buildFileHeader(1, 42, 0)
 
 	if len(result) != 4096 {
 		t.Fatalf("buildFileHeader length = %d, want 4096", len(result))

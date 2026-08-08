@@ -31,6 +31,16 @@ const (
 	filetimeEpochDelta = int64(116444736000000000)
 )
 
+// File header flags, written at buf[120:124].
+const (
+	// evtxFlagDirty marks a log that has been written to but not cleanly
+	// closed. A forensic consumer reads it to tell a clean shutdown from a
+	// crash-truncated file.
+	evtxFlagDirty uint32 = 0x0001
+	// evtxFlagFull marks a log that reached its configured size limit.
+	evtxFlagFull uint32 = 0x0002
+)
+
 // toFILETIME converts a Go time.Time to a Windows FILETIME value.
 // FILETIME is expressed as 100-nanosecond intervals since 1601-01-01 00:00:00 UTC.
 func toFILETIME(t time.Time) uint64 {
@@ -68,7 +78,7 @@ func encodeUTF16LE(s string) []byte {
 //
 //	[0:8]    Signature "ElfFile\x00"
 //	[8:16]   FirstChunkNumber = 0
-//	[16:24]  LastChunkNumber  = chunkCount - 1
+//	[16:24]  LastChunkNumber  = chunkCount - 1 (0 when chunkCount == 0)
 //	[24:32]  NextRecordIdentifier = nextRecordID
 //	[32:36]  HeaderSize = 128
 //	[36:38]  MinorVersion = 1
@@ -76,23 +86,30 @@ func encodeUTF16LE(s string) []byte {
 //	[40:42]  BlockSize = 4096
 //	[42:44]  ChunkCount = chunkCount
 //	[44:120] reserved zeros
-//	[120:124] Flags = 0
+//	[120:124] Flags = flags
 //	[124:128] CRC32 of buf[0:120]
 //	[128:4096] padding zeros
-func buildFileHeader(chunkCount uint16, nextRecordID uint64) []byte {
+//
+// The CRC covers buf[0:120] only, so flags sits outside its range — writing
+// it does not invalidate the checksum.
+func buildFileHeader(chunkCount uint16, nextRecordID uint64, flags uint32) []byte {
 	buf := make([]byte, evtxFileHeaderSize)
 
 	copy(buf[0:8], evtxFileMagic)
-	binary.LittleEndian.PutUint64(buf[8:], 0)                     // FirstChunkNumber
-	binary.LittleEndian.PutUint64(buf[16:], uint64(chunkCount-1)) // LastChunkNumber
-	binary.LittleEndian.PutUint64(buf[24:], nextRecordID)         // NextRecordIdentifier
-	binary.LittleEndian.PutUint32(buf[32:], 128)                  // HeaderSize
-	binary.LittleEndian.PutUint16(buf[36:], 1)                    // MinorVersion
-	binary.LittleEndian.PutUint16(buf[38:], 3)                    // MajorVersion
-	binary.LittleEndian.PutUint16(buf[40:], 4096)                 // BlockSize
-	binary.LittleEndian.PutUint16(buf[42:], chunkCount)           // ChunkCount
+	binary.LittleEndian.PutUint64(buf[8:], 0) // FirstChunkNumber
+	lastChunk := uint64(0)
+	if chunkCount > 0 {
+		lastChunk = uint64(chunkCount - 1)
+	}
+	binary.LittleEndian.PutUint64(buf[16:], lastChunk)    // LastChunkNumber
+	binary.LittleEndian.PutUint64(buf[24:], nextRecordID) // NextRecordIdentifier
+	binary.LittleEndian.PutUint32(buf[32:], 128)          // HeaderSize
+	binary.LittleEndian.PutUint16(buf[36:], 1)            // MinorVersion
+	binary.LittleEndian.PutUint16(buf[38:], 3)            // MajorVersion
+	binary.LittleEndian.PutUint16(buf[40:], 4096)         // BlockSize
+	binary.LittleEndian.PutUint16(buf[42:], chunkCount)   // ChunkCount
 	// buf[44:120] — reserved zeros (already zero from make())
-	// buf[120:124] — Flags = 0 (already zero)
+	binary.LittleEndian.PutUint32(buf[120:], flags) // Flags
 	// buf[124:128] — CRC32 placeholder (must be zero during calculation)
 
 	crc := crc32.Checksum(buf[0:120], crc32.IEEETable)
@@ -134,11 +151,11 @@ func wrapEventRecord(recordID uint64, timestamp uint64, binXMLPayload []byte) []
 	buf := make([]byte, size)
 
 	binary.LittleEndian.PutUint32(buf[0:], evtxRecordSignature) // Signature
-	binary.LittleEndian.PutUint32(buf[4:], size)                 // Size
-	binary.LittleEndian.PutUint64(buf[8:], recordID)             // EventRecordID
-	binary.LittleEndian.PutUint64(buf[16:], timestamp)           // TimeCreated (FILETIME)
-	copy(buf[24:], binXMLPayload)                                 // BinXML payload
-	binary.LittleEndian.PutUint32(buf[size-4:], size)            // Size copy at end
+	binary.LittleEndian.PutUint32(buf[4:], size)                // Size
+	binary.LittleEndian.PutUint64(buf[8:], recordID)            // EventRecordID
+	binary.LittleEndian.PutUint64(buf[16:], timestamp)          // TimeCreated (FILETIME)
+	copy(buf[24:], binXMLPayload)                               // BinXML payload
+	binary.LittleEndian.PutUint32(buf[size-4:], size)           // Size copy at end
 
 	return buf
 }
