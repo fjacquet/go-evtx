@@ -9,7 +9,13 @@
 
 A pure Go library for reading and writing Windows Event Log (`.evtx`) binary files — no Windows, no CGO, no external dependencies.
 
-Generated files are parseable by [python-evtx](https://github.com/williballenthin/python-evtx), Velociraptor, and Windows Event Viewer.
+Generated files are parseable by [python-evtx](https://github.com/williballenthin/python-evtx), verified manually against the v0.6.0 fixtures.
+
+> **Windows Event Viewer compatibility is not yet verified.** The per-chunk
+> string and template hash tables are currently written as zeros, which some
+> parsers require. This is tracked for v0.7.0, where a `Get-WinEvent` CI job
+> will either confirm the claim or retire it. Velociraptor compatibility is
+> untested — do not rely on it.
 
 > Full requirements and roadmap: [docs/PRD.md](docs/PRD.md)
 
@@ -38,6 +44,17 @@ w.WriteRecord(4663, map[string]string{
 ```
 
 Use `WriteRaw` when you have a pre-encoded BinXML payload (e.g. forwarded from another source). Do not mix `WriteRecord` and `WriteRaw` in the same session.
+
+### Errors
+
+| Error | Cause |
+|---|---|
+| `ErrRecordTooLarge` | A single record's BinXML payload exceeds 64,996 bytes — the chunk payload capacity less the record header and trailing size. The record is rejected and nothing is written. |
+| `ErrClosed` | `WriteRecord`, `WriteRaw` or `Rotate` was called after `Close`. |
+
+A rotation that fails after closing the active file records a permanent error.
+Every subsequent call returns it — the writer never silently accepts events it
+cannot persist. Recovery requires operator intervention and a new `Writer`.
 
 ## Read events
 

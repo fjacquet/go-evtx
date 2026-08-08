@@ -114,11 +114,3 @@ Archive names are `base-<UTC timestamp>.evtx`; `cleanOldFiles()` finds them with
 | 6+2i | DataField[i] value | STRING |
 
 The 12 data fields (indices 5–28) are hardcoded in `dataFieldNames` in `binxml.go`.
-
-## In flight on `feat/v0.6.0-durability`
-
-Documented above as the v0.6.0 target; not yet on `main`. Delete this section when the branch merges.
-
-- Archive filenames move to nanosecond resolution (`2006-01-02T15-04-05.000000000`). At one-second resolution a burst of rotations produced colliding names.
-- `OnFsync` will be invoked after `w.mu` is released, so a callback may safely call any `Writer` method. It fires on **every** sync — from `WriteRecord`, `rotate` and `Close` — not only when `FlushIntervalSec > 0` as the field comment currently claims.
-- `Reader` gains a mutex and becomes genuinely safe for concurrent use. Its doc comment already claims this; today the claim is false.
