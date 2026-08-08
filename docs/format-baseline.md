@@ -34,6 +34,18 @@ baseline the rest of the release compares against.**
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below).
 
+**Parser version.** All seven rows above were produced by `python-evtx==0.8.1`
+— confirmed by grepping each run's job log for uv's `+ python-evtx==X.Y.Z`
+install line (every run listed above was checked, not sampled). The
+`python-evtx-differential` job in `.github/workflows/format-verify.yml`
+originally ran `uv pip install python-evtx` with no version pin, which
+happened to resolve 0.8.1 for every run to date, but was one upstream release
+away from silently invalidating the whole comparison chain: two rows could
+then differ for a reason that has nothing to do with go-evtx. The workflow
+now pins `python-evtx==0.8.1` explicitly, continuous with the version that
+produced every row recorded here. A future bump to a newer parser version
+must be noted here, next to the row it first affects.
+
 ## Row 2: the fixture
 
 `cmd/gen-fixture` writes 403 `WriteRecord`-only records spanning 21 chunks:
@@ -62,7 +74,7 @@ review (see "Harness bugs" below), fixed before row 2 was measured.
 
 ## Row 2: python-evtx differential (Linux) — verbatim
 
-```
+```text
 FAIL
   - ObjectName count: got 0, want 403
 ```
@@ -88,7 +100,7 @@ task (Task 8, "Emit the Event namespace declaration") in the current plan.
 
 ## Row 2: Get-WinEvent (windows-latest) — verbatim
 
-```
+```text
 Get-WinEvent: D:\a\_temp\19a577c2-d883-4bcf-b32f-f5f081b0f652.ps1:6
 Line |
    6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
@@ -259,7 +271,7 @@ Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268668199/job/93130
 
 python-evtx differential: FAIL
 
-```
+```text
 FAIL
   - ObjectName count: got 0, want 403
 ```
@@ -271,7 +283,7 @@ every prior measurement.
 
 Get-WinEvent: FAIL
 
-```
+```text
 Get-WinEvent: D:\a\_temp\7ee74807-309b-4443-87e3-a5e1fab3098f.ps1:6
 Line |
    6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
@@ -358,7 +370,7 @@ Measured from CI run [`31270735835`](https://github.com/fjacquet/go-evtx/actions
 head commit `3c9e82594d9aa2a4ef68adcc3d8f59856ecccc8f` — verified directly
 against the run object, not taken from the top of a recency-sorted list:
 
-```
+```console
 $ git rev-parse HEAD
 3c9e82594d9aa2a4ef68adcc3d8f59856ecccc8f
 $ gh api repos/fjacquet/go-evtx/actions/runs/31270735835 --jq '.head_sha'
@@ -376,7 +388,7 @@ Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31270735835/job/93136
 
 python-evtx differential: FAIL
 
-```
+```text
 FAIL
   - ObjectName count: got 0, want 403
 ```
@@ -389,7 +401,7 @@ every prior measurement, and consistent with `fillHashTables` running before
 
 Get-WinEvent: FAIL
 
-```
+```text
 Get-WinEvent: D:\a\_temp\91a2a9dc-0923-4cbc-9650-7c44c83c78c0.ps1:6
 Line |
    6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
@@ -461,7 +473,7 @@ read-stage (Part A)"), pushed to `feat/v0.7.0-format-correctness`.
 **Run selection, by head SHA, not recency** (the lesson from the "After Task
 3" correction note above):
 
-```
+```console
 $ git rev-parse HEAD
 ff33b7ef2588d6c942cb218b2e3c46940e6bbb8a
 $ gh run view 31272448023 --json status,conclusion,headSha
@@ -477,7 +489,7 @@ Job log (`generate`):
 
 python-evtx differential: FAIL, unchanged —
 
-```
+```text
 FAIL
   - ObjectName count: got 0, want 403
 ```
@@ -486,7 +498,7 @@ Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31272448023/job/93140
 
 **`get-winevent` — verbatim, the load-bearing result of this task:**
 
-```
+```text
 STAGE1 OPEN: ok
 STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
 ParentContainsErrorRecordException: D:\a\_temp\709a3d11-cfe2-4bd1-b114-4c224efec2f0.ps1:27
@@ -567,7 +579,7 @@ Windows file (B1-B3)"), pushed to `feat/v0.7.0-format-correctness`.
 
 **Run selection, by head SHA:**
 
-```
+```console
 $ git rev-parse HEAD
 62de6330e2fba265dd803e30fea4b1b614f9f20b
 $ gh run view 31272639129 --json status,conclusion,headSha
@@ -577,7 +589,7 @@ $ gh run view 31272639129 --json status,conclusion,headSha
 **Fixture is NOT byte-identical to rows 2–5, exactly as the task brief
 predicted.** From the `generate` job log:
 
-```
+```text
 wrote artifacts/generated.evtx (403 records, max ObjectName 31642 runes)
 ```
 
@@ -591,7 +603,7 @@ boundary.
 
 python-evtx differential: FAIL, unchanged —
 
-```
+```text
 FAIL
   - ObjectName count: got 0, want 403
 ```
@@ -600,7 +612,7 @@ Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31272639129/job/93141
 
 **`get-winevent` — verbatim:**
 
-```
+```text
 STAGE1 OPEN: ok
 STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
 ParentContainsErrorRecordException: D:\a\_temp\a7427665-afab-4590-b7db-f6fe894d10b9.ps1:27
@@ -699,7 +711,7 @@ dependency_id (F9)"), pushed to `feat/v0.7.0-format-correctness`.
 
 **Run selection, by head SHA:**
 
-```
+```console
 $ git rev-parse HEAD
 45101039cdf14baa17f3b0cd7b079af479e4ed30
 $ gh api repos/fjacquet/go-evtx/actions/runs/31273985286 --jq '.head_sha'
@@ -708,7 +720,7 @@ $ gh api repos/fjacquet/go-evtx/actions/runs/31273985286 --jq '.head_sha'
 
 **Fixture identity, confirmed from the `generate` job log:**
 
-```
+```text
 wrote artifacts/generated.evtx (403 records, max ObjectName 31642 runes)
 ```
 
@@ -723,7 +735,7 @@ Job log (`generate`):
 
 python-evtx differential: FAIL, unchanged —
 
-```
+```text
 FAIL
   - ObjectName count: got 0, want 403
 ```
@@ -732,7 +744,7 @@ Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31273985286/job/93144
 
 **`get-winevent` — verbatim, the load-bearing result of this task:**
 
-```
+```text
 STAGE1 OPEN: ok
 STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
 ParentContainsErrorRecordException: D:\a\_temp\5a7f688b-835c-4891-af0a-c092738abd94.ps1:27

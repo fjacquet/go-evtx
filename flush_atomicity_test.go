@@ -1,13 +1,18 @@
 // flush_atomicity_test.go — flushChunkLocked must commit persistent state
-// (w.chunkCount, w.currentSize, w.records, w.firstID) atomically: either all
-// of it moves together once every I/O step (chunk write, header patch, sync)
-// has succeeded, or none of it moves at all when a step fails. A partial
-// mutation would make a retry unsafe: rotate()'s Step 1 comment says a
-// flushChunkLocked failure "is not sticky — the file handle is still valid,"
-// i.e. safe to retry. If chunkCount/currentSize had already advanced, a retry
-// would recompute chunkOffset from the advanced chunkCount and write the same
-// records into a second chunk slot — duplicate records on WriteRecord's path,
-// or an on-disk chunk the file header never acknowledges on Close's path.
+// (w.chunkCount, w.currentSize, w.records, w.firstID, w.lastRecordOffset)
+// atomically: either all of it moves together once every I/O step (chunk
+// write, header patch, sync) has succeeded, or none of it moves at all when a
+// step fails. A partial mutation would make a retry unsafe: rotate()'s Step 1
+// comment says "A transient I/O failure here is not sticky — the file handle
+// is still valid and the caller can retry," which is what this file's forced
+// I/O failure is. (The same comment also carves out flushChunkLocked's
+// chunk-ceiling guard, at maxChunksPerFile, as deliberately sticky through
+// that same path — no further chunk can ever be written to the file, so
+// there is nothing to retry. That case is not what this file exercises.) If
+// chunkCount/currentSize had already advanced, a retry would recompute
+// chunkOffset from the advanced chunkCount and write the same records into a
+// second chunk slot — duplicate records on WriteRecord's path, or an
+// on-disk chunk the file header never acknowledges on Close's path.
 //
 // White-box: package evtx. stdlib only.
 package evtx
@@ -19,8 +24,8 @@ import (
 )
 
 // TestFlushChunkLocked_SuccessCommitsTogether drives a real flush and checks
-// that chunkCount, currentSize, the reset records buffer, and firstID all
-// reflect the same completed flush.
+// that chunkCount, currentSize, the reset records buffer, firstID, and
+// lastRecordOffset all reflect the same completed flush.
 func TestFlushChunkLocked_SuccessCommitsTogether(t *testing.T) {
 	w, err := New(filepath.Join(t.TempDir(), "success.evtx"), RotationConfig{})
 	if err != nil {
@@ -49,6 +54,7 @@ func TestFlushChunkLocked_SuccessCommitsTogether(t *testing.T) {
 	gotNamesLen := len(w.chunkNames)
 	gotTemplatesLen := len(w.chunkTemplates)
 	gotFirstID := w.firstID
+	gotLastRecordOffset := w.lastRecordOffset
 	w.mu.Unlock()
 
 	if flushErr != nil {
@@ -71,6 +77,9 @@ func TestFlushChunkLocked_SuccessCommitsTogether(t *testing.T) {
 	}
 	if gotFirstID != wantFirstID {
 		t.Errorf("firstID = %d, want %d", gotFirstID, wantFirstID)
+	}
+	if gotLastRecordOffset != 0 {
+		t.Errorf("lastRecordOffset = %d, want 0 (reset for the next, as-yet-empty chunk)", gotLastRecordOffset)
 	}
 }
 
@@ -130,6 +139,7 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	wantFirstID := w.firstID
 	wantNames := len(w.chunkNames)
 	wantTemplates := len(w.chunkTemplates)
+	wantLastRecordOffset := w.lastRecordOffset
 	if len(wantRecords) == 0 {
 		w.mu.Unlock()
 		t.Fatal("expected buffered records before the forced failure")
@@ -137,6 +147,10 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	if wantNames == 0 {
 		w.mu.Unlock()
 		t.Fatal("expected buffered chunkNames before the forced failure")
+	}
+	if wantLastRecordOffset == 0 {
+		w.mu.Unlock()
+		t.Fatal("expected a nonzero lastRecordOffset before the forced failure — WriteRecord sets it before flushChunkLocked runs")
 	}
 
 	// Close the handle directly (bypassing closeFileLocked/fileClosed
@@ -151,6 +165,7 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	gotRecords := append([]byte(nil), w.records...)
 	gotNames := len(w.chunkNames)
 	gotTemplates := len(w.chunkTemplates)
+	gotLastRecordOffset := w.lastRecordOffset
 
 	w.mu.Unlock()
 
@@ -174,5 +189,8 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	}
 	if gotTemplates != wantTemplates {
 		t.Errorf("chunkTemplates reset on failure: got %d, want %d", gotTemplates, wantTemplates)
+	}
+	if gotLastRecordOffset != wantLastRecordOffset {
+		t.Errorf("lastRecordOffset changed on failure: got %d, want %d (unchanged)", gotLastRecordOffset, wantLastRecordOffset)
 	}
 }

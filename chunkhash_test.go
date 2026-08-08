@@ -117,7 +117,10 @@ func TestFixture_StringTableBucketRule(t *testing.T) {
 // fixture that scores 10 of 146, i.e. chance. Do not "simplify" it back.
 //
 // Every chunk is walked, not the first five: the whole point of this test is
-// coverage of real-world template shapes, and the fixture has 17 chunks.
+// coverage of real-world template shapes. readFixtureChunkOK stops at the
+// file header's ChunkCount, which is 9 for this fixture -- not the 17
+// pre-allocated evtxChunkSize slots the file is long by byte size (see
+// readFixtureChunkOK's comment above).
 func TestFixture_TemplateTableBucketRule(t *testing.T) {
 	checked := 0
 	for chunkNo := 0; ; chunkNo++ {
@@ -152,8 +155,9 @@ func TestFixture_TemplateTableBucketRule(t *testing.T) {
 			}
 		}
 	}
-	// The fixture is known to hold 146 template entries across 17 chunks. An
-	// exact pin turns a silently-truncated walk into a failure.
+	// The fixture is known to hold 146 template entries across the 9 chunks
+	// its file header advertises (ChunkCount, not the 17 pre-allocated
+	// slots). An exact pin turns a silently-truncated walk into a failure.
 	if checked != 146 {
 		t.Errorf("validated %d TemplateNodes, want 146 — the table walk changed", checked)
 	}
@@ -291,4 +295,55 @@ func TestFillHashTables_TerminatorIsActuallyWritten(t *testing.T) {
 		t.Errorf("tail node next_offset = 0x%08x, want 0 — fillHashTables did not "+
 			"write the chain terminator over the pre-existing non-zero bytes", next)
 	}
+}
+
+// TestFillHashTables_SkipsInvalidOffset exercises fillOneTable's defensive
+// bounds check (chunkhash.go: "A zero offset is not addressable ... and an
+// out-of-range one would corrupt the chunk. Neither can happen for nodes the
+// encoder emitted; skip defensively rather than panic"). No test supplied a
+// ref tripping that check before this one, so an off-by-one in the bound
+// (e.g. using >= instead of > against len(chunk)) would pass the whole suite
+// silently. Each bad ref here is paired with a good one sharing the same
+// bucket, so a skip that is too aggressive (dropping the good ref too) or
+// too lax (writing out of bounds / registering the bad one) both fail.
+func TestFillHashTables_SkipsInvalidOffset(t *testing.T) {
+	good := uint32(600)
+
+	t.Run("zero offset", func(t *testing.T) {
+		chunk := make([]byte, evtxChunkSize)
+		// Same key for both refs, so if the zero-offset ref were wrongly
+		// registered it would win the bucket instead of the good ref.
+		k := uint32(11)
+		refs := []chunkRef{
+			{key: k, offset: 0},    // must be skipped: not addressable
+			{key: k, offset: good}, // must still be registered
+		}
+		fillHashTables(chunk, refs, nil)
+
+		b := nameBucket(k)
+		if got := getBucket(chunk, stringTableStart, b); got != good {
+			t.Errorf("bucket %d = %d, want %d — zero-offset ref must be skipped, "+
+				"not registered, and must not block the following valid ref", b, got, good)
+		}
+	})
+
+	t.Run("out of range offset", func(t *testing.T) {
+		chunk := make([]byte, evtxChunkSize)
+		k := uint32(13)
+		// One byte past what a 4-byte next_offset write at the tail of the
+		// chunk can hold: int(offset)+4 > len(chunk) must reject this without
+		// panicking on the PutUint32 that would otherwise follow.
+		badOff := uint32(len(chunk) - 3)
+		refs := []chunkRef{
+			{key: k, offset: badOff}, // must be skipped: out of range
+			{key: k, offset: good},   // must still be registered
+		}
+		fillHashTables(chunk, refs, nil)
+
+		b := nameBucket(k)
+		if got := getBucket(chunk, stringTableStart, b); got != good {
+			t.Errorf("bucket %d = %d, want %d — out-of-range ref must be skipped, "+
+				"not registered, and must not block the following valid ref", b, got, good)
+		}
+	})
 }

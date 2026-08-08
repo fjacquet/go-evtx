@@ -39,7 +39,14 @@ jobs:
       - name: Parse with python-evtx
         run: |
           uv venv
-          uv pip install python-evtx
+          # Pinned: every row in docs/format-baseline.md's measurement table was
+          # produced by this exact version. An unpinned `install` resolves
+          # whatever is latest at workflow runtime, so two measurement rows
+          # could differ for a reason that has nothing to do with go-evtx --
+          # silently invalidating the whole comparison chain the release relies
+          # on. Bump deliberately, and only alongside a note in
+          # docs/format-baseline.md that a later row's parser version changed.
+          uv pip install python-evtx==0.8.1
           uv run python scripts/verify_python_evtx.py artifacts/generated.evtx artifacts/expected.json
 
   get-winevent:

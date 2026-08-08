@@ -125,7 +125,21 @@ func main() {
 // Hardcoding a length would silently stop being a boundary case the moment
 // maxRecordPayload changes -- which Task 6 of this release does.
 func largestAccepted() int {
-	lo, hi := 1, probeCeiling // hi is deliberately past any plausible limit
+	// This is a find-last-true bisection: it assumes lo=1 is accepted and
+	// only searches for where acceptance stops. That assumption is never
+	// checked by the loop below -- if the writer rejected even a 1-rune
+	// ObjectName, the loop would still return lo=1 unchanged, main's
+	// probeCeiling guard would pass (1 != probeCeiling), and the generator
+	// would report success while writing a fixture with no boundary coverage
+	// at all. Probe it explicitly and fail loudly rather than silently
+	// trusting the assumption.
+	const lo0 = 1
+	if !acceptsObjectName(lo0) {
+		fatal(fmt.Errorf("largestAccepted: writer rejected a %d-rune ObjectName; "+
+			"the binary search's lower-bound assumption does not hold", lo0))
+	}
+
+	lo, hi := lo0, probeCeiling // hi is deliberately past any plausible limit
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
 		if acceptsObjectName(mid) {
