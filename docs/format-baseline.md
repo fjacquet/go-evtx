@@ -27,8 +27,9 @@ baseline the rest of the release compares against.**
 | 1 | `35392ac` | 400 records, 18 chunks, no boundary case | FAIL: ObjectName 0/400 | FAIL: `"The event log file is corrupted."` |
 | 2 | `6f3485e` | 403 records, 21 chunks, incl. near-max + chunk-fill boundary | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 3 | `173fcf2` | 403 records, 21 chunks — byte-identical generator output to row 2 (Task 3 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
+| 4 | `3c9e825` | 403 records, 21 chunks — byte-identical generator output to rows 2-3 (Task 6 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below).
 
 ## Row 2: the fixture
 
@@ -332,3 +333,99 @@ again in this run, as in every prior one). This strengthens, rather than
 weakens, the case for Tasks 4–6 (the hash-table chain ending in F1) as the
 next place to look. It does not by itself prove F1 is the cause — only that
 the two cheap candidates tried in this task are not.
+
+## After Task 6 (F1 — chunk hash tables)
+
+Task 6 wired `fillHashTables` (built in Tasks 4–5) into both flush paths.
+`flushChunkLocked` and `tickFlushLocked` each now call it on the assembled
+`chunkBytes` immediately after copying the chunk header and records in, and
+**before** `patchEventRecordsCRC`/`patchChunkCRC` — the chunk header
+checksum covers `chunk[0:120]` and `chunk[128:512]`, and `[128:512]` is
+exactly the 64-bucket common-string table and 32-bucket template table this
+task populates. Calling it after the checksum would leave every chunk
+carrying a stored CRC that does not match its own bytes — a new
+`TestWrittenFile_ChunkHeaderCRCCoversTables` test recomputes the stored CRC
+over the written bytes to pin that ordering; manually swapping the call
+order during development reproduced the exact failure this test is meant to
+catch (`chunk header CRC = 0x...`, recomputes to a different value) before
+being reverted. Commit `3c9e825`. `cmd/gen-fixture/main.go` was not touched,
+so this row's fixture is directly comparable to rows 2 and 3.
+
+Measured from CI run [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835),
+head commit `3c9e82594d9aa2a4ef68adcc3d8f59856ecccc8f` — verified directly
+against the run object, not taken from the top of a recency-sorted list:
+
+```
+$ git rev-parse HEAD
+3c9e82594d9aa2a4ef68adcc3d8f59856ecccc8f
+$ gh api repos/fjacquet/go-evtx/actions/runs/31270735835 --jq '.head_sha'
+3c9e82594d9aa2a4ef68adcc3d8f59856ecccc8f
+```
+
+**Fixture identity, confirmed from that run's `generate` job log:**
+`wrote artifacts/generated.evtx (403 records, max ObjectName 31644 runes)` —
+byte-identical summary line to rows 2 and 3's (same record count, same
+probed `ObjectName` ceiling, same 21 chunks). The comparison below is
+therefore valid under the content-dependence caveat at the top of this
+document.
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31270735835/job/93136149239>
+
+python-evtx differential: FAIL
+
+```
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31270735835/job/93136231729>
+
+No chunk-checksum failure line appeared — CRCs remain clean, consistent with
+every prior measurement, and consistent with `fillHashTables` running before
+`patchChunkCRC` as designed.
+
+Get-WinEvent: FAIL
+
+```
+Get-WinEvent: D:\a\_temp\91a2a9dc-0923-4cbc-9650-7c44c83c78c0.ps1:6
+Line |
+   6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
+     |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | The data is invalid.
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31270735835/job/93136231733>
+
+(The `.ps1` temp-file hash in the first line is CI-generated per run and
+carries no significance; every other token is identical to row 3's verbatim
+output.)
+
+**Change from row 3: none.** Same fixture (byte-identical generator summary
+line), same `Get-WinEvent` open-time exception, same exact wording
+(`"The data is invalid."`), same `python-evtx` failure (`ObjectName count:
+got 0, want 403`), same absence of any CRC failure line. Run IDs for the
+comparison: row 3 = [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199),
+row 4 = [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835).
+
+**Reading this result, plainly, without adjusting anything to chase a
+greener outcome.** The chunk hash tables — the leading hypothesis carried
+forward from the baseline, and the reason Tasks 4–6 existed at all — were
+**not** the open-time blocker either. `Get-WinEvent` fails at the identical
+point with the identical wording whether the tables are zero (rows 1–3) or
+correctly populated and self-consistent (row 4, confirmed in-process by
+`TestWrittenFile_ChunkTablesArePopulated`, which walks every bucket chain in
+a real written file and re-derives each name's bucket from its hash). This
+is a genuine negative result, not a wasted task: populating the tables was
+still necessary work — a parser that resolves through them (unlike
+python-evtx, which follows inline offsets) would have found nothing
+regardless of what else is broken — but it is not sufficient to open the
+file in Windows.
+
+This eliminates every defect the plan's F1–F5 covered. What remains open,
+per the "Reading the symptom against the task table" list above, is F2
+(8-byte record alignment, Task 7) and F8 (the missing `xmlns` declaration,
+Task 8). Per the release's own exit criterion: if neither of those changes
+the `Get-WinEvent` result either, the honest outcome is to ship v0.7.0 with
+Windows Event Viewer support documented as unsupported rather than to keep
+searching without a harness signal to guide the search — this document is
+not adjusted to soften that possibility.
