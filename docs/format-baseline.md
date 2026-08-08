@@ -1,167 +1,229 @@
 # Format verification baseline
 
-Measured at commit `35392ac7733cc7b9fcb1cb468df4161a233c80d8`, before any
-v0.7.0 format fix. CI run:
-<https://github.com/fjacquet/go-evtx/actions/runs/31263194648>. Recorded so
-every later task has a signal that moves: a fix that changes the failure mode
-is progress, and a fix that changes nothing is aimed at the wrong defect.
+Recorded so every later task has a signal that moves: a fix that changes the
+failure mode is progress, and a fix that changes nothing is aimed at the
+wrong defect.
 
-The workflow has three jobs. `generate` builds `generated.evtx` (400 records,
-`WriteRecord`-only, non-ASCII and non-BMP `ObjectName` values, spanning 18
-chunks) and uploads it once; `python-evtx-differential` and `get-winevent`
-both depend only on `generate`, not on each other, so a failure in one cannot
-skip the other. In this run `generate` succeeded; both verifier jobs failed.
+**Read this before trusting a message change as progress.** Between
+measurements 1 and 2 below, `Get-WinEvent`'s error text changed —
+`"The event log file is corrupted."` to `"The data is invalid."` — with
+**zero writer code changed**. Only the fixture changed (record count, chunk
+count, and the addition of a near-maximum record and a chunk-fill boundary
+pair). That is not progress and must not be read as a defect being fixed:
+Windows' open-time rejection message is **content-dependent**, not a stable
+fingerprint of one specific defect. **From this point on, a changed message
+counts as evidence of a fix only when the fixture that produced it is
+byte-identical across the two runs being compared.** If a later task's
+re-measurement uses a different fixture (a different record count, a
+different probed boundary length, anything), a changed message proves
+nothing on its own — check the fixture first.
 
-## python-evtx differential (Linux)
+Measurement 1's fixture no longer exists (superseded by the boundary-case
+fix below); its row is kept for the record, but **measurement 2 is the
+baseline the rest of the release compares against.**
 
-Result: **FAIL**
+| # | Commit | Fixture | python-evtx | Get-WinEvent |
+|---|---|---|---|---|
+| 1 | `35392ac` | 400 records, 18 chunks, no boundary case | FAIL: ObjectName 0/400 | FAIL: `"The event log file is corrupted."` |
+| 2 | `6f3485e` | 403 records, 21 chunks, incl. near-max + chunk-fill boundary | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
+
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below).
+
+## Row 2: the fixture
+
+`cmd/gen-fixture` writes 403 `WriteRecord`-only records spanning 21 chunks:
+
+- 400 records cycling through four `ObjectName` shapes (plain ASCII,
+  non-ASCII BMP, non-BMP/surrogate-pair, and a 2000-rune long name).
+- **1 near-maximum record.** `largestAccepted()` binary-searches, against
+  throwaway temp-dir writers, the longest `ObjectName` the writer will
+  accept, and the fixture uses exactly that length: **31644 runes** for this
+  run (`expected.json`'s `max_object_name_len` field). Derived from the
+  writer's own behavior via the public API, not a hardcoded byte count, so
+  it tracks `maxRecordPayload` automatically if a later task moves it
+  (Task 7's 8-byte alignment change moves it by 7 bytes).
+- **2 chunk-fill boundary records**, each ~55% of that same probed length
+  (17404 runes), back to back. Two of them cannot both fit in one chunk, so
+  writing the second is guaranteed to flush the chunk holding the first.
+  Confirmed by the writer's own `go_evtx_chunk_flushed` log: adding these
+  three records raised the chunk count from 18 (the 400-record set alone) to
+  21 — the near-max record and each half-chunk record each land in their own
+  distinct chunk.
+
+Row 1's fixture had no record within a factor of 30 of `maxRecordPayload`
+and nothing sized to force a chunk-fill boundary, despite the task brief's
+own prose requiring "boundary-sized records" — a real gap found on code
+review (see "Harness bugs" below), fixed before row 2 was measured.
+
+## Row 2: python-evtx differential (Linux) — verbatim
 
 ```
 FAIL
-  - ObjectName count: got 0, want 400
+  - ObjectName count: got 0, want 403
 ```
 
-Job log:
-<https://github.com/fjacquet/go-evtx/actions/runs/31263194648/job/93117113460>
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31267775745/job/93128669608>
 
-The `record_count` check passed (`python-evtx` enumerated exactly 400
-records) and the chunk-checksum block that runs unconditionally afterward
-reported no failures — both chunk header and data CRC32 values verify. Only
-the `ObjectName` extraction failed, and it failed for *all* 400 records, not
-some.
+**Chunk CRCs: confirmed still clean, all 21 chunks.** The checker's
+chunk-checksum block runs unconditionally after the record/ObjectName check
+and would append a `chunk N: header checksum mismatch` or `chunk N: data
+checksum mismatch` line for any failure; the full step output above is
+*every* line the step printed — there is no CRC failure line. The
+near-maximum record and the chunk-fill boundary pair did not break either
+checksum. This is the same clean result row 1 established, now re-confirmed
+across a fixture that actually exercises the size ceiling — the checksum
+elimination remains load-bearing for the diagnosis below.
 
-**Root cause, confirmed by inspection, not guessed.** The checker's XPath
-(`.//e:Data` under namespace
-`http://schemas.microsoft.com/win/2004/08/events/event`) found nothing
-because go-evtx's generated `<Event>` root carries no `xmlns` attribute at
-all:
+Root cause of the `ObjectName` failure is unchanged from row 1: go-evtx's
+`<Event>` root carries no `xmlns` attribute at all, while a real
+Windows-generated file always declares
+`xmlns="http://schemas.microsoft.com/win/2004/08/events/event"` (confirmed
+directly against `testdata/system.evtx`). Tracked as **F8** with its own
+task (Task 8, "Emit the Event namespace declaration") in the current plan.
 
-```
-<Event><System><Provider Name=""></Provider>
-...
-```
-
-A real Windows-generated file (`testdata/system.evtx`, vendored in a prior
-task) always declares it:
+## Row 2: Get-WinEvent (windows-latest) — verbatim
 
 ```
-<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System>...
-```
-
-Confirmed directly with `python-evtx` against both files locally. This is a
-**format defect** — the checker parsed the file successfully and found real
-content missing an attribute real Windows output always has — not a checker
-bug. `binxml.go`'s `writeOpenElement("Event", false, baseOffset)` call
-(`binxml.go:149`) never writes the namespace attribute on the root element.
-grepping the spec (`docs/superpowers/specs/2026-08-08-durability-and-format-correctness-design.md`)
-confirms this is **not** F1–F7 — it is a sixth, previously undocumented
-defect this harness surfaced. Not fixed here per this task's scope; flagged
-for whoever picks up the writer changes.
-
-## Get-WinEvent (windows-latest)
-
-Result: **FAIL**
-
-```
-Get-WinEvent: D:\a\_temp\ddbb1226-1f91-4e83-bd2f-806ed10d4590.ps1:6
+Get-WinEvent: D:\a\_temp\19a577c2-d883-4bcf-b32f-f5f081b0f652.ps1:6
 Line |
    6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | The event log file is corrupted.
+     | The data is invalid.
 ```
 
-Job log:
-<https://github.com/fjacquet/go-evtx/actions/runs/31263194648/job/93117113464>
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31267775745/job/93128669622>
 
-`Get-WinEvent -Path` throws on the call itself — it never returns an event
-array, so the record-count and `ObjectName` assertions in the script never
-execute. This is the definition-of-done job for the release: `Get-WinEvent`
-uses the same parsing stack as Event Viewer, so today the answer to "does
-this open in Event Viewer" is no, with a specific, reproducible error.
+`Get-WinEvent -Path` throws on the call itself, before returning any events
+— the same open-time rejection shape as row 1.
+
+### Message stability (why this isn't run-to-run noise)
+
+Before drawing any conclusion from the changed wording, I re-ran
+`get-winevent` a second time via `gh run rerun 31267775745 --failed`.
+GitHub Actions serves that by reusing `generate`'s existing artifact rather
+than re-executing it — confirmed by `generate`'s attempt-2 log carrying the
+identical fixture-summary line, timestamped within microseconds of
+attempt 1's (`wrote artifacts/generated.evtx (403 records, max ObjectName
+31644 runes)`, both attempts). Against that byte-identical artifact, on a
+different runner VM, `get-winevent`'s second attempt threw the same
+`"The data is invalid."` — not a different message, not the row-1 wording.
+So the wording is stable for a given fixture; it correlates with the
+fixture's structural shape, not with noise in Windows' error selection.
+
+### What the change from row 1 does and does not mean
+
+**Not evidence of progress.** No writer code changed between rows 1 and 2 —
+only `cmd/gen-fixture/main.go` did. The underlying defect(s) are exactly as
+present now as before; only the message text differs. See the caveat at the
+top of this document.
+
+**Two explanations remain open, and this task does not distinguish them:**
+
+1. The underlying defect is the same one as row 1 (most likely the zeroed
+   chunk string/template hash tables, F1) and Windows' generic error
+   selection for the same class of open-time rejection is sensitive to the
+   file's structural shape (chunk count, record sizes) even when the root
+   cause is identical.
+2. The boundary-sized records (near-`maxRecordPayload`, or the two
+   half-chunk records landing exactly at a chunk-fill boundary) exercise a
+   code path the smaller, uniform fixture never touched, and that path has
+   its own defect the row-1 fixture was too uniform to expose.
+
+This is a **hypothesis to record, not to chase** — out of scope for this
+task. Whoever picks up Task 3 or the hash-table tasks should keep both
+readings open rather than assuming (1).
+
+One fact narrows the space regardless of which explanation is right:
+`"The data is invalid."` is the **exact** wording the Task 1 brief's own
+symptom table gives as its first-row example, where row 1's wording was
+only approximately in that bucket. Combined with the CRC elimination above,
+that keeps the zeroed hash tables (F1) and the two still-untried header
+fields ahead of the interning chain (F3/F4/F5, now Task 3) as the leading
+candidates — a reading the plan already reflects independent of this
+finding, since Task 3 was reordered ahead of the hash-table chain on the
+row-1 evidence alone.
 
 ### Reading the symptom against the task table
 
 | Symptom | Likely cause |
 |---|---|
-| "The data is invalid" on open | Chunk header checksum, or the zero hash tables (Task 5) |
-| Opens, zero records | `LastEventRecordDataOffset` or `FreeSpaceOffset` (Task 7) |
-| Opens, wrong record count | 8-byte alignment (Task 6) |
-| Records present, fields empty | Template resolution through the template table (Tasks 4, 5) |
+| "The data is invalid" on open | Chunk header checksum, or the zero hash tables |
+| Opens, zero records | `LastEventRecordDataOffset` or `FreeSpaceOffset` |
+| Opens, wrong record count | 8-byte alignment |
+| Records present, fields empty | Template resolution through the template table |
 
-"The event log file is corrupted" is not verbatim any row's example text —
-the closest documented example, "The data is invalid," is explicitly called
-out as *an* example wording for the first row, not the only one. What matters
-for classifying it is *where* the exception fires: `Get-WinEvent` never
-returns anything — no scalar, no empty array — meaning the failure happens
-during the Windows Event Log service's own structural validation of the file,
-before a single record is handed back. That places it in the **first row's
-bucket** (an open-time rejection), not rows 2–4, which all presuppose the
-file opened and enumeration proceeded at least far enough to produce a
-(possibly wrong) record count.
-
-Within that bucket, the python-evtx differential above already narrows it:
-`python-evtx` independently recomputed both the chunk header and chunk data
-CRC32 values and found them correct, so a checksum mismatch is ruled out as
-the cause. That leaves the chunk string/template hash tables — `buildChunkHeader`
-(`evtx.go:523-533`) leaves bytes `[128:384]` and `[384:512]` entirely zero on
-every chunk — as the strongest remaining candidate, consistent with the
-spec's own assessment in F1: "This is the single most likely reason Event
-Viewer rejects the files." **This is a hypothesis to be confirmed by the
-signal changing** once Task 5 (renamed per the reorder — see
-`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/progress.md`)
-populates those tables, not a diagnosis.
+Row 2 is a direct, verbatim match to row 1 of this table. Checksums are
+independently confirmed clean (above), which points at the zeroed hash
+tables side of that row rather than the checksum side. Per the current plan
+(`docs/superpowers/plans/2026-08-08-v0.7.0-format-correctness.md`), Task 3
+(`LastEventRecordDataOffset`, the dirty/full flags, and the chunk-count
+guard — F3/F4/F5) runs before the three-task hash-table chain (Tasks 4–6,
+ending in F1) specifically because the rejection is structural and happens
+before any record is read, and two of the four structural-field candidates
+are a few lines each; Task 3 ends with a mandatory harness re-run. **This
+remains a hypothesis to be confirmed by the signal changing** — and per the
+caveat above, "the signal changing" must be checked against an unchanged
+fixture to mean anything.
 
 ## Harness bugs found and fixed while building this baseline
 
-Two infrastructure failures had to be fixed before either job produced a
-result that says anything about the `.evtx` content. Neither is a format
-finding; both are recorded here because the task's instructions require
-telling the two kinds of failure apart explicitly.
+None of the following is a format finding.
 
 1. **`astral-sh/setup-uv@v8` does not resolve.** The action stopped
-   publishing a floating major-version tag as of its own `v8.0.0` ("immutable
-   releases and secure tags"); only fully-qualified tags exist from `v8.0.0`
-   onward. The Linux job failed in `Set up job`, before the checkout step
-   ran — `##[error]Unable to resolve action` `astral-sh/setup-uv@v8`,
-   `unable to find version` `v8`. Zero relation to `.evtx` content. Fixed by
-   pinning to the commit SHA `c771a70e6277c0a99b617c7a806ffedaca235ff9`
-   (verified against the upstream `v9.0.0` tag ref), matching this repo's
-   fleet convention of SHA-pinning third-party actions with a trailing
-   `# vX.Y.Z` comment. All other third-party actions in the workflow
-   (`actions/checkout`, `actions/setup-go`, `actions/upload-artifact`,
-   `actions/download-artifact`) were pinned the same way at the same time,
-   each SHA verified against its own tag ref before use.
+   publishing a floating major-version tag as of its own `v8.0.0`
+   ("immutable releases and secure tags"); only fully-qualified tags exist
+   from `v8.0.0` onward. The Linux job failed in `Set up job`, before the
+   checkout step ran — `##[error]Unable to resolve action`
+   `astral-sh/setup-uv@v8`, `unable to find version` `v8`. Zero relation to
+   `.evtx` content. Fixed by pinning to the commit SHA
+   `c771a70e6277c0a99b617c7a806ffedaca235ff9` (verified against the upstream
+   `v9.0.0` tag ref), matching this repo's fleet convention of SHA-pinning
+   third-party actions with a trailing `# vX.Y.Z` comment. `actions/checkout`,
+   `actions/setup-go`, `actions/upload-artifact` and `actions/download-artifact`
+   were pinned the same way, each SHA verified against its own tag ref
+   before use.
 
 2. **`get-winevent: needs: python-evtx-differential` skipped the Windows job
-   entirely** the first time both jobs ran for real. GitHub Actions' default
-   `needs` semantics only run a dependent job if everything it depends on
-   succeeded; since `python-evtx-differential` is *expected* to fail in this
-   task, `get-winevent` — the one measurement the whole release exists to
-   take — never executed at all (job conclusion `skipped`, not `failure`).
-   Restructured into three jobs: `generate` builds and uploads the fixture
-   once, and `python-evtx-differential` / `get-winevent` both depend only on
-   `generate`, not on each other, so neither verifier's outcome can skip the
-   other.
+   entirely** the first time both jobs ran for real, because GitHub Actions'
+   default `needs` semantics only run a dependent job if everything it
+   depends on succeeded, and `python-evtx-differential` is *expected* to
+   fail. Restructured into three jobs: `generate` builds and uploads the
+   fixture once, and `python-evtx-differential` / `get-winevent` both depend
+   only on `generate`, not on each other.
 
-Both were caught and fixed in this task, before any number in this document
-was recorded — confirmed by the fact that the run this document cites
-(`31263194648`) shows `generate` succeeding and *both* verifier jobs actually
-executing and failing on real content, not being skipped.
+3. **The fixture itself had no boundary-sized records**, despite the task
+   brief's own prose requiring them ("multiple chunks, non-ASCII and
+   non-BMP strings, boundary-sized records"). The brief's code block's
+   longest `ObjectName` was a hardcoded 2000-rune string — 2008 bytes
+   against a 64996-byte `maxRecordPayload`, over 30x away from the ceiling
+   that matters, and its own comment said `// long, but well under the
+   limit`. Found on code review, not by a CI run. Fixed by adding
+   `largestAccepted()` (probes the real ceiling via the public API rather
+   than hardcoding a number Task 7's alignment change would immediately
+   invalidate) and a chunk-fill boundary pair. This produced row 2 above.
 
 ## What this baseline does and does not prove
 
-- **Does not** prove any specific one of F1–F5 is the sole cause — `Get-WinEvent`
-  gives one terminating error for the whole file, not a defect-by-defect
-  breakdown.
-- **Does** prove the harness itself works end to end: fixture generation,
-  cross-job artifact handoff, an independent Python parser, and a real
-  Windows Event Log stack all ran against unmodified output and produced
-  real, reproducible, content-based errors.
-- **Does** surface one defect (missing `xmlns` on the `Event` root) that was
-  not in the spec's F1–F7 list before this task.
+- **Does not** prove any specific one of F1–F5/F8 is the sole cause —
+  `Get-WinEvent` gives one terminating error for the whole file, not a
+  defect-by-defect breakdown, and the message text itself moved between two
+  measurements of unmodified writer code (see the caveat at the top).
+- **Does** prove the harness itself works end to end: fixture generation
+  (including a probed, self-adjusting boundary case), cross-job artifact
+  handoff, an independent Python parser, and a real Windows Event Log stack
+  all ran against unmodified output and produced real, reproducible,
+  content-based errors — confirmed reproducible via an artifact-identical
+  rerun, not just a single sample.
+- **Does** confirm chunk header/data CRC32 checksums are clean on both
+  fixtures measured so far, including one with a record at the probed size
+  ceiling — checksum defects are ruled out as the open-time rejection's
+  cause.
+- **Does** surface one defect (missing `xmlns` on the `Event` root, F8) that
+  was not in the spec's original F1–F7 list, now tracked as its own task.
+- **Does** establish that the exact wording of a Windows rejection is
+  content-dependent, not a stable fingerprint of one specific defect — the
+  central caveat this document opens with.
 
 Per the task's own exit criteria: do **not** add `continue-on-error`, weaken
 an assertion, or delete a job to turn this green. A red `Format Verify` is
-the correct state of this branch until the fixes land in later tasks, and
-Task 8 (re-run and settle, per the reorder) is where it is expected to turn
-green.
+the correct state of this branch until the fixes land in later tasks.
