@@ -506,19 +506,29 @@ a replacement, and a `throw` inside a `pwsh` step with
 ### Reading this result
 
 **Stage 1 passes. Stage 2 fails at record 0 (the first record), not at
-open.** `EventLogReader`'s constructor — which does nothing but open the file
-and validate the file/chunk headers — returns cleanly. The very first call to
-`ReadEvent()` throws the identical `"The data is invalid."` wording every
-prior row attributed to open time.
+open.** `EventLogReader`'s constructor makes a real, synchronous call into
+the native Windows Event Log API (`EvtQuery`, confirmed from .NET's
+reference source) — not a trivial object-construction no-op — and that call
+returned without throwing. What `EvtQuery` validates internally is
+undocumented, closed-source behavior inside `wevtapi.dll`; `STAGE1 OPEN: ok`
+proves the call succeeded, not what specifically it checked (in particular,
+it does **not** establish that it validated the file/chunk headers — that
+was an unsupported inference in an earlier draft of this document).
+
+The fact that stands on its own, without any claim about `EvtQuery`'s
+internals, is in stage 2: `$n` starts at `0` and is incremented only after a
+successful, non-null `$reader.ReadEvent()` (see the script above), so
+`STAGE2 READ: FAILED after 0 records` unambiguously means the very first
+call to `ReadEvent()` threw before it could return anything to count. That
+is what proves the failure is in decoding record 0, not in opening the file.
 
 This is exactly the second branch the task brief laid out, and it inverts the
 reading of every earlier row in this document:
 
-- The **file-level structure is fine**: file header, at least one chunk
-  header, and (per rows 1–4) the CRC32 checksums are all well-formed enough
-  for `EventLogReader` to accept the file and locate its first record.
-- The **failure is in record content** — specifically, in decoding the very
-  first event. F8 (missing `xmlns` on `<Event>`) and the sparse `<System>`
+- `EventLogReader`'s native open call accepted the file, whatever it checks.
+  The **failure is demonstrably in record content**, not file structure —
+  specifically, in decoding the very first event, per the stage-2 counter
+  argument above. F8 (missing `xmlns` on `<Event>`) and the sparse `<System>`
   block, both previously ruled out as "can't matter, this is an open-time
   rejection," are back in play and now the **leading candidates**, not a
   fallback. So are the three BinXML encoding divergences Part B of this task

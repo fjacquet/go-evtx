@@ -237,11 +237,14 @@ func TestPatchChunkCRC(t *testing.T) {
 
 	// Recompute independently and compare
 	h := crc32.New(crc32.IEEETable)
-	// Note: chunk[120:128] is zeroed by patchChunkCRC before computing,
-	// so we must use a zeroed reference for the [120:128] range.
+	// Note: patchChunkCRC writes evtxChunkUnknownField120 into [120:124] and
+	// zeroes only the CRC placeholder at [124:128] before computing — neither
+	// sub-range is covered by the hash (h.Write below skips [120:128]
+	// entirely), so zeroing the whole [120:128] region in this independent
+	// copy is just a convenient way to exclude it, not a re-statement of what
+	// patchChunkCRC itself zeroes.
 	zeroedChunk := make([]byte, 512)
 	copy(zeroedChunk, chunk)
-	// Zero out [120:128] in the copy (as patchChunkCRC does before computing)
 	for i := 120; i < 128; i++ {
 		zeroedChunk[i] = 0
 	}
