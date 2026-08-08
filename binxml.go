@@ -366,14 +366,6 @@ func encodeSubString(s string) []byte {
 // Little-endian helpers
 // ---------------------------------------------------------------------------
 
-func sdbmHash(s string) uint32 {
-	var h uint32
-	for _, c := range []byte(s) {
-		h = uint32(c) + (h << 6) + (h << 16) - h
-	}
-	return h
-}
-
 func writeUint16LE(b *bytes.Buffer, v uint16) {
 	_ = b.WriteByte(byte(v))
 	_ = b.WriteByte(byte(v >> 8))

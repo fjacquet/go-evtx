@@ -37,3 +37,5 @@ Thumbs.db
 
 # Test output
 testdata/*.evtx
+# ...except the vendored Windows fixture, which is ground truth, not output.
+!testdata/system.evtx
