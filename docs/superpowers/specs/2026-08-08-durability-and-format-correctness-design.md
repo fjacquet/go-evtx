@@ -98,18 +98,34 @@ Reorder and add a sticky error:
 
 1. Flush and finalise the current chunk, patch the file header, `Sync()`.
 2. `Close()` the active file.
-3. `Rename()` to the archive path.
-4. Open the replacement and write its placeholder header.
-5. `syncDir()`.
+3. Commit the archive (see D3 — link-then-unlink, not rename).
+4. Open the replacement, write its placeholder header, and `Sync()` it. Without
+   that sync the header lives only in the page cache until the first chunk
+   flush, so a crash straight after rotation leaves a partial file where a
+   valid empty one should be.
+5. `syncDir()`, making both the archive name and the replacement durable.
 
 Any failure in steps 2–5 sets `w.err` and leaves it set permanently.
 `WriteRecord`, `WriteRaw`, `Rotate` and `Close` all check `w.err` first and
 return it. A writer that cannot guarantee durability must fail loudly forever
 rather than accept events it will not persist.
 
+Step 1 is deliberately not sticky: the file handle is still valid and the error
+reaches the caller, so the writer remains usable.
+
+The background flush tick is, however, the one persistence path with **no
+caller to return to** — `backgroundLoop` discards its result with `_ =`. A
+failed `WriteAt`, header patch or `Sync` there must also set `w.err`, otherwise
+the next `WriteRecord` reports success for data that never reached disk.
+
 Do not attempt automatic recovery. A half-rotated directory needs an operator,
 and a library that silently repairs itself is how the current defect went
 unnoticed.
+
+`Close()` must still perform its one-time shutdown when `w.err` is already set:
+stop the goroutine and close the file handle before returning the sticky error.
+A rotation that failed at the `Sync` step never reached its own `Close`, so
+skipping cleanup would leak a descriptor on every failed rotation.
 
 ### D3. Collision-proof archive names
 
@@ -117,9 +133,26 @@ unnoticed.
 rotations inside one second produce one surviving archive; `os.Rename`
 destroys the other two without an error.
 
-Use nanosecond precision, and probe the target with `O_CREATE|O_EXCL` before
-renaming. If the target exists, return an error rather than overwrite. Losing
-a rotation is acceptable; silently destroying a committed archive is not.
+Use nanosecond precision, and commit the archive with **link-then-unlink**
+rather than rename.
+
+`os.Rename` replaces an existing non-directory destination on Unix, so a
+collision destroys a committed archive silently. Neither obvious guard works:
+`os.Stat` first is a time-of-check/time-of-use race, and an `O_CREATE|O_EXCL`
+probe creates the destination without reserving it for the subsequent rename.
+`os.Link` fails atomically when the destination exists, using only the standard
+library — no `renameat2` and no `golang.org/x/sys`, which would cost this
+library its zero-dependency property.
+
+Link the active file to the archive name, then unlink the active path. The
+window where both names point at one inode is harmless: a reader sees a
+complete file either way.
+
+Filesystems without hard-link support (FAT32, some SMB and overlay mounts) fall
+back to `Stat`-then-`Rename` with a logged warning that the collision guard is
+best-effort. Failing a rotation that previously worked is the worse outcome.
+
+Losing a rotation is acceptable; silently destroying a committed archive is not.
 
 ### D4. Idempotent `Close`
 
@@ -140,6 +173,12 @@ var ErrClosed = errors.New("go_evtx: writer is closed")
 ```
 
 Checked under the same mutex as D4.
+
+**Precedence.** A `Close()` that itself fails sets both the sticky error and
+the closed flag. The sticky error wins: a caller needs to know data was lost,
+which `ErrClosed` alone would not tell them. Callers testing for shutdown use
+`errors.Is(err, ErrClosed)` and treat anything else as "may not have
+persisted". Both the successful-`Close` and failed-`Close` paths are tested.
 
 ### D6. `OnFsync` outside the lock, and a corrected doc comment
 
@@ -221,8 +260,14 @@ wrong and F1 will not fix Event Viewer.
 
 `binformat.go:133` computes `size := uint32(24 + len(binXMLPayload) + 4)` with
 no padding, so records land at arbitrary offsets. Round the size up to the next
-multiple of 8 and zero-pad the payload. The size prefix and the trailing size
-copy both carry the padded value.
+multiple of 8. The size prefix and the trailing size copy both carry the padded
+value.
+
+The padding bytes go **between the end of the BinXML payload and the trailing
+size copy**, never inside the payload. BinXML is a token stream: appending zero
+bytes inside it introduces `EndOfStream`/invalid tokens and corrupts parsing.
+The record layout becomes header, payload, padding, trailing size — and the
+`maxRecordPayload` limit from D1 must account for up to 7 padding bytes.
 
 ### F3. Correct `LastEventRecordDataOffset`
 
@@ -267,9 +312,24 @@ CRC ranges. This must be a real external parse, not a go-evtx self-round-trip.
 job, upload as an artifact, download on the Windows job, and run:
 
 ```powershell
-$e = Get-WinEvent -Path generated.evtx -ErrorAction Stop
-if ($e.Count -ne $expected) { throw "record count mismatch" }
+# $expected is written by the Linux generator alongside the fixture, so the
+# two cannot drift. Get-WinEvent returns a scalar for a single record, so the
+# result is coerced to an array before counting.
+$expected = [int](Get-Content expected-count.txt)
+$events   = @(Get-WinEvent -Path generated.evtx -ErrorAction Stop)
+if ($events.Count -ne $expected) {
+    throw "record count mismatch: got $($events.Count), want $expected"
+}
 ```
+
+Assert on content as well as count — a parser that returns the right number of
+empty records proves nothing. Check that a known `ObjectName` survives the
+round trip.
+
+Add a direct structural assertion for F1 alongside it: read the generated file
+back and fail if any chunk's string table (bytes `[128:384]`) or template table
+(`[384:512]`) is still entirely zero. That catches a regression immediately,
+without waiting for a Windows runner to disagree.
 
 `Get-WinEvent -Path` uses the same Windows Event Log parsing stack as Event
 Viewer. If it parses, the claim is earned. **This job is the definition of
