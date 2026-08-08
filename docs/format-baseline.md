@@ -26,8 +26,9 @@ baseline the rest of the release compares against.**
 |---|---|---|---|---|
 | 1 | `35392ac` | 400 records, 18 chunks, no boundary case | FAIL: ObjectName 0/400 | FAIL: `"The event log file is corrupted."` |
 | 2 | `6f3485e` | 403 records, 21 chunks, incl. near-max + chunk-fill boundary | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
+| 3 | `173fcf2` | 403 records, 21 chunks — byte-identical generator output to row 2 (Task 3 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268034433`](https://github.com/fjacquet/go-evtx/actions/runs/31268034433) (row 3, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below).
 
 ## Row 2: the fixture
 
@@ -227,3 +228,72 @@ None of the following is a format finding.
 Per the task's own exit criteria: do **not** add `continue-on-error`, weaken
 an assertion, or delete a job to turn this green. A red `Format Verify` is
 the correct state of this branch until the fixes land in later tasks.
+
+## After Task 3 (F3, F4, F5 — header fields)
+
+Task 3 fixed three header fields ahead of the hash-table chain, specifically
+because the open-time rejection happens before any record is read and these
+were cheap to try: `LastEventRecordDataOffset` (chunk header `[44:]`, F3) was
+a duplicate of `FreeSpaceOffset` instead of pointing at the last record;
+the file header's dirty/full flags at `[120:124]` (F4) were never written at
+all; `LastChunkNumber` could underflow when `chunkCount == 0` and the
+uint16 `chunkCount` counter had no ceiling before it would silently wrap and
+overwrite chunk 0 (F5). Commit `173fcf2`. `cmd/gen-fixture/main.go` was not
+touched, so this row's fixture is directly comparable to row 2's.
+
+**Fixture identity, confirmed from the `generate` job log, both runs:**
+`wrote artifacts/generated.evtx (403 records, max ObjectName 31644 runes)` —
+byte-identical summary line to row 2's (same record count, same probed
+`ObjectName` ceiling, same 21 chunks). The comparison below is therefore
+valid under the content-dependence caveat at the top of this document.
+
+python-evtx differential: FAIL
+
+```
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268034433/job/93129315268>
+
+No chunk-checksum failure line appeared — CRCs remain clean, consistent with
+every prior measurement.
+
+Get-WinEvent: FAIL
+
+```
+Get-WinEvent: D:\a\_temp\8c286ff0-5986-45c4-9091-ef9b58f187d0.ps1:6
+Line |
+   6 |  $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction  …
+     |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | The data is invalid.
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31268034433/job/93129315256>
+
+(The `.ps1` temp-file hash in the first line is CI-generated per run and
+carries no significance; every other token is identical to row 2's verbatim
+output.)
+
+**Change from baseline: none.** Same fixture (byte-identical generator
+summary line), same `Get-WinEvent` open-time exception, same exact wording
+(`"The data is invalid."`), same `python-evtx` failure
+(`ObjectName count: got 0, want 403`), same absence of any CRC failure line.
+Run IDs for the comparison: row 2 = [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745),
+row 3 = [`31268034433`](https://github.com/fjacquet/go-evtx/actions/runs/31268034433).
+
+**Reading this result.** F3/F4/F5 were not the open-time blocker.
+`LastEventRecordDataOffset` being a duplicate of `FreeSpaceOffset` was a real
+defect — the new `TestChunkHeader_LastEventRecordDataOffset` in
+`fileheader_test.go` proves the field was previously wrong and is now
+correct — but it is not what `Get-WinEvent` is objecting to at open time,
+since Windows still fails at the identical point with the identical wording
+after the fix. Two of the four structural-field candidates the "Reading the
+symptom against the task table" section above named are now eliminated. That
+narrows the remaining open-time-rejection suspects to the zeroed chunk
+string/template hash tables (F1) and the chunk header checksum — and the
+checksum side was already ruled out independently (CRCs confirmed clean
+again in this run, as in every prior one). This strengthens, rather than
+weakens, the case for Tasks 4–6 (the hash-table chain ending in F1) as the
+next place to look. It does not by itself prove F1 is the cause — only that
+the two cheap candidates tried in this task are not.
