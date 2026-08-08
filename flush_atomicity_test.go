@@ -37,11 +37,17 @@ func TestFlushChunkLocked_SuccessCommitsTogether(t *testing.T) {
 		w.mu.Unlock()
 		t.Fatal("expected buffered records before flush")
 	}
+	if len(w.chunkNames) == 0 {
+		w.mu.Unlock()
+		t.Fatal("expected buffered chunkNames before flush")
+	}
 	wantFirstID := w.recordID // flushChunkLocked sets firstID = recordID on success
 	flushErr := w.flushChunkLocked()
 	gotChunkCount := w.chunkCount
 	gotCurrentSize := w.currentSize
 	gotRecordsLen := len(w.records)
+	gotNamesLen := len(w.chunkNames)
+	gotTemplatesLen := len(w.chunkTemplates)
 	gotFirstID := w.firstID
 	w.mu.Unlock()
 
@@ -56,6 +62,12 @@ func TestFlushChunkLocked_SuccessCommitsTogether(t *testing.T) {
 	}
 	if gotRecordsLen != 0 {
 		t.Errorf("records not reset after successful flush: len=%d", gotRecordsLen)
+	}
+	if gotNamesLen != 0 {
+		t.Errorf("chunkNames not reset after successful flush: len=%d", gotNamesLen)
+	}
+	if gotTemplatesLen != 0 {
+		t.Errorf("chunkTemplates not reset after successful flush: len=%d", gotTemplatesLen)
 	}
 	if gotFirstID != wantFirstID {
 		t.Errorf("firstID = %d, want %d", gotFirstID, wantFirstID)
@@ -116,9 +128,15 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	wantChunkCount := w.chunkCount
 	wantCurrentSize := w.currentSize
 	wantFirstID := w.firstID
+	wantNames := len(w.chunkNames)
+	wantTemplates := len(w.chunkTemplates)
 	if len(wantRecords) == 0 {
 		w.mu.Unlock()
 		t.Fatal("expected buffered records before the forced failure")
+	}
+	if wantNames == 0 {
+		w.mu.Unlock()
+		t.Fatal("expected buffered chunkNames before the forced failure")
 	}
 
 	// Close the handle directly (bypassing closeFileLocked/fileClosed
@@ -131,6 +149,8 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	gotCurrentSize := w.currentSize
 	gotFirstID := w.firstID
 	gotRecords := append([]byte(nil), w.records...)
+	gotNames := len(w.chunkNames)
+	gotTemplates := len(w.chunkTemplates)
 
 	w.mu.Unlock()
 
@@ -148,5 +168,11 @@ func TestFlushChunkLocked_TotalIOFailureMutatesNothing(t *testing.T) {
 	}
 	if !bytes.Equal(gotRecords, wantRecords) {
 		t.Errorf("records buffer changed on failure: got %d bytes, want the %d unflushed bytes still buffered", len(gotRecords), len(wantRecords))
+	}
+	if gotNames != wantNames {
+		t.Errorf("chunkNames reset on failure: got %d, want %d", gotNames, wantNames)
+	}
+	if gotTemplates != wantTemplates {
+		t.Errorf("chunkTemplates reset on failure: got %d, want %d", gotTemplates, wantTemplates)
 	}
 }

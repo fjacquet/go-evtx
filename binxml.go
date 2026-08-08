@@ -76,6 +76,27 @@ var dataFieldNames = [12]string{
 	"ProcessName",
 }
 
+// chunkRef records where a NameNode or TemplateNode was emitted, as an offset
+// relative to the start of the chunk.
+//
+// key is the value the corresponding hash table buckets on: sdbmHash(name) for
+// names, guidHash(guid) for templates. Both are already-hashed uint32s, so
+// fillHashTables needs no knowledge of which kind it is holding — it just
+// reduces the key modulo the bucket count.
+type chunkRef struct {
+	key    uint32
+	offset uint32
+}
+
+// binXMLResult is what buildBinXML produces: the encoded payload plus the
+// chunk-relative location of every hashable node inside it, so the writer can
+// register them in the chunk's hash tables at flush time.
+type binXMLResult struct {
+	payload   []byte
+	names     []chunkRef
+	templates []chunkRef
+}
+
 // buildBinXML encodes an event as template-based BinXML.
 //
 // eventID is the Windows Event ID. fields is a map of field name to value.
@@ -87,12 +108,14 @@ var dataFieldNames = [12]string{
 //   - "Computer"      → substitution 4 (STRING)
 //   - "TimeCreated"   → RFC3339Nano timestamp; fallback to time.Now()
 //   - 12 data fields by name (see dataFieldNames)
-func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32) []byte {
+func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32) binXMLResult {
 	// Template body starts after: fragment header + template instance + template node header.
 	templateBodyBase := binXMLChunkOffset + preambleSize
 
+	var names []chunkRef
+
 	// Build template body with substitution placeholders.
-	tbody := buildTemplateBody(templateBodyBase)
+	tbody := buildTemplateBody(templateBodyBase, &names)
 
 	// Collect actual substitution values from the fields map.
 	subs := collectSubstitutionsFromFields(eventID, fields)
@@ -110,14 +133,18 @@ func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32
 	out.WriteByte(0x01)                   // unknown0
 	writeUint32LE(out, 1)                 // template_id
 	// template_offset: chunk-relative offset of the TemplateNode (right after this node).
-	writeUint32LE(out, binXMLChunkOffset+fragHeaderSize+templInstSize)
+	templateOffset := binXMLChunkOffset + fragHeaderSize + templInstSize
+	writeUint32LE(out, templateOffset)
 
 	// 3. TemplateNode header (24 bytes).
 	// python-evtx layout: next_offset(4) + GUID(16, first 4B also = template_id) + data_length(4).
+	guid := make([]byte, 16)
+	binary.LittleEndian.PutUint32(guid, 1) // GUID bytes [0:4] (= template_id); [4:16] stay zero
 	writeUint32LE(out, 0)                  // next_offset (no chaining)
-	writeUint32LE(out, 1)                  // GUID bytes [0:4] (= template_id)
-	out.Write(make([]byte, 12))            // GUID bytes [4:16] (zeros)
+	out.Write(guid)
 	writeUint32LE(out, uint32(len(tbody))) // data_length
+
+	templates := []chunkRef{{key: guidHash(guid), offset: templateOffset}}
 
 	// 4. Template body.
 	out.Write(tbody)
@@ -125,7 +152,7 @@ func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32
 	// 5. Substitution array.
 	writeSubstitutionArray(out, subs)
 
-	return out.Bytes()
+	return binXMLResult{payload: out.Bytes(), names: names, templates: templates}
 }
 
 // buildTemplateBody constructs the BinXML template body with NormalSubstitution
@@ -142,43 +169,46 @@ func buildBinXML(eventID int, fields map[string]string, binXMLChunkOffset uint32
 //	6+2i:  Data[i] value      (STRING)
 //
 // Total: 5 + 12*2 = 29 substitutions.
-func buildTemplateBody(baseOffset uint32) []byte {
+//
+// names accumulates the chunk-relative offset and hash of every NameNode
+// emitted along the way, in emission order.
+func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b := &bytes.Buffer{}
 
 	// <Event>
-	writeOpenElement(b, "Event", false, baseOffset)
+	writeOpenElement(b, "Event", false, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 
 	//   <System>
-	writeOpenElement(b, "System", false, baseOffset)
+	writeOpenElement(b, "System", false, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 
 	//     <Provider Name="%0"/>
-	writeOpenElement(b, "Provider", true, baseOffset)
-	writeAttributeSub(b, "Name", 0, binXMLTypeString, baseOffset)
+	writeOpenElement(b, "Provider", true, baseOffset, names)
+	writeAttributeSub(b, "Name", 0, binXMLTypeString, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 	b.WriteByte(binXMLEndElement)
 
 	//     <EventID>%1</EventID>
-	writeOpenElement(b, "EventID", false, baseOffset)
+	writeOpenElement(b, "EventID", false, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 	writeSubstitution(b, 1, binXMLTypeUint16)
 	b.WriteByte(binXMLEndElement)
 
 	//     <Level>%2</Level>
-	writeOpenElement(b, "Level", false, baseOffset)
+	writeOpenElement(b, "Level", false, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 	writeSubstitution(b, 2, binXMLTypeUint16)
 	b.WriteByte(binXMLEndElement)
 
 	//     <TimeCreated SystemTime="%3"/>
-	writeOpenElement(b, "TimeCreated", true, baseOffset)
-	writeAttributeSub(b, "SystemTime", 3, binXMLTypeFiletime, baseOffset)
+	writeOpenElement(b, "TimeCreated", true, baseOffset, names)
+	writeAttributeSub(b, "SystemTime", 3, binXMLTypeFiletime, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 	b.WriteByte(binXMLEndElement)
 
 	//     <Computer>%4</Computer>
-	writeOpenElement(b, "Computer", false, baseOffset)
+	writeOpenElement(b, "Computer", false, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 	writeSubstitution(b, 4, binXMLTypeString)
 	b.WriteByte(binXMLEndElement)
@@ -187,15 +217,15 @@ func buildTemplateBody(baseOffset uint32) []byte {
 	b.WriteByte(binXMLEndElement)
 
 	//   <EventData>
-	writeOpenElement(b, "EventData", false, baseOffset)
+	writeOpenElement(b, "EventData", false, baseOffset, names)
 	b.WriteByte(binXMLCloseElement)
 
 	//     12 Data elements: <Data Name="%N">%N+1</Data>
 	for i := 0; i < 12; i++ {
 		nameIdx := uint16(5 + i*2)
 		valueIdx := uint16(6 + i*2)
-		writeOpenElement(b, "Data", true, baseOffset)
-		writeAttributeSub(b, "Name", nameIdx, binXMLTypeString, baseOffset)
+		writeOpenElement(b, "Data", true, baseOffset, names)
+		writeAttributeSub(b, "Name", nameIdx, binXMLTypeString, baseOffset, names)
 		b.WriteByte(binXMLCloseElement)
 		writeSubstitution(b, valueIdx, binXMLTypeString)
 		b.WriteByte(binXMLEndElement)
@@ -291,7 +321,7 @@ func writeSubstitutionArray(b *bytes.Buffer, subs []substitutionEntry) {
 // Layout with attrs (0x41):
 //
 //	[token: 1B] [dep_id: 2B] [data_size: 4B] [name_offset: 4B] [attr_list_size: 4B] [NameNode]
-func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase uint32) {
+func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase uint32, refs *[]chunkRef) {
 	tokenPos := uint32(b.Len())
 	if hasAttrs {
 		b.WriteByte(binXMLOpenElementAttrs) // 0x41
@@ -312,19 +342,19 @@ func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, binXMLBase ui
 		writeUint32LE(b, 0) // attribute_list_size (python-evtx ignores the value)
 	}
 
-	writeNameNode(b, name)
+	writeNameNode(b, name, binXMLBase, refs)
 }
 
 // writeAttributeSub writes an Attribute token with inline NameNode, followed by
 // a NormalSubstitution token as the attribute's value.
 //
 // Layout: [token: 1B] [name_offset: 4B] [NameNode] [0x0D subIdx subType]
-func writeAttributeSub(b *bytes.Buffer, name string, subIndex uint16, subType byte, binXMLBase uint32) {
+func writeAttributeSub(b *bytes.Buffer, name string, subIndex uint16, subType byte, binXMLBase uint32, refs *[]chunkRef) {
 	tokenPos := uint32(b.Len())
 	b.WriteByte(binXMLAttribute)
 	nameNodeOffset := binXMLBase + tokenPos + 5 // 5 = token(1) + offset(4)
 	writeUint32LE(b, nameNodeOffset)
-	writeNameNode(b, name)
+	writeNameNode(b, name, binXMLBase, refs)
 	writeSubstitution(b, subIndex, subType)
 }
 
@@ -337,14 +367,21 @@ func writeSubstitution(b *bytes.Buffer, index uint16, valueType byte) {
 	b.WriteByte(valueType)
 }
 
-// writeNameNode writes a NameNode inline in the BinXML stream.
+// writeNameNode writes a NameNode inline in the BinXML stream and records its
+// chunk-relative offset in refs.
 //
 // Layout: [next_offset: 4B = 0] [hash: 2B] [char_count: 2B] [UTF-16LE chars] [null: 2B]
-func writeNameNode(b *bytes.Buffer, name string) {
+//
+// next_offset is written as 0 here. fillHashTables patches it later for the
+// nodes it chains into a bucket; nodes it does not chain keep the 0.
+func writeNameNode(b *bytes.Buffer, name string, binXMLBase uint32, refs *[]chunkRef) {
+	h := sdbmHash(name)
+	*refs = append(*refs, chunkRef{key: h, offset: binXMLBase + uint32(b.Len())})
+
 	u16 := utf16.Encode([]rune(name))
-	writeUint32LE(b, 0)                      // next_offset (no chaining)
-	writeUint16LE(b, uint16(sdbmHash(name))) // SDBM hash
-	writeUint16LE(b, uint16(len(u16)))        // string_length
+	writeUint32LE(b, 0)                // next_offset, patched by fillHashTables
+	writeUint16LE(b, uint16(h))        // SDBM hash
+	writeUint16LE(b, uint16(len(u16))) // string_length
 	for _, c := range u16 {
 		writeUint16LE(b, c)
 	}

@@ -85,6 +85,15 @@ type Writer struct {
 	mu      sync.Mutex
 	path    string // output file path
 	records []byte // accumulated event record bytes for current chunk
+	// chunkNames and chunkTemplates accumulate the hashable nodes emitted into
+	// the pending chunk, in emission order. flushChunkLocked turns them into
+	// the chunk's two hash tables and then resets them alongside w.records.
+	//
+	// WriteRaw contributes nothing here: the caller's BinXML is opaque, so its
+	// NameNodes cannot be registered. A chunk written via WriteRaw therefore
+	// keeps empty tables, exactly as before v0.7.0.
+	chunkNames     []chunkRef
+	chunkTemplates []chunkRef
 	// lastRecordOffset is the chunk-relative offset where the most recent
 	// record in the pending chunk begins. Committed and reset alongside
 	// w.records; zero when the chunk is empty.
@@ -327,30 +336,36 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	}
 
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
-	payload := buildBinXML(eventID, fields, binXMLChunkOffset)
+	res := buildBinXML(eventID, fields, binXMLChunkOffset)
 
 	// A record larger than a chunk can never be written. Splitting one logical
 	// event across chunks is not valid EVTX, so reject it and write nothing.
 	// Truncating instead would be checksum-invisible: the CRCs would be
 	// computed over the corrupt bytes and verify.
-	if len(payload) > maxRecordPayload {
+	if len(res.payload) > maxRecordPayload {
 		return fmt.Errorf("%w: payload %d bytes exceeds maximum %d",
-			ErrRecordTooLarge, len(payload), maxRecordPayload)
+			ErrRecordTooLarge, len(res.payload), maxRecordPayload)
 	}
 
 	ts := toFILETIME(parseTimeCreated(fields))
-	rec := wrapEventRecord(w.recordID, ts, payload)
+	rec := wrapEventRecord(w.recordID, ts, res.payload)
 
 	// If adding this record would exceed chunk capacity, flush first.
 	if len(w.records)+len(rec) > maxChunkPayload {
 		if err := w.flushChunkLocked(); err != nil {
 			return err
 		}
-		// Recompute binXMLChunkOffset for the new (empty) chunk.
+		// The flush reset the collectors; rebuild this record for the new,
+		// empty chunk so its node offsets are relative to the right chunk.
 		binXMLChunkOffset = evtxRecordsStart + evtxRecordHeaderSize
-		payload = buildBinXML(eventID, fields, binXMLChunkOffset)
-		rec = wrapEventRecord(w.recordID, ts, payload)
+		res = buildBinXML(eventID, fields, binXMLChunkOffset)
+		rec = wrapEventRecord(w.recordID, ts, res.payload)
 	}
+
+	// The append must happen after the possible flush-and-rebuild above, or
+	// the discarded first attempt's offsets would leak into the new chunk.
+	w.chunkNames = append(w.chunkNames, res.names...)
+	w.chunkTemplates = append(w.chunkTemplates, res.templates...)
 
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
@@ -480,6 +495,8 @@ func (w *Writer) rotate() error {
 	w.recordID = 1
 	w.firstID = 1
 	w.records = w.records[:0]
+	w.chunkNames = w.chunkNames[:0]
+	w.chunkTemplates = w.chunkTemplates[:0]
 	w.lastRecordOffset = 0
 	w.currentSize = evtxFileHeaderSize
 
@@ -656,6 +673,8 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkCount = nextChunkCount
 	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
+	w.chunkNames = w.chunkNames[:0]
+	w.chunkTemplates = w.chunkTemplates[:0]
 	w.lastRecordOffset = 0
 	w.firstID = w.recordID
 	w.queueFsyncLocked()
