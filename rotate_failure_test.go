@@ -85,7 +85,13 @@ func TestRotate_StickyErrorIsStable(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	first := w.Rotate()
+	if first == nil {
+		t.Fatal("Rotate on read-only directory returned nil, want an error: the archive commit should have failed and poisoned the writer")
+	}
 	second := w.WriteRecord(4663, testFields())
+	if second == nil {
+		t.Fatal("WriteRecord after a failed Rotate returned nil, want the sticky error returned again")
+	}
 	if !errors.Is(second, first) && second.Error() != first.Error() {
 		t.Fatalf("sticky error changed: rotate gave %q, write gave %q", first, second)
 	}

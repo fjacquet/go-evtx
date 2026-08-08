@@ -147,6 +147,13 @@ func TestWriter_StickyErrorOutranksErrClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// w.f is never released by this test's assertions (w.err/w.closed are set
+	// directly, not via Close()). t.TempDir's cleanup removes the directory
+	// and fails the test if removal fails; Windows refuses to delete a file
+	// with an open handle. Close() after the assertions releases it — it
+	// runs against the already-poisoned writer, which is harmless and does
+	// not affect anything already asserted above.
+	t.Cleanup(func() { _ = w.Close() })
 
 	sentinel := errors.New("durability lost")
 	w.mu.Lock()
@@ -160,5 +167,53 @@ func TestWriter_StickyErrorOutranksErrClosed(t *testing.T) {
 	}
 	if errors.Is(got, ErrClosed) {
 		t.Fatal("ErrClosed masked the durability error: callers would not learn data was lost")
+	}
+}
+
+// TestWriter_Close_FinalFlushFailureSetsStickyError drives Close into the
+// path where finalizeLocked's own final flush fails, and verifies that
+// checkStateLocked's documented precedence — the sticky durability error
+// outranks ErrClosed — actually holds afterward. Before this fix,
+// finalizeLocked returned the flush error to Close's immediate caller but
+// never set w.err, so a later call would see only w.closed and report
+// ErrClosed: "the writer shut down," not "data was lost."
+func TestWriter_Close_FinalFlushFailureSetsStickyError(t *testing.T) {
+	w, err := New(filepath.Join(t.TempDir(), "test.evtx"), RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.WriteRecord(4663, testFields()); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+
+	// Force the final flush inside Close (finalizeLocked -> flushChunkLocked)
+	// to fail: close w.f directly, bypassing closeFileLocked/fileClosed
+	// bookkeeping, so the buffered record can never be written out. Same
+	// technique as TestWriter_Close_ConcurrentCallers and
+	// flush_atomicity_test.go.
+	w.mu.Lock()
+	_ = w.f.Close()
+	w.mu.Unlock()
+
+	closeErr := w.Close()
+	if closeErr == nil {
+		t.Fatal("Close with a failing final flush returned nil, want the flush error")
+	}
+
+	w.mu.Lock()
+	stickyErr := w.err
+	w.mu.Unlock()
+	if stickyErr == nil {
+		t.Fatal("w.err is nil after Close's final flush failed: checkStateLocked will report ErrClosed instead of the durability error")
+	}
+
+	// The point of the fix: a caller inspecting the writer after this failed
+	// Close must learn that data was lost, not merely that it is closed.
+	got := w.WriteRecord(4663, testFields())
+	if errors.Is(got, ErrClosed) {
+		t.Fatalf("WriteRecord after a Close whose final flush failed = %v (ErrClosed); want the sticky durability error — the caller is being told only that the writer is shut down, not that data never reached disk", got)
+	}
+	if !errors.Is(got, stickyErr) {
+		t.Fatalf("WriteRecord after failed Close = %v, want the sticky error %v", got, stickyErr)
 	}
 }

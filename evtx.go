@@ -33,7 +33,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -66,7 +65,11 @@ type RotationConfig struct {
 	// FlushIntervalSec > 0.
 	//
 	// The callback is invoked after the writer lock is released, so it may
-	// safely call any Writer method without deadlocking.
+	// safely call most Writer methods without deadlocking — with one
+	// exception: do not call Close from a callback fired by the background
+	// goroutine's own fsync drain. Close waits for that goroutine to exit,
+	// but the goroutine is currently blocked inside the callback and can
+	// never reach its shutdown case, so the call deadlocks.
 	//
 	// That safety does not bound recursion: a callback that itself triggers a
 	// new flush — directly, or through a chain of Writer calls — recurses on
@@ -225,10 +228,17 @@ func (w *Writer) backgroundLoop() {
 			w.drainFsyncCallbacks()
 		case <-rotC:
 			w.mu.Lock()
-			err := w.rotate()
+			var err error
+			if err = w.checkStateLocked(); err == nil {
+				err = w.rotate()
+			}
 			w.mu.Unlock()
 			w.drainFsyncCallbacks()
-			if err != nil {
+			// A bare ErrClosed here just means Close() won the race with this
+			// tick — normal shutdown, not a rotation failure. Anything else
+			// (including a sticky error already set by an earlier failure)
+			// is worth an operator's attention.
+			if err != nil && !errors.Is(err, ErrClosed) {
 				slog.Error("go_evtx_scheduled_rotate_failed", "path", w.path, "err", err)
 			}
 		case <-w.done:
@@ -403,7 +413,7 @@ func (w *Writer) rotate() error {
 	// log that the collision guard is now best-effort, rather than failing a
 	// rotation that used to work.
 	if err := os.Link(w.path, archive); err != nil {
-		if !errors.Is(err, errors.ErrUnsupported) && !errors.Is(err, syscall.EPERM) {
+		if !isLinkUnsupported(err) {
 			w.err = fmt.Errorf("go_evtx: rotate link archive %s: %w", archive, err)
 			return w.err
 		}
@@ -712,7 +722,15 @@ func (w *Writer) finalizeLocked() error {
 		// Empty session: remove the placeholder file.
 		_ = os.Remove(w.path)
 	case len(w.records) > 0:
-		err = w.flushChunkLocked()
+		if err = w.flushChunkLocked(); err != nil {
+			// The final flush is the last chance to persist these records —
+			// there is no caller left to retry. Make checkStateLocked's
+			// documented precedence (sticky error over ErrClosed) actually
+			// true for this path: without this, a Close whose final flush
+			// failed would still report only ErrClosed to anyone who asks
+			// afterward, hiding that data was lost.
+			w.err = err
+		}
 	}
 
 	if cerr := w.closeFileLocked(); cerr != nil && err == nil {
