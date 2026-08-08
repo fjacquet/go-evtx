@@ -21,7 +21,6 @@
 package evtx
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -152,17 +151,15 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, err e
 // ReadRaw returns the raw BinXML payload of the next event record.
 // Returns ErrNoMoreRecords when all records have been read.
 // The returned bytes are the caller's own copy, safe to retain and mutate;
-// they can be passed to Writer.WriteRaw to copy records between files.
+// they can be passed to Writer.WriteRaw to copy records between files. This
+// guarantee comes from nextRecord, which copies the payload out of r.buf
+// before returning it rather than aliasing the shared chunk buffer — do not
+// remove that copy without preserving this guarantee some other way.
 func (r *Reader) ReadRaw() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, _, payload, err := r.nextRecord()
-	if err != nil {
-		return nil, err
-	}
-	// payload aliases r.buf, which loadChunk overwrites in place.
-	// Hand the caller memory it owns.
-	return bytes.Clone(payload), nil
+	return payload, err
 }
 
 // ReadRecord reads and decodes the next event record.
