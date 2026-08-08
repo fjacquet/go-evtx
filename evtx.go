@@ -77,6 +77,31 @@ type Writer struct {
 	wg   sync.WaitGroup
 	// Phase 11 additions:
 	currentSize int64 // approximate file size in bytes, tracked for size-based rotation
+	// v0.6.0 durability state:
+	closed     bool  // set by Close; further writes return ErrClosed
+	closeErr   error // result of the first Close, returned by later calls
+	err        error // sticky: durability permanently lost, all calls fail
+	fileClosed bool  // w.f has already been closed (by rotate or by Close)
+}
+
+// checkStateLocked reports whether the writer can still accept work.
+//
+// Error precedence is deliberate and part of the API contract: the sticky
+// durability error wins over ErrClosed. A Close that itself failed sets both
+// states, and the caller needs to know that data was lost — which ErrClosed
+// alone would not tell them. Callers testing specifically for shutdown should
+// use errors.Is(err, ErrClosed) rather than equality, and must treat any other
+// error as "data may not have been persisted".
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) checkStateLocked() error {
+	if w.err != nil {
+		return w.err
+	}
+	if w.closed {
+		return ErrClosed
+	}
+	return nil
 }
 
 // New creates a Writer that will write to the given path.
@@ -174,6 +199,10 @@ func (w *Writer) WriteRaw(payload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
+
 	// Size-based rotation check: rotate before adding more data.
 	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
 		if err := w.rotate(); err != nil {
@@ -214,6 +243,10 @@ func (w *Writer) WriteRaw(payload []byte) error {
 func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
 
 	// Size-based rotation check: rotate before adding more data.
 	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
@@ -327,6 +360,9 @@ func (w *Writer) rotate() error {
 func (w *Writer) Rotate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
 	return w.rotate()
 }
 
@@ -488,35 +524,70 @@ func (w *Writer) tickFlushLocked() error {
 
 // Close stops the background goroutine (if running), waits for it to exit,
 // then performs a final flush of any remaining buffered events.
-// If no events were written and no chunks committed, Close removes the file from
-// disk (backward compat: empty session leaves no file) and returns nil.
-// Close must be called exactly once.
-func (w *Writer) Close() (err error) {
-	close(w.done) // 1. signal goroutine
-	w.wg.Wait()   // 2. wait — WITHOUT holding any lock
-	w.mu.Lock()   // 3. safe to acquire now
-	defer w.mu.Unlock()
-	defer func() { // always close the file handle
-		if cerr := w.f.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}()
+//
+// If no events were written and no chunks were committed, Close removes the
+// file from disk (an empty session leaves no file) and returns nil.
+//
+// Close is idempotent: the second and later calls return the first call's
+// result and do no work.
+func (w *Writer) Close() error {
+	w.mu.Lock()
+	if w.closed {
+		err := w.closeErr
+		w.mu.Unlock()
+		return err
+	}
+	w.closed = true
+	w.mu.Unlock()
 
-	// Empty session: no records and no completed chunks.
-	if len(w.records) == 0 && w.chunkCount == 0 {
-		// Remove the placeholder file (nothing was written).
+	close(w.done) // signal the background goroutine
+	w.wg.Wait()   // wait WITHOUT holding the lock
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closeErr = w.finalizeLocked()
+	return w.closeErr
+}
+
+// finalizeLocked flushes any pending chunk and closes the file handle.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) finalizeLocked() error {
+	// Durability was already lost, so do not try to flush — but the file
+	// handle may still be open (a rotate that failed at the Sync step never
+	// reached its Close), and leaking it on every failed rotation would
+	// exhaust the daemon's descriptors.
+	if w.err != nil {
+		w.closeFileLocked()
+		return w.err
+	}
+
+	var err error
+	switch {
+	case len(w.records) == 0 && w.chunkCount == 0:
+		// Empty session: remove the placeholder file.
 		_ = os.Remove(w.path)
+	case len(w.records) > 0:
+		err = w.flushChunkLocked()
+	}
+
+	if cerr := w.closeFileLocked(); cerr != nil && err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// closeFileLocked closes w.f exactly once. rotate() closes the handle
+// mid-sequence, so this tracks whether that already happened rather than
+// calling Close twice and reporting "file already closed".
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) closeFileLocked() error {
+	if w.fileClosed || w.f == nil {
 		return nil
 	}
-
-	// Flush remaining partial chunk if any records are pending.
-	if len(w.records) > 0 {
-		return w.flushChunkLocked()
-	}
-
-	// Records were written but last chunk was already flushed by flushChunkLocked.
-	// File header was already patched in that call; nothing more to do.
-	return nil
+	w.fileClosed = true
+	return w.f.Close()
 }
 
 // buildChunkHeader constructs the 512-byte EVTX chunk header.
