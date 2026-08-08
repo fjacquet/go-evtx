@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-08
+
+### Fixed
+
+- **Oversized records silently corrupted the file.** A record whose BinXML
+  payload exceeded the chunk capacity was written truncated, with both CRCs
+  computed over the corrupt bytes so the damage was checksum-invisible.
+  python-evtx dropped the chunk without warning; this library's own reader
+  aborted the file and returned zero records, including from undamaged later
+  chunks. `WriteRecord` returned `nil`. Such records are now rejected with
+  `ErrRecordTooLarge`. **If you wrote a record whose encoded BinXML payload
+  exceeded 64,996 bytes, affected files are unrecoverable.** That is a
+  property of the encoded payload, not any single field: BinXML overhead
+  plus several moderately sized fields can exceed the limit even when every
+  individual field is well under it.
+- **A failed rotation silently discarded every subsequent event.** `rotate()`
+  left a closed file handle in place when the rename or reopen failed, and
+  `WriteRecord` returned `nil` forever after. Failures now set a permanent
+  error returned by every method.
+- **Sub-second rotations destroyed archives.** Archive filenames used
+  one-second resolution, so `os.Rename` silently overwrote a previous archive
+  when two rotations landed in the same second. Filenames now carry nanosecond
+  resolution, and an existing archive is an error rather than a target.
+- **`Close()` panicked when called twice** with `close of closed channel`,
+  reachable through the ordinary `defer w.Close()` plus explicit-shutdown
+  pattern. `Close` is now idempotent.
+- **Writes after `Close` returned `nil` and were discarded.** They now return
+  `ErrClosed`.
+- **`OnFsync` was invoked while holding the writer lock**, deadlocking any
+  callback that re-entered the `Writer`. It is now called after the lock is
+  released. Its documented contract was also wrong: it fires on every sync,
+  not only when `FlushIntervalSec > 0`.
+- **`Reader` was documented as safe for concurrent use but was not.** It now
+  is.
+
+### Changed
+
+- `go.mod` Go directive raised from 1.26.4 to 1.26.5 to match the toolchain
+  in use.
+
 ## [0.5.0] - 2026-03-05
 
 ### Added
@@ -97,7 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/fjacquet/go-evtx/compare/v0.5.0...v0.6.0
 [0.4.0]: https://github.com/fjacquet/go-evtx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fjacquet/go-evtx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fjacquet/go-evtx/compare/v0.1.0...v0.2.0

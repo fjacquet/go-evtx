@@ -25,6 +25,7 @@ package evtx
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
@@ -50,14 +51,31 @@ import (
 // RotationIntervalH triggers time-based rotation via a background ticker. After each
 // interval (in hours), rotate() is called. 0 = disabled.
 type RotationConfig struct {
-	FlushIntervalSec int // 0 = disabled; must be >= 0
-	MaxFileSizeMB    int // 0 = disabled; rotate when file >= N MiB
-	MaxFileCount     int // 0 = unlimited; keep only N newest archives
+	FlushIntervalSec  int // 0 = disabled; must be >= 0
+	MaxFileSizeMB     int // 0 = disabled; rotate when file >= N MiB
+	MaxFileCount      int // 0 = unlimited; keep only N newest archives
 	RotationIntervalH int // 0 = disabled; rotate every N hours
 
-	// OnFsync is called after each successful f.Sync() with the time of the sync.
-	// nil = no callback. Useful for exposing fsync timestamp to Prometheus gauges.
-	// Only fires when FlushIntervalSec > 0 (flush goroutine active).
+	// OnFsync is called after each successful f.Sync() with the time of the
+	// sync. nil = no callback. Useful for exposing the fsync timestamp to a
+	// Prometheus gauge.
+	//
+	// It fires on every sync — from WriteRecord's chunk flush, from rotate,
+	// from Close, and from the background flush tick — not only when
+	// FlushIntervalSec > 0.
+	//
+	// The callback is invoked after the writer lock is released, so it may
+	// safely call most Writer methods without deadlocking — with one
+	// exception: do not call Close from a callback fired by the background
+	// goroutine's own fsync drain. Close waits for that goroutine to exit,
+	// but the goroutine is currently blocked inside the callback and can
+	// never reach its shutdown case, so the call deadlocks.
+	//
+	// That safety does not bound recursion: a callback that itself triggers a
+	// new flush — directly, or through a chain of Writer calls — recurses on
+	// the callback's own call stack, because the nested call's drain runs
+	// before control returns to the outer one. Avoid callbacks whose side
+	// effects can generate unbounded further fsyncs.
 	OnFsync func(time.Time)
 }
 
@@ -77,6 +95,52 @@ type Writer struct {
 	wg   sync.WaitGroup
 	// Phase 11 additions:
 	currentSize int64 // approximate file size in bytes, tracked for size-based rotation
+	// v0.6.0 durability state:
+	closed       bool        // set by Close; further writes return ErrClosed
+	closeErr     error       // result of the first Close, returned by later calls
+	closeOnce    sync.Once   // ensures the shutdown/finalize sequence runs exactly once
+	err          error       // sticky: durability permanently lost, all calls fail
+	fileClosed   bool        // w.f has already been closed (by rotate or by Close)
+	pendingFsync []time.Time // OnFsync timestamps to fire after w.mu is released
+}
+
+// checkStateLocked reports whether the writer can still accept work.
+//
+// Error precedence is deliberate and part of the API contract: the sticky
+// durability error wins over ErrClosed. A Close that itself failed sets both
+// states, and the caller needs to know that data was lost — which ErrClosed
+// alone would not tell them. Callers testing specifically for shutdown should
+// use errors.Is(err, ErrClosed) rather than equality, and must treat any other
+// error as "data may not have been persisted".
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) checkStateLocked() error {
+	if w.err != nil {
+		return w.err
+	}
+	if w.closed {
+		return ErrClosed
+	}
+	return nil
+}
+
+// drainFsyncCallbacks invokes any OnFsync callbacks queued while w.mu was held.
+//
+// CALLER MUST NOT HOLD w.mu. Invoking the callback under the lock would
+// deadlock any callback that re-enters the Writer.
+func (w *Writer) drainFsyncCallbacks() {
+	w.mu.Lock()
+	pending := w.pendingFsync
+	w.pendingFsync = nil
+	cb := w.cfg.OnFsync
+	w.mu.Unlock()
+
+	if cb == nil {
+		return
+	}
+	for _, t := range pending {
+		cb(t)
+	}
 }
 
 // New creates a Writer that will write to the given path.
@@ -152,13 +216,31 @@ func (w *Writer) backgroundLoop() {
 		case <-flushC:
 			w.mu.Lock()
 			if len(w.records) > 0 {
-				_ = w.tickFlushLocked()
+				if err := w.tickFlushLocked(); err != nil {
+					// The only persistence path with no caller to return to.
+					// Poison the writer rather than let the next WriteRecord
+					// report success for data that never reached disk.
+					w.err = fmt.Errorf("go_evtx: background flush: %w", err)
+					slog.Error("go_evtx_background_flush_failed", "path", w.path, "err", err)
+				}
 			}
 			w.mu.Unlock()
+			w.drainFsyncCallbacks()
 		case <-rotC:
 			w.mu.Lock()
-			_ = w.rotate()
+			var err error
+			if err = w.checkStateLocked(); err == nil {
+				err = w.rotate()
+			}
 			w.mu.Unlock()
+			w.drainFsyncCallbacks()
+			// A bare ErrClosed here just means Close() won the race with this
+			// tick — normal shutdown, not a rotation failure. Anything else
+			// (including a sticky error already set by an earlier failure)
+			// is worth an operator's attention.
+			if err != nil && !errors.Is(err, ErrClosed) {
+				slog.Error("go_evtx_scheduled_rotate_failed", "path", w.path, "err", err)
+			}
 		case <-w.done:
 			return
 		}
@@ -172,7 +254,12 @@ func (w *Writer) backgroundLoop() {
 // in a single session; mixing both is not recommended.
 func (w *Writer) WriteRaw(payload []byte) error {
 	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
+
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
 
 	// Size-based rotation check: rotate before adding more data.
 	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
@@ -181,12 +268,16 @@ func (w *Writer) WriteRaw(payload []byte) error {
 		}
 	}
 
+	if len(payload) > maxRecordPayload {
+		return fmt.Errorf("%w: payload %d bytes exceeds maximum %d",
+			ErrRecordTooLarge, len(payload), maxRecordPayload)
+	}
+
 	ts := toFILETIME(time.Now())
 	rec := wrapEventRecord(w.recordID, ts, payload)
 
 	// If adding this record would exceed chunk capacity, flush first.
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(w.records)+len(rec) > maxRecords {
+	if len(w.records)+len(rec) > maxChunkPayload {
 		if err := w.flushChunkLocked(); err != nil {
 			return err
 		}
@@ -213,7 +304,12 @@ func (w *Writer) WriteRaw(payload []byte) error {
 //   - AccessList, AccessMask, ProcessId, ProcessName
 func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
+
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
 
 	// Size-based rotation check: rotate before adding more data.
 	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
@@ -224,12 +320,21 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
 	payload := buildBinXML(eventID, fields, binXMLChunkOffset)
+
+	// A record larger than a chunk can never be written. Splitting one logical
+	// event across chunks is not valid EVTX, so reject it and write nothing.
+	// Truncating instead would be checksum-invisible: the CRCs would be
+	// computed over the corrupt bytes and verify.
+	if len(payload) > maxRecordPayload {
+		return fmt.Errorf("%w: payload %d bytes exceeds maximum %d",
+			ErrRecordTooLarge, len(payload), maxRecordPayload)
+	}
+
 	ts := toFILETIME(parseTimeCreated(fields))
 	rec := wrapEventRecord(w.recordID, ts, payload)
 
 	// If adding this record would exceed chunk capacity, flush first.
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(w.records)+len(rec) > maxRecords {
+	if len(w.records)+len(rec) > maxChunkPayload {
 		if err := w.flushChunkLocked(); err != nil {
 			return err
 		}
@@ -245,11 +350,15 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 }
 
 // archivePathFor returns the archive path for the given active file path.
-// The archive name is: base-YYYY-MM-DDTHH-MM-SS.ext (UTC timestamp, hyphens for colons).
+//
+// The archive name is base-YYYY-MM-DDTHH-MM-SS.nnnnnnnnn.ext, a UTC timestamp
+// with hyphens for colons. Nanosecond resolution is required: at one-second
+// resolution a burst of rotations produced colliding names and os.Rename
+// destroyed the earlier archives without an error.
 func archivePathFor(activePath string) string {
 	ext := filepath.Ext(activePath)
 	base := activePath[:len(activePath)-len(ext)]
-	ts := time.Now().UTC().Format("2006-01-02T15-04-05")
+	ts := time.Now().UTC().Format("2006-01-02T15-04-05.000000000")
 	return base + "-" + ts + ext
 }
 
@@ -260,6 +369,7 @@ func archivePathFor(activePath string) string {
 // rotate() does NOT acquire w.mu itself.
 func (w *Writer) rotate() error {
 	// Step 1: Flush any pending records to disk as a complete chunk.
+	// A failure here is not sticky — the file handle is still valid.
 	if len(w.records) > 0 {
 		if err := w.flushChunkLocked(); err != nil {
 			return fmt.Errorf("go_evtx: rotate flush: %w", err)
@@ -272,34 +382,84 @@ func (w *Writer) rotate() error {
 	}
 
 	// Step 3: Sync and close the current file.
-	if err := w.f.Sync(); err != nil {
-		return fmt.Errorf("go_evtx: rotate sync: %w", err)
-	}
-	if err := w.f.Close(); err != nil {
-		return fmt.Errorf("go_evtx: rotate close: %w", err)
-	}
-
-	// Step 4: Rename active file to a timestamped archive.
+	// From here until the replacement handle is installed, any failure leaves
+	// the writer unable to guarantee durability. Record it permanently rather
+	// than accepting events we cannot persist.
 	archive := archivePathFor(w.path)
-	if err := os.Rename(w.path, archive); err != nil {
-		return fmt.Errorf("go_evtx: rotate rename: %w", err)
+	if err := w.f.Sync(); err != nil {
+		w.err = fmt.Errorf("go_evtx: rotate sync: %w", err)
+		return w.err
+	}
+	if err := w.closeFileLocked(); err != nil {
+		w.err = fmt.Errorf("go_evtx: rotate close: %w", err)
+		return w.err
 	}
 
-	// Step 5: Sync the containing directory (best-effort on Unix; no-op on Windows).
-	if err := syncDir(filepath.Dir(w.path)); err != nil {
-		slog.Warn("go_evtx_rotate_syncdir_warn", "path", w.path, "err", err)
+	// Step 4: Commit the archive with link-then-unlink rather than rename.
+	//
+	// os.Rename REPLACES an existing non-directory destination on Unix, so a
+	// name collision would destroy a committed archive silently. Checking with
+	// os.Stat first does not help: it is a time-of-check/time-of-use race, and
+	// an O_EXCL probe creates the destination without reserving it for the
+	// later rename.
+	//
+	// os.Link fails if the destination exists, atomically and without a race,
+	// using only the standard library. The active path is unlinked afterwards.
+	// The window between the two calls leaves both names pointing at the same
+	// inode, which is harmless — a reader sees a complete file either way.
+	//
+	// Not every filesystem supports hard links (FAT32, some SMB and container
+	// overlay mounts). Where Link is unsupported, fall back to Stat+Rename and
+	// log that the collision guard is now best-effort, rather than failing a
+	// rotation that used to work.
+	if err := os.Link(w.path, archive); err != nil {
+		if !isLinkUnsupported(err) {
+			w.err = fmt.Errorf("go_evtx: rotate link archive %s: %w", archive, err)
+			return w.err
+		}
+		slog.Warn("go_evtx_rotate_link_unsupported",
+			"path", w.path, "err", err,
+			"note", "falling back to rename; archive collision guard is best-effort")
+		if _, serr := os.Stat(archive); serr == nil {
+			w.err = fmt.Errorf("go_evtx: rotate: archive %s already exists", archive)
+			return w.err
+		}
+		if rerr := os.Rename(w.path, archive); rerr != nil {
+			w.err = fmt.Errorf("go_evtx: rotate rename: %w", rerr)
+			return w.err
+		}
+	} else if err := os.Remove(w.path); err != nil {
+		w.err = fmt.Errorf("go_evtx: rotate unlink active file: %w", err)
+		return w.err
 	}
 
-	// Step 6: Open a fresh file at the same path.
+	// Step 5: Open a fresh file at the same path and make its header durable.
+	// Without this Sync the placeholder header lives only in the page cache
+	// until the first chunk flush, so a crash immediately after rotation
+	// leaves a zero-length or partial file where a valid empty one should be.
 	f, err := os.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("go_evtx: rotate open new file: %w", err)
+		w.err = fmt.Errorf("go_evtx: rotate open new file: %w", err)
+		return w.err
 	}
 	if _, err := f.Write(buildFileHeader(0, 1)); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("go_evtx: rotate write header: %w", err)
+		w.err = fmt.Errorf("go_evtx: rotate write header: %w", err)
+		return w.err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		w.err = fmt.Errorf("go_evtx: rotate sync new header: %w", err)
+		return w.err
 	}
 	w.f = f
+	w.fileClosed = false
+
+	// Step 6: Sync the containing directory so both the archive link and the
+	// replacement file are durable (best-effort on Unix; no-op on Windows).
+	if err := syncDir(filepath.Dir(w.path)); err != nil {
+		slog.Warn("go_evtx_rotate_syncdir_warn", "path", w.path, "err", err)
+	}
 
 	// Step 7: Reset writer state for the new file.
 	w.chunkCount = 0
@@ -326,7 +486,11 @@ func (w *Writer) rotate() error {
 // Rotate() is safe to call concurrently with WriteRecord() and WriteRaw().
 func (w *Writer) Rotate() error {
 	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
 	return w.rotate()
 }
 
@@ -350,7 +514,7 @@ func (w *Writer) cleanOldFiles() error {
 
 	// Sort by modification time (oldest first) and delete the excess.
 	type fileInfo struct {
-		path string
+		path  string
 		mtime int64
 	}
 	infos := make([]fileInfo, 0, len(matches))
@@ -372,9 +536,41 @@ func (w *Writer) cleanOldFiles() error {
 	return nil
 }
 
+// chunkCapacityLocked reports whether the pending buffer still fits in a chunk.
+//
+// The entry guards in WriteRecord and WriteRaw make an overflow unreachable.
+// If it ever fires, a code change has reintroduced silent truncation — fail
+// permanently rather than write a corrupt chunk whose CRCs verify.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) chunkCapacityLocked() error {
+	if len(w.records) > maxChunkPayload {
+		w.err = fmt.Errorf("go_evtx: internal: chunk buffer %d bytes exceeds capacity %d",
+			len(w.records), maxChunkPayload)
+		return w.err
+	}
+	return nil
+}
+
+// queueFsyncLocked records an fsync timestamp for later delivery to OnFsync.
+//
+// The callback must not run under w.mu — a callback that re-enters the Writer
+// would deadlock — so the timestamp is queued here and fired by
+// drainFsyncCallbacks once the lock is released.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) queueFsyncLocked() {
+	if w.cfg.OnFsync != nil {
+		w.pendingFsync = append(w.pendingFsync, time.Now())
+	}
+}
+
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
-// padded 65536-byte EVTX chunk. It increments w.chunkCount, patches the file
-// header at offset 0, calls f.Sync(), and resets w.records and w.firstID.
+// padded 65536-byte EVTX chunk, patches the file header at offset 0, and calls
+// f.Sync(). Only once the chunk is durable does it commit w.chunkCount,
+// w.currentSize, w.records, and w.firstID together — if any I/O step fails,
+// none of that in-memory state has moved, so the call is genuinely retriable
+// and a retry cannot write the same records into a second chunk slot.
 //
 // Must be called with w.mu held. Does nothing if len(w.records) == 0.
 func (w *Writer) flushChunkLocked() error {
@@ -382,12 +578,10 @@ func (w *Writer) flushChunkLocked() error {
 		return nil
 	}
 
-	// Clamp records to chunk capacity (defensive guard).
-	records := w.records
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(records) > maxRecords {
-		records = records[:maxRecords]
+	if err := w.chunkCapacityLocked(); err != nil {
+		return err
 	}
+	records := w.records
 
 	recordsStart := int(evtxRecordsStart)
 	freeSpaceOffset := uint32(recordsStart + len(records))
@@ -406,26 +600,23 @@ func (w *Writer) flushChunkLocked() error {
 		return fmt.Errorf("go_evtx: write chunk %d: %w", w.chunkCount, err)
 	}
 
-	// Track file size: each committed chunk adds evtxChunkSize bytes.
-	w.currentSize += int64(evtxChunkSize)
-
-	// Increment chunk count and patch the file header.
-	w.chunkCount++
-	if _, err := w.f.WriteAt(buildFileHeader(w.chunkCount, w.recordID), 0); err != nil {
+	// Patch the file header to acknowledge the new chunk, then make it durable.
+	nextChunkCount := w.chunkCount + 1
+	if _, err := w.f.WriteAt(buildFileHeader(nextChunkCount, w.recordID), 0); err != nil {
 		return fmt.Errorf("go_evtx: patch file header: %w", err)
 	}
-
-	// Sync to disk.
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: sync: %w", err)
 	}
-	if w.cfg.OnFsync != nil {
-		w.cfg.OnFsync(time.Now())
-	}
 
-	// Reset current chunk buffer.
+	// The chunk is durable. Commit every piece of in-memory state together, so
+	// a failure above leaves nothing mutated and the operation is genuinely
+	// retriable — which is what rotate()'s non-sticky Step 1 already assumes.
+	w.chunkCount = nextChunkCount
+	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
 	w.firstID = w.recordID
+	w.queueFsyncLocked()
 
 	slog.Info("go_evtx_chunk_flushed",
 		"path", w.path,
@@ -447,11 +638,10 @@ func (w *Writer) tickFlushLocked() error {
 	}
 
 	// Build the in-progress chunk (same layout as flushChunkLocked, but don't commit).
-	records := w.records
-	maxRecords := int(evtxChunkSize - evtxRecordsStart)
-	if len(records) > maxRecords {
-		records = records[:maxRecords]
+	if err := w.chunkCapacityLocked(); err != nil {
+		return err
 	}
+	records := w.records
 
 	recordsStart := int(evtxRecordsStart)
 	freeSpaceOffset := uint32(recordsStart + len(records))
@@ -479,44 +669,87 @@ func (w *Writer) tickFlushLocked() error {
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: tick sync: %w", err)
 	}
-	if w.cfg.OnFsync != nil {
-		w.cfg.OnFsync(time.Now())
-	}
+	w.queueFsyncLocked()
 
 	return nil
 }
 
 // Close stops the background goroutine (if running), waits for it to exit,
 // then performs a final flush of any remaining buffered events.
-// If no events were written and no chunks committed, Close removes the file from
-// disk (backward compat: empty session leaves no file) and returns nil.
-// Close must be called exactly once.
-func (w *Writer) Close() (err error) {
-	close(w.done) // 1. signal goroutine
-	w.wg.Wait()   // 2. wait — WITHOUT holding any lock
-	w.mu.Lock()   // 3. safe to acquire now
-	defer w.mu.Unlock()
-	defer func() { // always close the file handle
-		if cerr := w.f.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}()
+//
+// If no events were written and no chunks were committed, Close removes the
+// file from disk (an empty session leaves no file) and returns nil.
+//
+// Close is idempotent: the second and later calls return the first call's
+// result and do no work.
+func (w *Writer) Close() error {
+	w.closeOnce.Do(func() {
+		w.mu.Lock()
+		w.closed = true
+		w.mu.Unlock()
 
-	// Empty session: no records and no completed chunks.
-	if len(w.records) == 0 && w.chunkCount == 0 {
-		// Remove the placeholder file (nothing was written).
+		close(w.done) // signal the background goroutine
+		w.wg.Wait()   // wait WITHOUT holding the lock
+
+		w.mu.Lock()
+		w.closeErr = w.finalizeLocked()
+		w.mu.Unlock()
+	})
+	defer w.drainFsyncCallbacks()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closeErr
+}
+
+// finalizeLocked flushes any pending chunk and closes the file handle.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) finalizeLocked() error {
+	// Durability was already lost, so do not try to flush — but the file
+	// handle may still be open (a rotate that failed at the Sync step never
+	// reached its Close), and leaking it on every failed rotation would
+	// exhaust the daemon's descriptors.
+	if w.err != nil {
+		if cerr := w.closeFileLocked(); cerr != nil {
+			slog.Warn("go_evtx_close_file_failed", "path", w.path, "err", cerr)
+		}
+		return w.err
+	}
+
+	var err error
+	switch {
+	case len(w.records) == 0 && w.chunkCount == 0:
+		// Empty session: remove the placeholder file.
 		_ = os.Remove(w.path)
+	case len(w.records) > 0:
+		if err = w.flushChunkLocked(); err != nil {
+			// The final flush is the last chance to persist these records —
+			// there is no caller left to retry. Make checkStateLocked's
+			// documented precedence (sticky error over ErrClosed) actually
+			// true for this path: without this, a Close whose final flush
+			// failed would still report only ErrClosed to anyone who asks
+			// afterward, hiding that data was lost.
+			w.err = err
+		}
+	}
+
+	if cerr := w.closeFileLocked(); cerr != nil && err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// closeFileLocked closes w.f exactly once. rotate() closes the handle
+// mid-sequence, so this tracks whether that already happened rather than
+// calling Close twice and reporting "file already closed".
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) closeFileLocked() error {
+	if w.fileClosed || w.f == nil {
 		return nil
 	}
-
-	// Flush remaining partial chunk if any records are pending.
-	if len(w.records) > 0 {
-		return w.flushChunkLocked()
-	}
-
-	// Records were written but last chunk was already flushed by flushChunkLocked.
-	// File header was already patched in that call; nothing more to do.
-	return nil
+	w.fileClosed = true
+	return w.f.Close()
 }
 
 // buildChunkHeader constructs the 512-byte EVTX chunk header.

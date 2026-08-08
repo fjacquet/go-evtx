@@ -2,7 +2,10 @@
 
 package evtx
 
-import "syscall"
+import (
+	"errors"
+	"syscall"
+)
 
 // syncDir performs an fsync on the directory containing a rotated file.
 // This ensures the directory entry (rename) is durable on Linux/macOS.
@@ -17,4 +20,11 @@ func syncDir(dirPath string) error {
 		return err
 	}
 	return syscall.Close(fd)
+}
+
+// isLinkUnsupported reports whether err from os.Link indicates the
+// filesystem does not support hard links, so rotate() should fall back to
+// Stat+Rename instead of poisoning the writer.
+func isLinkUnsupported(err error) bool {
+	return errors.Is(err, errors.ErrUnsupported) || errors.Is(err, syscall.EPERM)
 }

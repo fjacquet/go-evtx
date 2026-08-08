@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -46,6 +47,7 @@ type Record struct {
 // Reader reads EVTX event records sequentially from a file.
 // All exported methods are safe for concurrent use.
 type Reader struct {
+	mu        sync.Mutex // guards all fields below; Reader is safe for concurrent use
 	f         *os.File
 	numChunks int
 	chunkIdx  int
@@ -86,6 +88,8 @@ func Open(path string) (*Reader, error) {
 }
 
 // loadChunk reads chunk idx into r.buf and initialises recOff/freeOff.
+//
+// CALLER MUST HOLD r.mu.
 func (r *Reader) loadChunk(idx int) error {
 	if idx >= r.numChunks {
 		return ErrNoMoreRecords
@@ -105,6 +109,8 @@ func (r *Reader) loadChunk(idx int) error {
 
 // nextRecord advances to and parses the next event record header.
 // Returns the raw BinXML payload (without the 24-byte record header or the trailing size copy).
+//
+// CALLER MUST HOLD r.mu.
 func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, err error) {
 	for {
 		if r.recOff >= r.freeOff {
@@ -144,8 +150,14 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, err e
 
 // ReadRaw returns the raw BinXML payload of the next event record.
 // Returns ErrNoMoreRecords when all records have been read.
-// The returned bytes can be passed to Writer.WriteRaw to copy records between files.
+// The returned bytes are the caller's own copy, safe to retain and mutate;
+// they can be passed to Writer.WriteRaw to copy records between files. This
+// guarantee comes from nextRecord, which copies the payload out of r.buf
+// before returning it rather than aliasing the shared chunk buffer — do not
+// remove that copy without preserving this guarantee some other way.
 func (r *Reader) ReadRaw() ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	_, _, payload, err := r.nextRecord()
 	return payload, err
 }
@@ -153,6 +165,8 @@ func (r *Reader) ReadRaw() ([]byte, error) {
 // ReadRecord reads and decodes the next event record.
 // Returns ErrNoMoreRecords when all records have been read.
 func (r *Reader) ReadRecord() (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	recordID, ts, payload, err := r.nextRecord()
 	if err != nil {
 		return nil, err
@@ -167,5 +181,7 @@ func (r *Reader) ReadRecord() (*Record, error) {
 
 // Close closes the underlying file.
 func (r *Reader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.f.Close()
 }
