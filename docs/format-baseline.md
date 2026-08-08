@@ -30,8 +30,9 @@ baseline the rest of the release compares against.**
 | 4 | `3c9e825` | 403 records, 21 chunks — byte-identical generator output to rows 2-3 (Task 6 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 5 | `ff33b7e` | 403 records, 21 chunks — byte-identical generator output to rows 2-4 (Task 7 Part A touched only the workflow) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — see "Task 7 Part A" below |
 | 6 | `62de633` | 403 records, 21 chunks, max ObjectName **31642** runes — NOT byte-identical to rows 2-5 (B2 shifts every record 4 bytes; see "Task 7 Part B" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to row 5 |
+| 7 | `4510103` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to row 6 (Task 7c changed two bytes' *value* per element, not any length; see "Task 7c" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-6 |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below).
 
 ## Row 2: the fixture
 
@@ -634,3 +635,135 @@ content and blocks the .NET reader is still open — F8 (missing `xmlns`) and
 the sparse `<System>` block (5 of the real file's 14 elements) are the
 next candidates the "Reading this result" section above already named,
 neither of which this task touched.
+
+## Task 7c: F9 (element dependency identifier)
+
+**Change:** `writeOpenElement` (`binxml.go`) wrote `0` for every
+OpenStartElement token's dependency identifier field. libyal's EVTX
+documentation defines that field as `"-1 (0xffff) => not set"` — `0` is a
+valid identifier referring to template value 0, not the "no dependency"
+sentinel, so every element go-evtx has ever written asserted a spurious
+dependency on substitution 0. Fixed to write `0xffff`.
+
+**Independently confirmed against `testdata/system.evtx`**, going beyond the
+single element cited in the task brief: a full token walk of chunk 0's first
+template body (starting chunk-relative 24532) shows every *unconditional*
+element (`<EventData>`, `<Provider>`, `<TimeCreated>`, `<Correlation>`,
+`<Execution>`, `<Security>`, `<Data Name=...>`) carries `dependency_id =
+0xffff`, while the two elements that wrap an `OptionalSubstitution` (token
+`0x0E`) — `<Data>` and `<Binary>`, gating on substitution indices 0 and 2 —
+carry that same substitution's own index (`0x0000`, `0x0002`) instead of the
+sentinel. This matches `[MS-EVEN6]`'s documented semantics exactly: the
+dependency identifier ties an element's presence to an *optional*
+substitution, omitting the element from rendered XML when that substitution
+is null. go-evtx never emits `OptionalSubstitution` — every substitution it
+writes uses the normal (`0x0D`) token — so every element it writes is
+unconditional, and `0xffff` is the only value ever correct for it.
+
+**`writeAttributeSub` judgment call: no change, decided from the real file.**
+The libyal EVTX documentation's Attribute token layout (token(1) +
+name_offset(4), no dependency field) was cross-checked against ten real
+Attribute tokens pulled directly out of `testdata/system.evtx` chunk 0 —
+including `<Provider Name=...>`, `<TimeCreated SystemTime=...>`,
+`<Correlation ActivityID=...>`, `<Execution ProcessID=...>`, `<Security
+UserID=...>`, and three `<Data Name=...>` instances. Every one goes straight
+from the token byte (`0x06`/`0x46`) to a 4-byte name_offset with no
+intervening 2-byte field, matching `writeAttributeSub`'s existing code
+exactly. Left unchanged.
+
+**`binxml_reader.go`: no change needed.** It never parses `dependency_id` —
+`decodeBinXML` reads `data_length` from the TemplateNode header and jumps
+straight to the substitution array; it does not walk element tokens at all.
+The full `-race` suite (including every reader round-trip test) passes
+unmodified against the new encoding.
+
+**Test.** `dependency_test.go` adds `TestWriteOpenElement_DependencyIDIsUnset`
+per the task brief, with one adjustment: the brief's byte-scan started at
+payload offset 0, but two bytes in the fixed 38-byte preamble (the outer
+FragmentHeader's minor-version byte, and the low byte of the TemplateNode's
+GUID/template_id, both coincidentally `0x01`) pass the scan's own "plausible
+header" guard and produced false-positive failures unrelated to the fix —
+confirmed by hand-decoding the payload bytes at those offsets. Real
+OpenStartElement tokens only occur in the template body, which starts at
+`preambleSize`; the scan now starts there instead of 0. With that change the
+test passes cleanly (20 sentinel-carrying elements found, 0 false positives).
+
+**Golden file: length unchanged, as predicted.** `testdata/binxml-golden.bin`
+was 1811 bytes before this change and 1811 bytes after — only two bytes'
+*value* differ per `OpenStartElement` token (20 of them in the golden
+payload), no bytes added or removed, so every downstream offset in the
+payload is untouched.
+
+Commit `4510103` ("fix: write the 'not set' sentinel in element
+dependency_id (F9)"), pushed to `feat/v0.7.0-format-correctness`.
+
+**Run selection, by head SHA:**
+
+```
+$ git rev-parse HEAD
+45101039cdf14baa17f3b0cd7b079af479e4ed30
+$ gh api repos/fjacquet/go-evtx/actions/runs/31273985286 --jq '.head_sha'
+45101039cdf14baa17f3b0cd7b079af479e4ed30
+```
+
+**Fixture identity, confirmed from the `generate` job log:**
+
+```
+wrote artifacts/generated.evtx (403 records, max ObjectName 31642 runes)
+```
+
+**Byte-identical to row 6** (`31642` runes, same 403 records, same 21
+chunks) — exactly as predicted, since this task changes two bytes' *value*
+per element, not any length, so `cmd/gen-fixture`'s `largestAccepted()`
+probe settles on the identical ceiling it found for row 6. The comparison
+below is therefore fully valid, not merely stage-split-comparable.
+
+Job log (`generate`):
+<https://github.com/fjacquet/go-evtx/actions/runs/31273985286/job/93144495078>
+
+python-evtx differential: FAIL, unchanged —
+
+```
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31273985286/job/93144550403>
+
+**`get-winevent` — verbatim, the load-bearing result of this task:**
+
+```
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+ParentContainsErrorRecordException: D:\a\_temp\5a7f688b-835c-4891-af0a-c092738abd94.ps1:27
+Line |
+  27 |          $rec = $reader.ReadEvent()
+     |          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31273985286/job/93144550388>
+
+### Reading this result, plainly, without adjusting anything to chase a greener outcome
+
+**STAGE2 READ: FAILED after 0 records — no breakthrough.** Stage 1 still
+opens cleanly; stage 2 still throws on the very first `ReadEvent()`, same
+exception type, same exact wording, same record count (0), as rows 5 and 6.
+The dependency identifier fix did not change the observable outcome at all,
+against a byte-identical fixture — the strongest form of "no effect" this
+document has recorded, since row 6's comparison had to go through the
+content-dependence caveat (different `ObjectName` probe length) and this
+one does not.
+
+This is a **null result and is reported as such.** F9 was a real, confirmed
+defect — independently verified from two directions (libyal's documented
+sentinel value, and a full token walk of the real fixture showing the
+unconditional/optional distinction holds exactly as `[MS-EVEN6]` describes)
+— but it was not what blocks `EventLogReader.ReadEvent()` on record 0.
+Per the task's own framing: this was the cheapest remaining candidate and
+the only one backed by a written specification, and it has now been tried
+and eliminated. What differs about record 0's content and blocks the .NET
+reader remains open — F8 (missing `xmlns` on `<Event>`) and the sparse
+`<System>` block (5 of the real file's 14 elements) remain the leading
+candidates named in the "Task 7 Part A" reading above, neither of which
+this task touched.
