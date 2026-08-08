@@ -75,7 +75,7 @@ func TestReader_ConcurrentReadRecord(t *testing.T) {
 // loadChunk more than once.
 func recordCountForChunks(t *testing.T, n int) int {
 	t.Helper()
-	payload := buildBinXML(4663, testFields(), evtxRecordsStart+evtxRecordHeaderSize).payload
+	payload := buildBinXML(4663, 1, testFields(), evtxRecordsStart+evtxRecordHeaderSize).payload
 	rec := wrapEventRecord(1, 0, payload)
 	recSize := len(rec)
 	if recSize == 0 {

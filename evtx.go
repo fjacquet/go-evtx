@@ -336,7 +336,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	}
 
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
-	res := buildBinXML(eventID, fields, binXMLChunkOffset)
+	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset)
 
 	// A record larger than a chunk can never be written. Splitting one logical
 	// event across chunks is not valid EVTX, so reject it and write nothing.
@@ -358,7 +358,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		// The flush reset the collectors; rebuild this record for the new,
 		// empty chunk so its node offsets are relative to the right chunk.
 		binXMLChunkOffset = evtxRecordsStart + evtxRecordHeaderSize
-		res = buildBinXML(eventID, fields, binXMLChunkOffset)
+		res = buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset)
 		rec = wrapEventRecord(w.recordID, ts, res.payload)
 	}
 

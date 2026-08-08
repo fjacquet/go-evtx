@@ -59,7 +59,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 **Write data flow:**
 
-1. `buildBinXML()` → constructs a BinXML fragment using a fixed template with 29 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value)
+1. `buildBinXML()` → constructs a BinXML fragment using a fixed template with 40 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value, plus 11 more added in v0.7.0/Task 8b to round `<System>` out to match a real Windows record — see the index map below)
 2. `wrapEventRecord()` → wraps BinXML payload in a 24-byte event record header (signature, size, recordID, FILETIME timestamp)
 3. Records appended to the `Writer.records` byte buffer (the pending chunk)
 4. The buffer is committed as a chunk by `flushChunkLocked()` when it fills, by `tickFlushLocked()` on the background flush tick, by `rotate()`, and by `Close()`
@@ -111,10 +111,25 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 |-------|-------|------|
 | 0 | ProviderName | STRING |
 | 1 | EventID | UINT16 |
-| 2 | Level | UINT16 (always 0) |
+| 2 | Level | UINT8 (always 0) |
 | 3 | SystemTime | FILETIME |
 | 4 | Computer | STRING |
 | 5+2i | DataField[i] name | STRING |
 | 6+2i | DataField[i] value | STRING |
+| 29 | Version | UINT8 (always 0, no caller-supplied source) |
+| 30 | Task | UINT16 (always 0, no caller-supplied source) |
+| 31 | Opcode | UINT8 (always 0, no caller-supplied source) |
+| 32 | Keywords | HEXINT64 (always 0, no caller-supplied source) |
+| 33 | EventRecordID | UINT64 (the writer's own record ID) |
+| 34 | Correlation/@ActivityID | NULL (no caller-supplied source) |
+| 35 | Correlation/@RelatedActivityID | NULL (no caller-supplied source) |
+| 36 | Execution/@ProcessID | NULL (no caller-supplied source) |
+| 37 | Execution/@ThreadID | NULL (no caller-supplied source) |
+| 38 | Channel | STRING (from `fields["Channel"]`) |
+| 39 | Security/@UserID | NULL (no caller-supplied source) |
 
-The 12 data fields (indices 5–28) are hardcoded in `dataFieldNames` in `binxml.go`.
+The 12 data fields (indices 5–28) are hardcoded in `dataFieldNames` in `binxml.go`; they kept their original indices and semantics across v0.7.0/Task 8b — nothing calling `WriteRecord` needs to change.
+
+Indices 29–39 (v0.7.0/Task 8b, F12b) exist purely so the encoded `<System>` block matches a real Windows record's 14 children instead of 5; `binxml_reader.go`'s `decodeBinXML` parses them like every other substitution but does not surface most of them on `Record` — they have no caller-supplied source. `EventRecordID`'s value is already exposed as `Record.RecordID` from the event record header, not from BinXML.
+
+The five newly-added scalar children (`Version`, `Task`, `Opcode`, `Keywords`, `EventRecordID`) are encoded differently from a plain `NormalSubstitution` (token `0x0D`): per `testdata/system.evtx`, every `<System>` child whose sole content is one substitution value uses `OptionalSubstitution` (token `0x0E`) with the enclosing `OpenStartElementTag`'s `dependency_id` set to that same substitution index, so `writeOpenElement`/`writeOptionalSubstitution` are called with that real index rather than `depIDNotSet`. `EventID` and `Level` are encoded this way in the real file too, but were deliberately left as `0x0D`/`dependency_id` `0xffff` (the "always present" form) since go-evtx always supplies real data for both and F12c's own text permits, rather than requires, reclassifying elements in that position — a future task could still bring them in line with the real file's exact encoding. `Correlation`, `Execution` and `Security` stay `0xffff` (element itself always present, matching the real file) with their individual attribute values NULL-typed via `OptionalSubstitution` — go-evtx has no source for `ActivityID`/`RelatedActivityID`/`ProcessID`/`ThreadID`/`UserID`, so it reproduces the real file's own encoding for an event that doesn't populate them, rather than inventing forensic data. `Channel` and `Computer` stay `NormalSubstitution`/`0xffff` like the other pre-existing fields, since go-evtx always has a (possibly empty) real value for both.

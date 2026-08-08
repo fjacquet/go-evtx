@@ -3,18 +3,28 @@
 // Decodes the specific template format written by binxml.go:
 //
 //	preamble (38 B): FragmentHeader(4) + TemplateInstanceNode(10) + TemplateNodeHeader(24)
-//	template body (data_length bytes): BinXML tokens with NormalSubstitution placeholders
+//	template body (data_length bytes): BinXML tokens with Normal/OptionalSubstitution placeholders
 //	substitution array: [count:4B][count × spec:4B each][value_data...]
 //
 // Substitution index → Record field mapping (per buildTemplateBody):
 //
 //	0   ProviderName  STRING
 //	1   EventID       UINT16
-//	2   Level         UINT16
+//	2   Level         UINT8    (F12a: was UINT16)
 //	3   SystemTime    FILETIME
 //	4   Computer      STRING
 //	5+2i DataField[i] name   STRING  (== dataFieldNames[i])
 //	6+2i DataField[i] value  STRING
+//
+// Indices 29-39 (F12b: Version, Task, Opcode, Keywords, EventRecordID,
+// Correlation/@ActivityID, Correlation/@RelatedActivityID,
+// Execution/@ProcessID, Execution/@ThreadID, Channel, Security/@UserID —
+// see the sub* constants in binxml.go) are parsed by parseSubstitutionArray
+// like every other entry but are not mapped onto Record: most have no
+// caller-supplied source (go-evtx writes a placeholder solely so the encoded
+// <System> block matches a real Windows record's shape), and EventRecordID
+// is already exposed as Record.RecordID from the event record header, not
+// from BinXML.
 package evtx
 
 import (
@@ -95,9 +105,15 @@ func applySubstitutions(subs []substitutionEntry, rec *Record) {
 		}
 		return binary.LittleEndian.Uint16(subs[idx].data)
 	}
+	getUint8 := func(idx int) uint16 {
+		if idx >= len(subs) || len(subs[idx].data) < 1 {
+			return 0
+		}
+		return uint16(subs[idx].data[0])
+	}
 	rec.Provider = getString(0)
 	rec.EventID = getUint16(1)
-	rec.Level = getUint16(2)
+	rec.Level = getUint8(2) // F12a: Level is UINT8, not UINT16
 	if len(subs) > 3 && len(subs[3].data) == 8 {
 		rec.TimeCreated = fromFILETIME(binary.LittleEndian.Uint64(subs[3].data))
 	}

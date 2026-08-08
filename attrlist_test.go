@@ -38,7 +38,7 @@ import (
 // element it writes closes via 0x02 and a later, separate EndElementTag).
 func TestWriteOpenElement_AttrListSizeAfterNameNode(t *testing.T) {
 	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
-	res := buildBinXML(4663, goldenFields(), base)
+	res := buildBinXML(4663, 1, goldenFields(), base)
 	payload := res.payload
 
 	checked := 0
