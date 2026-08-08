@@ -6,47 +6,50 @@ permissions:
   contents: read
 
 jobs:
-  python-evtx-differential:
+  generate:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version-file: go.mod }
-      - uses: astral-sh/setup-uv@v9.0.0
       - name: Generate fixture
         run: |
           mkdir -p artifacts
           go run ./cmd/gen-fixture -out artifacts
-      - name: Parse with python-evtx
-        run: |
-          uv venv
-          uv pip install python-evtx
-          uv run python scripts/verify_python_evtx.py artifacts/generated.evtx artifacts/expected.json
-      # always(): the fixture is generated before the checker runs, so it
-      # should still be uploaded even when the checker step fails (a FAIL is
-      # exactly the result this workflow exists to capture) — otherwise the
-      # get-winevent job below would have nothing to download.
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: generated-evtx
           path: artifacts/
           retention-days: 7
 
+  python-evtx-differential:
+    needs: generate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: generated-evtx
+          path: artifacts
+      - name: Parse with python-evtx
+        run: |
+          uv venv
+          uv pip install python-evtx
+          uv run python scripts/verify_python_evtx.py artifacts/generated.evtx artifacts/expected.json
+
   get-winevent:
-    needs: python-evtx-differential
-    # !cancelled(): run even when python-evtx-differential fails. A failing
-    # checker is the expected pre-fix result, not a reason to skip the
-    # Windows leg — both jobs' real output is the deliverable of this task.
-    if: ${{ !cancelled() }}
+    needs: generate
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: generated-evtx
           path: artifacts
