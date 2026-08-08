@@ -10,7 +10,8 @@ import (
 )
 
 func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
-	res := buildBinXML(4663, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+	res := buildBinXML(4663, goldenFields(), base)
 
 	// Walk the payload for OpenStartElement tokens and check each one's
 	// dependency identifier. Tokens: 0x01 without attributes, 0x41 with.
@@ -27,6 +28,46 @@ func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 	found := 0
 	for i := preambleSize; i+3 < len(res.payload); i++ {
 		tok := res.payload[i]
+
+		// F8 knock-on: an Attribute token (0x06) carries its own 4-byte
+		// name_offset immediately followed by an inline NameNode. That
+		// name_offset is an absolute chunk offset, not a small count, so its
+		// low byte is effectively arbitrary — it can coincidentally equal
+		// 0x01/0x41, and the NameNode's own next_offset field (always written
+		// as 0 by writeNameNode) is guaranteed to look like a "plausible"
+		// zero-sized element span immediately after. Before F8 (Task 8) added
+		// a 135-byte literal attribute to <Event>, no name_offset in the
+		// payload happened to collide this way; shifting every later offset
+		// by that amount made the <Provider> element's own "Name" attribute
+		// collide (payload offset 997 = the low byte of name_offset 0x0601).
+		//
+		// 0x06 itself is far too common a byte (it turns up throughout
+		// ordinary UTF-16LE text and substitution value data — an unguarded
+		// probe found 26 "matches" in this payload, most of them nonsense
+		// like a decoded char_count of 17152) to treat every occurrence as a
+		// real Attribute token the way 0x01/0x41 are. Instead, require the
+		// name_offset field to hold the exact absolute address writeNameNode
+		// would place its NameNode at, base+i+attrHeaderSize — a coincidence
+		// that random bytes essentially never produce — before trusting the
+		// decoded char_count to compute a skip; otherwise treat the 0x06 as
+		// an ordinary byte and only advance by one, same as before this
+		// branch existed.
+		if tok == binXMLAttribute {
+			const attrHeaderSize = 5 // token(1) + name_offset(4)
+			if i+attrHeaderSize <= len(res.payload) {
+				nameOffset := binary.LittleEndian.Uint32(res.payload[i+1:])
+				nn := i + attrHeaderSize
+				if nameOffset == base+uint32(nn) && nn+8 <= len(res.payload) {
+					charCount := int(binary.LittleEndian.Uint16(res.payload[nn+6:]))
+					nameNodeSize := 8 + charCount*2 + 2
+					if end := nn + nameNodeSize; end <= len(res.payload) {
+						i = end - 1 // loop's own i++ lands exactly on end
+					}
+				}
+			}
+			continue
+		}
+
 		if tok != binXMLOpenElement && tok != binXMLOpenElementAttrs {
 			continue
 		}

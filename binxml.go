@@ -34,11 +34,21 @@ const (
 	binXMLAttribute          = 0x06 // Attribute token
 	binXMLTemplateInstance   = 0x0C // Template instance token
 	binXMLNormalSubstitution = 0x0D // Normal substitution token
+	binXMLValueText          = 0x05 // Value token: literal (non-substituted) value
 
 	binXMLTypeString   = 0x01 // Value type: UTF-16LE string (WSTRING)
 	binXMLTypeUint16   = 0x06 // Value type: uint16 (UNSIGNED_WORD)
 	binXMLTypeFiletime = 0x11 // Value type: FILETIME (uint64)
 )
+
+// eventNamespaceURI is the schema every real Windows .evtx record declares on
+// its root <Event> element (F8). Verified directly against
+// testdata/system.evtx: the UTF-16LE encoding of this exact string occurs 45
+// times, once per template. Without it, elements are in no XML namespace at
+// all, and every namespace-aware consumer's XPath — PowerShell's .ToXml(),
+// .NET's EventLogRecord, python-evtx, Event Viewer's own XML view — matches
+// nothing.
+const eventNamespaceURI = "http://schemas.microsoft.com/win/2004/08/events/event"
 
 // evtxRecordsStart: chunk-relative offset where the first event record is placed.
 // python-evtx hardcodes first_record() at chunk offset 0x200 (512).
@@ -207,8 +217,21 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(0x01) // minor version
 	b.WriteByte(0x00) // flags
 
-	// <Event>
-	dataSizeStack = pushOpenElement(b, "Event", false, baseOffset, names, dataSizeStack)
+	var attrListPos uint32
+
+	// <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+	//
+	// F8: xmlns is a literal-valued attribute, not a substitution — its value
+	// is fixed in every record, so it is written inline as a ValueText token
+	// rather than occupying one of the 29 substitution slots (which would
+	// shift the index map documented in CLAUDE.md and every index in
+	// binxml_reader.go). This promotes <Event> from token 0x01 (no attrs) to
+	// 0x41 (has attrs), so it now goes through pushOpenElementAttrs and
+	// closeAttrList exactly like <Provider>/<TimeCreated>/<Data> below —
+	// reusing the back-patch mechanism Task 7f built, not a second one.
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Event", baseOffset, names, dataSizeStack)
+	writeAttributeLiteral(b, "xmlns", eventNamespaceURI, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 
 	//   <System>
@@ -216,7 +239,6 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(binXMLCloseElement)
 
 	//     <Provider Name="%0"/>
-	var attrListPos uint32
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Provider", baseOffset, names, dataSizeStack)
 	writeAttributeSub(b, "Name", 0, binXMLTypeString, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
@@ -523,6 +545,50 @@ func writeAttributeSub(b *bytes.Buffer, name string, subIndex uint16, subType by
 	writeUint32LE(b, nameNodeOffset)
 	writeNameNode(b, name, binXMLBase, refs)
 	writeSubstitution(b, subIndex, subType)
+}
+
+// writeAttributeLiteral writes an Attribute token with inline NameNode,
+// followed by a literal ValueText token as the attribute's value — for
+// attributes whose value is fixed in every record (F8's xmlns), as opposed to
+// writeAttributeSub's substitution-array reference.
+//
+// Layout: [token: 1B] [name_offset: 4B] [NameNode] [ValueText]
+//
+// Measured directly against testdata/system.evtx (chunk 0, the <Event>
+// element's xmlns attribute at chunk-relative offset 4709 absolute /
+// name_offset 589 chunk-relative): AttributeToken 0x06, a 4-byte name_offset,
+// an inline NameNode for "xmlns" (20 bytes: next_offset(4)+hash(2)+
+// char_count(2)+10 UTF-16LE chars+null(2)), then a ValueText token whose
+// layout writeValueText below reproduces byte for byte — token 0x05, type
+// 0x01 (String), a 2-byte char_count of 53 (NOT including a null terminator),
+// and 106 bytes of UTF-16LE characters with no terminator at all. Summed
+// (1+4+20+1+1+2+106 = 135) that exactly equals the attr_list_size the real
+// file stores for this element (135, landing precisely on the byte after —
+// CloseStartElementTag 0x02), confirming both the token layout and that
+// ValueText carries no null terminator, unlike NameNode strings and
+// substitution string values which do.
+func writeAttributeLiteral(b *bytes.Buffer, name, value string, binXMLBase uint32, refs *[]chunkRef) {
+	tokenPos := uint32(b.Len())
+	b.WriteByte(binXMLAttribute)
+	nameNodeOffset := binXMLBase + tokenPos + 5 // 5 = token(1) + offset(4)
+	writeUint32LE(b, nameNodeOffset)
+	writeNameNode(b, name, binXMLBase, refs)
+	writeValueText(b, value)
+}
+
+// writeValueText writes a literal (non-substituted) string value token.
+//
+// Layout: [token: 0x05] [type: 0x01] [char_count: 2B LE] [UTF-16LE chars, NO
+// null terminator] — confirmed against testdata/system.evtx; see
+// writeAttributeLiteral's doc comment for the byte-for-byte measurement.
+func writeValueText(b *bytes.Buffer, value string) {
+	b.WriteByte(binXMLValueText)
+	b.WriteByte(binXMLTypeString)
+	u16 := utf16.Encode([]rune(value))
+	writeUint16LE(b, uint16(len(u16)))
+	for _, c := range u16 {
+		writeUint16LE(b, c)
+	}
 }
 
 // writeSubstitution writes a NormalSubstitution token (4 bytes).
