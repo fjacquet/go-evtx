@@ -34,8 +34,9 @@ baseline the rest of the release compares against.**
 | 8 | `9b8e974` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-7 (Task 7e changes 4 bytes' *value* per element — the data_size field — not any length; see "Task 7e" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-7 |
 | 9 | `7631f93` | 403 records, 21 chunks, max ObjectName **31642** runes — byte-identical generator output to rows 6-8 (Task 7f reorders and gives a real value to attr_list_size — a field-ordering fix, not a length change; see "Task 7f" below) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-8 |
 | 10 | `3b3f575` | 403 records, 22 chunks, max ObjectName **31573** runes — NOT byte-identical to rows 6-9 (F8 adds 139 bytes to `<Event>`'s own encoding — the xmlns attribute plus its attr_list_size — pushing the fixture from 21 to 22 chunks and settling `largestAccepted()` lower; see "Task 8" below) | **PASS: `OK: 403 records, all chunk checksums verify`** | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-9 |
+| 11 | `deefe13` | 403 records, 26 chunks, max ObjectName **31248** runes — NOT byte-identical to row 10 (Task 8b/F12 adds 11 substitution slots and 9 `<System>` children to every record's encoding — see "Task 8b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green — the regression guard this task's brief named held) | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-10 |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below).
 
 **Parser version.** All seven rows above were produced by `python-evtx==0.8.1`
 — confirmed by grepping each run's job log for uv's `+ python-evtx==X.Y.Z`
@@ -1480,3 +1481,267 @@ element deep inside `<EventData>`, without error. The defect `.NET`'s
 candidates — the sparse `<System>` block (5 of the real file's 14 elements)
 and S5 (go-evtx never emits `OptionalSubstitution`) — are untouched by this
 task and, after F8's elimination, are what remain.
+
+## Task 8b: F12 (`<System>`, value types, `OptionalSubstitution` — batched)
+
+**Batched deliberately**, per the task's own brief: F12a (value types), F12b
+(the sparse `<System>` block) and F12c (`OptionalSubstitution`) are three
+facets of one thing — the record didn't describe an event the way Windows
+describes an event — so they were fixed together against one Step 1
+measurement rather than three separate single-defect tasks.
+
+### Step 1: decoding `<System>` from `testdata/system.evtx`, before any code changed
+
+Chunk 0, record 0 (`EventRecordID 12049`, provider
+`Microsoft-Windows-Eventlog`), absolute file offsets. `<System>` itself opens
+at 749 (token `0x01`, no attributes, `dependency_id` `0xffff`, `data_size`
+1158) and closes (its own `EndElementTag`) at 1913. Every child, in the
+real file's own order:
+
+| Element | Attribute(s) | Sub. token | dependency_id | Value-spec type | Size |
+|---|---|---|---|---|---|
+| `Provider` (783) | `Name` (824), `Guid` (903) | literal `ValueText` (`0x05`), not a substitution | `0xffff` | n/a (literal WSTRING) | 27 / 39 chars |
+| `EventID` (1007) | `Qualifiers` (1046) | `0x0e` idx 4 | `0x0003` (= its own content idx) | `UNSIGNED_WORD` (`0x06`) | 0 (NULL) |
+| — content (1086) | | `0x0e` idx 3 | | `UNSIGNED_WORD` (`0x06`) | 2 |
+| `Version` (1091) | — | `0x0e` idx 11 | `0x000b` | `UNSIGNED_BYTE` (`0x04`) | 1 |
+| `Level` (1132) | — | `0x0e` idx 0 | `0x0000` | **`UNSIGNED_BYTE` (`0x04`)** | 1 |
+| `Task` (1169) | — | `0x0e` idx 2 | `0x0002` | `UNSIGNED_WORD` (`0x06`) | 2 |
+| `Opcode` (1204) | — | `0x0e` idx 1 | `0x0001` | `UNSIGNED_BYTE` (`0x04`) | 1 |
+| `Keywords` (1243) | — | `0x0e` idx 5 | `0x0005` | `HEX64` (`0x15`) | 8 |
+| `TimeCreated` (1286) | `SystemTime` (1333) | `0x0e` idx 6 | `0xffff` | `FILETIME` (`0x11`) | 8 |
+| `EventRecordID` (1373) | — | `0x0e` idx 10 | `0x000a` | `UNSIGNED_QWORD` (`0x0a`) | 8 |
+| `Correlation` (1426) | `ActivityID` (1473), `RelatedActivityID` (1512) | both `0x0e`, idx 7 / 18 | `0xffff` | both `GUID` (`0x0f`) | 0 / 0 (NULL) |
+| `Execution` (1566) | `ProcessID` (1609), `ThreadID` (1646) | both `0x0e`, idx 8 / 9 | `0xffff` | both `UNSIGNED_DWORD` (`0x08`) | 4 / 4 |
+| `Channel` (1682) | — | literal `ValueText` (`0x05`) | `0xffff` | n/a (literal WSTRING) | 6 chars |
+| `Computer` (1735) | — | literal `ValueText` (`0x05`) | `0xffff` | n/a (literal WSTRING) | 32 chars |
+| `Security` (1840) | `UserID` (1881) | `0x0e` idx 12 | `0xffff` | `SID` (`0x13`) | 0 (NULL) |
+
+Cross-checked against a second record in the same chunk (`EventRecordID
+12050`, offset 2688, same template resident at a different `TemplateInstance`
+occurrence) and against Task 7e/7f's own independently-measured
+`data_size`/`attr_list_size` numbers for `<Provider>` (783, `data_size`
+217) and `<System>` (749, `data_size` 1158) — identical. Full walk (all 20
+tokens, all 20 substitution-array entries) in
+`scratchpad/tokendiff/real_decoded.txt` (generated by a from-scratch BinXML
+walker, `scratchpad/tokendiff/decode.py`, re-run fresh against
+`testdata/system.evtx` for this task rather than trusted from the prior
+task's cached output).
+
+**This table corrects the brief's own prose in one place.** F12c's text
+frames `0x0E` as needed "for any element added in F12b whose value can be
+absent." The measured table shows real Windows uses `0x0E` for **every**
+`<System>` child whose sole content is one substitution value — including
+`EventID` and `Level`, which already existed and whose value go-evtx always
+supplies (never absent). The brief's own text anticipates and permits this
+reading ("elements that are genuinely always present may legitimately stay
+`0x0D`"), so `EventID`/`Level` were deliberately left `0x0D`/`0xffff` — but
+the table, not the prose summary, is what a future task should extend from
+if it revisits this.
+
+### F12a confirmed exactly as suspected
+
+`Level`'s value type is `UNSIGNED_BYTE` (`0x04`) in the real file, not
+`UNSIGNED_WORD` (`0x06`) as go-evtx wrote through every prior release.
+Fixed: `collectSubstitutionsFromFields`'s substitution 2 now writes a
+1-byte `binXMLTypeUint8` entry, and `buildTemplateBody`'s own
+`writeSubstitution(b, 2, ...)` call matches.
+
+### F12b: nine children added, in the real file's own order
+
+`Version`, `Task`, `Opcode`, `Keywords`, `EventRecordID`, `Correlation`
+(`ActivityID`/`RelatedActivityID`), `Execution` (`ProcessID`/`ThreadID`),
+`Channel`, `Security` (`UserID`) — bringing `<System>` from 5 to 14
+children, in the measured order: `Provider`, `EventID`, `Version`, `Level`,
+`Task`, `Opcode`, `Keywords`, `TimeCreated`, `EventRecordID`,
+`Correlation`, `Execution`, `Channel`, `Computer`, `Security`. `Version`
+now sits between `EventID` and `Level` — a real reordering, not just an
+insertion, since Task 8's release wrote `Level` immediately after `EventID`.
+
+`EventRecordID` carries the writer's real record ID (`w.recordID`, already
+tracked). `Version`/`Task`/`Opcode`/`Keywords` have no caller-supplied
+source, so each carries a typed zero rather than invented data — matching
+`Version`'s own real value (`0`) in the sampled record.
+`Correlation`/`Execution`/`Security`'s five attributes
+(`ActivityID`/`RelatedActivityID`/`ProcessID`/`ThreadID`/`UserID`) have no
+source either; each is written NULL (value-spec size 0, type `0x00`) —
+reproducing exactly how the real file itself encodes these fields for an
+event that doesn't populate them (`Correlation`'s own `ActivityID` in the
+sampled record is itself NULL), not inventing forensic data go-evtx was
+never given.
+
+Substitution indices 29-39 are appended after the existing 0-28 — the 12
+caller-facing data fields (`dataFieldNames`, indices 5-28) keep their exact
+original indices and semantics; nothing calling `WriteRecord` needs to
+change.
+
+### F12c: `OptionalSubstitution` (`0x0E`) added
+
+`writeOptionalSubstitution`/`writeAttributeOptional` (new, mirroring the
+existing `writeSubstitution`/`writeAttributeSub`) emit token `0x0E`.
+`writeOpenElement`/`pushOpenElement`/`pushOpenElementAttrs` gained a real
+`depID` parameter: `Version`/`Task`/`Opcode`/`Keywords`/`EventRecordID`'s
+own `OpenStartElementTag` now carries that substitution's own index as
+`dependency_id`, matching the real file's convention exactly.
+`Correlation`/`Execution`/`Security` stay `dependency_id` `0xffff` (element
+itself always present, matching the real file) with their individual
+attribute values `0x0E`-wrapped.
+
+`Provider`'s `Name` attribute gained a `moreAttrs`-capable `writeAttributeSub`
+(token `0x46`, "more attributes follow") because `Correlation` and
+`Execution` each need two attributes in one list — a token go-evtx had never
+emitted before this task.
+
+### Round trip and the hash-table integration test, run deliberately
+
+```text
+=== RUN   TestReadRecord_RoundTrip
+--- PASS: TestReadRecord_RoundTrip (0.01s)
+=== RUN   TestReadRecord_MultipleRecords
+--- PASS: TestReadRecord_MultipleRecords (0.01s)
+=== RUN   TestWrittenFile_ChunkTablesArePopulated
+    hashtable_integration_test.go:66: 26 names reachable through the table
+--- PASS: TestWrittenFile_ChunkTablesArePopulated (0.02s)
+=== RUN   TestWrittenFile_ChunkHeaderCRCCoversTables
+--- PASS: TestWrittenFile_ChunkHeaderCRCCoversTables (0.02s)
+```
+
+26 names, not Task 8's 12: the 14 new unique names this task adds
+(`Version`, `Task`, `Opcode`, `Keywords`, `EventRecordID`, `Correlation`,
+`ActivityID`, `RelatedActivityID`, `Execution`, `ProcessID`, `ThreadID`,
+`Channel`, `Security`, `UserID`) — exactly `12 + 14 = 26`, offsets moved
+substantially and re-verified clean.
+
+`binxml_reader.go` needed one real change (`Level` decodes as a 1-byte
+value now, not 2 — a new `getUint8` helper; the old `getUint16` would have
+silently returned `0` for every record's `Level`), confirmed by
+`TestReadRecord_RoundTrip` and the new `system_test.go` regression tests
+(`TestCollectSubstitutions_LevelIsUint8`,
+`TestBuildTemplateBody_NewSystemChildrenPresent` — both confirmed to fail
+against the pre-fix encoder: `Level`'s type was `binXMLTypeUint16` and none
+of the fourteen new names appeared anywhere in `binxml.go` at all).
+
+`dependency_test.go`'s generic byte scanner needed two changes: it now
+bounds its scan to the template body (`preambleSize` through
+`preambleSize+data_length`) rather than the whole payload — Task 8b's own
+new bytes (a NULL entry's absence of data, `EventRecordID`'s small
+`uint64`) produced one genuine coincidental false-positive header match in
+the substitution array/value data region, which was never in scope for
+this scanner — and it recognises the five legitimate new dependency IDs
+instead of flagging them as corruption.
+
+### Golden file: +649 bytes
+
+`testdata/binxml-golden.bin` grew from **1950 to 2599 bytes (+649)** —
+the eleven new substitution slots' value-spec entries plus the nine new
+elements' full token structure (open tags, attribute lists, NameNodes,
+substitution/value tokens, end tags). Regenerated via the documented
+procedure: a throwaway `TestCaptureGolden`, run once, removed before commit.
+
+### Verification: all four gates
+
+```console
+$ go build ./...
+$ GOOS=windows go build ./...
+$ go test -race ./... -count=1
+ok  	github.com/fjacquet/go-evtx	16.259s
+$ go vet ./...
+$ golangci-lint run
+0 issues.
+```
+
+### Run selection, by head SHA (not by recency)
+
+```console
+$ git rev-parse HEAD
+deefe13b72e5da62436c0524914d26f21ff068c4
+$ gh api repos/fjacquet/go-evtx/actions/runs/31278789309 --jq '.head_sha'
+deefe13b72e5da62436c0524914d26f21ff068c4
+$ gh api repos/fjacquet/go-evtx/actions/runs/31278789562 --jq '.head_sha'
+deefe13b72e5da62436c0524914d26f21ff068c4
+```
+
+Both `Format Verify` (`31278789309`) and the standard `CI` workflow
+(`31278789562`, build/test/lint on push) confirmed at this exact commit.
+`CI` completed with `success` (`ci / ci` and `security / security` both
+succeeded). `Format Verify`'s overall conclusion is `failure` — per-job:
+
+```console
+$ gh run view 31278789309 --json jobs --jq '.jobs[] | {name, conclusion}'
+{"name":"generate","conclusion":"success"}
+{"name":"get-winevent","conclusion":"failure"}
+{"name":"python-evtx-differential","conclusion":"success"}
+```
+
+**Fixture is NOT byte-identical to row 10**, as expected: eleven new
+substitution slots and nine new elements add real bytes to every record.
+From the `generate` job log:
+
+```text
+wrote artifacts/generated.evtx (403 records, max ObjectName 31248 runes)
+...
+go_evtx_chunk_flushed path=artifacts/generated.evtx chunk=25 total_chunks=26
+```
+
+31248 runes (down from 31573) and **26 chunks (up from 22)**: the larger
+per-record payload settles `largestAccepted()`'s binary search lower and
+pushes more chunk-fill boundaries, exactly the same mechanism Task 8's own
+139-byte growth produced, just larger (this task adds far more than 139
+bytes per record).
+
+Job log (`generate`):
+<https://github.com/fjacquet/go-evtx/actions/runs/31278789309/job/93156614017>
+
+### python-evtx differential — stayed GREEN, the regression guard held
+
+```text
+OK: 403 records, all chunk checksums verify
+```
+
+Unchanged from row 10. This is the number the brief named as the more
+important of the two to check first: a regression here would have meant
+this task broke what Task 8 fixed. It did not — python-evtx still parses
+every record, every `<Data>` element, and every chunk checksum cleanly,
+including all nine new `<System>` children and the `0x0E` tokens
+python-evtx's own parser does not specially validate.
+
+Job log:
+<https://github.com/fjacquet/go-evtx/actions/runs/31278789309/job/93156675064>
+
+### `get-winevent` — verbatim
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Identical exception type, wording, and record count to every row since row
+5 — including row 10, whose fixture and payload shape were both very
+different. No breakthrough.
+
+Job log:
+<https://github.com/fjacquet/go-evtx/actions/runs/31278789309/job/93156675052>
+
+### Reading this result, plainly
+
+**`STAGE2 READ`: still zero.** Thirteen tasks (F1/F3-F11, B1-B3, F8, F12)
+have now each independently corrected a real, measured divergence from the
+real file — including, this task, all three of the brief's own named
+"facets of one thing": the value-type mismatch, the sparse `<System>`
+block, and the complete absence of `OptionalSubstitution`. None has moved
+`Get-WinEvent`'s record-1 rejection off zero, and this was the release's
+strongest remaining candidate by the brief's own framing (an event that
+finally describes itself the way Windows describes an event, batched
+rather than measured one field at a time). The defect `.NET`'s
+`EventLogReader` throws on remains open, and no further candidate from this
+release's own investigation (tokendiff-report.md, the escalation report)
+remains untried.
+
+**python-evtx: PASS, unchanged.** The regression guard held — this task did
+not break what Task 8 fixed. A null result on `Get-WinEvent` with
+python-evtx still green is, per the brief's own framing, a real outcome
+here: it says whatever `.NET`'s `EventLogReader` requires is not fully
+captured by any divergence this release's investigation (byte-level
+comparison against two real records, cross-checked against MS-EVEN6's own
+worked example) found — or that it requires several of these fixed
+divergences in combination with something not yet identified, rather than
+any single one of them.
