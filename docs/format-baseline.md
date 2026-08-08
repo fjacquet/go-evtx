@@ -28,8 +28,9 @@ baseline the rest of the release compares against.**
 | 2 | `6f3485e` | 403 records, 21 chunks, incl. near-max + chunk-fill boundary | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 3 | `173fcf2` | 403 records, 21 chunks — byte-identical generator output to row 2 (Task 3 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
 | 4 | `3c9e825` | 403 records, 21 chunks — byte-identical generator output to rows 2-3 (Task 6 touched no fixture code) | FAIL: ObjectName 0/403 | FAIL: `"The data is invalid."` |
+| 5 | `ff33b7e` | 403 records, 21 chunks — byte-identical generator output to rows 2-4 (Task 7 Part A touched only the workflow) | FAIL: ObjectName 0/403 | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — see "Task 7 Part A" below |
 
-CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below).
+CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below).
 
 ## Row 2: the fixture
 
@@ -429,3 +430,109 @@ the `Get-WinEvent` result either, the honest outcome is to ship v0.7.0 with
 Windows Event Viewer support documented as unsupported rather than to keep
 searching without a harness signal to guide the search — this document is
 not adjusted to soften that possibility.
+
+## Task 7 Part A: the harness could not tell open-time from record-1
+
+**The premise behind every row above was unsound.** Rows 1–4 all describe the
+`Get-WinEvent` failure as an "open-time rejection" and used that framing to
+rule out defects living in record content — including F8's missing `xmlns`
+and the sparse `<System>` block. The harness runs
+`$events = @(Get-WinEvent -Path ... -ErrorAction Stop)`; `@( )` forces eager
+enumeration, so an exception thrown while decoding record 1 lands on the
+exact same line as one thrown while opening the file. Nothing measured
+through row 4 could actually distinguish the two. This task fixes the
+instrument before touching any encoding, per the task brief's explicit
+ordering requirement.
+
+**Change:** `.github/workflows/format-verify.yml`'s `get-winevent` job gained
+a two-stage diagnostic in front of the existing (unchanged) `Get-WinEvent`
+assertions: stage 1 opens the file via
+`[System.Diagnostics.Eventing.Reader.EventLogReader]`/`EventLogQuery`; stage
+2 reads records one at a time via `$reader.ReadEvent()`, so a decode failure
+names the record it failed on. `cmd/gen-fixture/main.go` was **not**
+touched — this row's fixture is byte-identical to rows 2–4, so only the
+`Get-WinEvent`/stage-split column changes meaning, not the fixture.
+
+Commit `ff33b7e` ("test: split Get-WinEvent harness into open-stage /
+read-stage (Part A)"), pushed to `feat/v0.7.0-format-correctness`.
+
+**Run selection, by head SHA, not recency** (the lesson from the "After Task
+3" correction note above):
+
+```
+$ git rev-parse HEAD
+ff33b7ef2588d6c942cb218b2e3c46940e6bbb8a
+$ gh run view 31272448023 --json status,conclusion,headSha
+{"conclusion":"failure","headSha":"ff33b7ef2588d6c942cb218b2e3c46940e6bbb8a","status":"completed"}
+```
+
+**Fixture identity, confirmed from the `generate` job log:**
+`wrote artifacts/generated.evtx (403 records, max ObjectName 31644 runes)` —
+byte-identical to rows 2–4.
+
+Job log (`generate`):
+<https://github.com/fjacquet/go-evtx/actions/runs/31272448023/job/93140580024>
+
+python-evtx differential: FAIL, unchanged —
+
+```
+FAIL
+  - ObjectName count: got 0, want 403
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31272448023/job/93140655466>
+
+**`get-winevent` — verbatim, the load-bearing result of this task:**
+
+```
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+ParentContainsErrorRecordException: D:\a\_temp\709a3d11-cfe2-4bd1-b114-4c224efec2f0.ps1:27
+Line |
+  27 |          $rec = $reader.ReadEvent()
+     |          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+Job log: <https://github.com/fjacquet/go-evtx/actions/runs/31272448023/job/93140655454>
+
+The script threw out of the stage-2 `catch` block before reaching the
+existing (unchanged) `Get-WinEvent` assertions further down the same step —
+expected, since the stage split is scaffolding placed *in front of* them, not
+a replacement, and a `throw` inside a `pwsh` step with
+`$ErrorActionPreference = 'Stop'` aborts the rest of the script.
+
+### Reading this result
+
+**Stage 1 passes. Stage 2 fails at record 0 (the first record), not at
+open.** `EventLogReader`'s constructor — which does nothing but open the file
+and validate the file/chunk headers — returns cleanly. The very first call to
+`ReadEvent()` throws the identical `"The data is invalid."` wording every
+prior row attributed to open time.
+
+This is exactly the second branch the task brief laid out, and it inverts the
+reading of every earlier row in this document:
+
+- The **file-level structure is fine**: file header, at least one chunk
+  header, and (per rows 1–4) the CRC32 checksums are all well-formed enough
+  for `EventLogReader` to accept the file and locate its first record.
+- The **failure is in record content** — specifically, in decoding the very
+  first event. F8 (missing `xmlns` on `<Event>`) and the sparse `<System>`
+  block, both previously ruled out as "can't matter, this is an open-time
+  rejection," are back in play and now the **leading candidates**, not a
+  fallback. So are the three BinXML encoding divergences Part B of this task
+  addresses (B1: fragment header minor version, B2: template body's missing
+  nested fragment header, B3: chunk header `[120:124]`) — each is exactly the
+  kind of defect that would make a real record's first `ReadEvent()` throw
+  while the file itself still opens.
+- **The plan's remaining task order needs revisiting**, per the task brief's
+  own instruction: three tasks' worth of candidate elimination (ruling out
+  F8 and the `<System>` gap because "the rejection is structural and happens
+  before any record is read") rested on a distinction this harness was
+  incapable of making. That elimination is retracted, not confirmed.
+
+This does not identify *which* record-content defect is responsible — stage
+2 fails on `ReadEvent()` itself, inside the .NET Event Log provider, which
+gives no finer-grained diagnostic than the exception above. It does establish
+*which half of the file* to keep looking in, which is the one fact this task
+set out to recover.
