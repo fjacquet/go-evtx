@@ -78,10 +78,11 @@ type Writer struct {
 	// Phase 11 additions:
 	currentSize int64 // approximate file size in bytes, tracked for size-based rotation
 	// v0.6.0 durability state:
-	closed     bool  // set by Close; further writes return ErrClosed
-	closeErr   error // result of the first Close, returned by later calls
-	err        error // sticky: durability permanently lost, all calls fail
-	fileClosed bool  // w.f has already been closed (by rotate or by Close)
+	closed     bool      // set by Close; further writes return ErrClosed
+	closeErr   error     // result of the first Close, returned by later calls
+	closeOnce  sync.Once // ensures the shutdown/finalize sequence runs exactly once
+	err        error     // sticky: durability permanently lost, all calls fail
+	fileClosed bool      // w.f has already been closed (by rotate or by Close)
 }
 
 // checkStateLocked reports whether the writer can still accept work.
@@ -531,21 +532,20 @@ func (w *Writer) tickFlushLocked() error {
 // Close is idempotent: the second and later calls return the first call's
 // result and do no work.
 func (w *Writer) Close() error {
-	w.mu.Lock()
-	if w.closed {
-		err := w.closeErr
+	w.closeOnce.Do(func() {
+		w.mu.Lock()
+		w.closed = true
 		w.mu.Unlock()
-		return err
-	}
-	w.closed = true
-	w.mu.Unlock()
 
-	close(w.done) // signal the background goroutine
-	w.wg.Wait()   // wait WITHOUT holding the lock
+		close(w.done) // signal the background goroutine
+		w.wg.Wait()   // wait WITHOUT holding the lock
 
+		w.mu.Lock()
+		w.closeErr = w.finalizeLocked()
+		w.mu.Unlock()
+	})
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.closeErr = w.finalizeLocked()
 	return w.closeErr
 }
 
@@ -558,7 +558,9 @@ func (w *Writer) finalizeLocked() error {
 	// reached its Close), and leaking it on every failed rotation would
 	// exhaust the daemon's descriptors.
 	if w.err != nil {
-		w.closeFileLocked()
+		if cerr := w.closeFileLocked(); cerr != nil {
+			slog.Warn("go_evtx_close_file_failed", "path", w.path, "err", cerr)
+		}
 		return w.err
 	}
 
