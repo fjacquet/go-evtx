@@ -158,3 +158,100 @@ func TestFixture_TemplateTableBucketRule(t *testing.T) {
 		t.Errorf("validated %d TemplateNodes, want 146 — the table walk changed", checked)
 	}
 }
+
+// TestFillHashTables_FirstOccurrenceWins registers three distinct names and
+// one duplicate. The duplicate must not appear in any chain: records point at
+// their own inline NameNodes, so a second copy of the same name is reachable
+// without being in the table, and chaining it would make lookups return
+// arbitrary duplicates.
+func TestFillHashTables_FirstOccurrenceWins(t *testing.T) {
+	chunk := make([]byte, evtxChunkSize)
+	h := sdbmHash("Provider")
+	names := []chunkRef{
+		{key: h, offset: 600},
+		{key: h, offset: 900}, // same name, later record — must be ignored
+	}
+	fillHashTables(chunk, names, nil)
+
+	b := nameBucket(h)
+	if got := getBucket(chunk, stringTableStart, b); got != 600 {
+		t.Errorf("bucket %d = %d, want 600 (first occurrence)", b, got)
+	}
+	if next := binary.LittleEndian.Uint32(chunk[600:]); next != 0 {
+		t.Errorf("first node next_offset = %d, want 0 — the duplicate must not be chained", next)
+	}
+}
+
+// TestFillHashTables_CollidingNamesChain builds two keys that land in the same
+// bucket and asserts they form a chain in insertion order.
+func TestFillHashTables_CollidingNamesChain(t *testing.T) {
+	chunk := make([]byte, evtxChunkSize)
+	// Two distinct keys, same bucket: k and k+numStringBuckets.
+	k := uint32(7)
+	names := []chunkRef{
+		{key: k, offset: 600},
+		{key: k + numStringBuckets, offset: 700},
+	}
+	fillHashTables(chunk, names, nil)
+
+	b := nameBucket(k)
+	if got := getBucket(chunk, stringTableStart, b); got != 600 {
+		t.Fatalf("bucket %d = %d, want 600", b, got)
+	}
+	if next := binary.LittleEndian.Uint32(chunk[600:]); next != 700 {
+		t.Errorf("first node next_offset = %d, want 700", next)
+	}
+	if next := binary.LittleEndian.Uint32(chunk[700:]); next != 0 {
+		t.Errorf("last node next_offset = %d, want 0 (chain terminator)", next)
+	}
+}
+
+// TestFillHashTables_EmptyBucketsStayZero guards the invariant a parser relies
+// on to know a bucket is empty.
+func TestFillHashTables_EmptyBucketsStayZero(t *testing.T) {
+	chunk := make([]byte, evtxChunkSize)
+	h := sdbmHash("Provider")
+	fillHashTables(chunk, []chunkRef{{key: h, offset: 600}}, nil)
+
+	occupied := nameBucket(h)
+	for i := 0; i < numStringBuckets; i++ {
+		if i == occupied {
+			continue
+		}
+		if got := getBucket(chunk, stringTableStart, i); got != 0 {
+			t.Errorf("bucket %d = %d, want 0", i, got)
+		}
+	}
+}
+
+// TestFillHashTables_Templates covers the 32-entry array with the same rules.
+//
+// chunkRef.key is already a hash by the time it reaches fillHashTables — the
+// caller ran guidHash — so this test supplies a key directly and reduces it the
+// same way fillHashTables does. It deliberately does NOT call templateBucket,
+// which takes raw GUID bytes rather than a key.
+func TestFillHashTables_Templates(t *testing.T) {
+	chunk := make([]byte, evtxChunkSize)
+	key := uint32(0xDEADBEEF)
+	fillHashTables(chunk, nil, []chunkRef{{key: key, offset: 1000}, {key: key, offset: 2000}})
+
+	b := int(key % numTemplateBuckets)
+	if got := getBucket(chunk, templateTableStart, b); got != 1000 {
+		t.Errorf("template bucket %d = %d, want 1000", b, got)
+	}
+	if next := binary.LittleEndian.Uint32(chunk[1000:]); next != 0 {
+		t.Errorf("template next_offset = %d, want 0", next)
+	}
+}
+
+// TestFillHashTables_NoRefsLeavesTablesZero is the WriteRaw case: an opaque
+// payload registers nothing, and the tables must stay exactly as they were.
+func TestFillHashTables_NoRefsLeavesTablesZero(t *testing.T) {
+	chunk := make([]byte, evtxChunkSize)
+	fillHashTables(chunk, nil, nil)
+	for i := stringTableStart; i < evtxChunkHeaderSize; i++ {
+		if chunk[i] != 0 {
+			t.Fatalf("byte %d = 0x%02x, want 0", i, chunk[i])
+		}
+	}
+}

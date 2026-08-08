@@ -72,10 +72,6 @@ const (
 
 // putBucket writes a chunk-relative offset into bucket i of the array starting
 // at tableStart.
-//
-//nolint:unused // write-side counterpart of getBucket; Tasks 2-4 wire it into
-// the chunk writer to populate these tables. getBucket already has a caller
-// (chunkhash_test.go); this one doesn't yet.
 func putBucket(chunk []byte, tableStart, i int, off uint32) {
 	binary.LittleEndian.PutUint32(chunk[tableStart+i*4:], off)
 }
@@ -83,4 +79,59 @@ func putBucket(chunk []byte, tableStart, i int, off uint32) {
 // getBucket reads bucket i of the array starting at tableStart.
 func getBucket(chunk []byte, tableStart, i int) uint32 {
 	return binary.LittleEndian.Uint32(chunk[tableStart+i*4:])
+}
+
+// fillHashTables populates a chunk's common-string and template offset arrays
+// from the nodes emitted into that chunk, and patches the next_offset chains.
+//
+// Registration rule: the FIRST node with a given key wins its bucket. Later
+// nodes carrying the same key are left unregistered and unchained — each record
+// references its own inline copy through its own name_offset field, so a
+// duplicate is already reachable, and chaining duplicates would make a table
+// lookup walk an arbitrarily long run of identical names.
+//
+// Distinct keys that collide on a bucket DO chain, in emission order. That is
+// ordinary hash-table chaining and is what a parser expects to walk.
+//
+// chunk must be a full evtxChunkSize buffer with the nodes already copied in at
+// the offsets the refs name. MUST be called before patchChunkCRC: the chunk
+// header checksum covers chunk[128:512], which is exactly what this writes.
+func fillHashTables(chunk []byte, names, templates []chunkRef) {
+	fillOneTable(chunk, stringTableStart, numStringBuckets, names)
+	fillOneTable(chunk, templateTableStart, numTemplateBuckets, templates)
+}
+
+func fillOneTable(chunk []byte, tableStart, buckets int, refs []chunkRef) {
+	// seen maps a key to the offset already registered for it, so duplicates
+	// are dropped. tail maps a bucket to the last node in its chain, so a new
+	// distinct key is appended rather than replacing the head.
+	seen := make(map[uint32]uint32, len(refs))
+	tail := make(map[int]uint32, buckets)
+
+	for _, ref := range refs {
+		if ref.offset == 0 || int(ref.offset)+4 > len(chunk) {
+			// A zero offset is not addressable (0 means "empty bucket") and an
+			// out-of-range one would corrupt the chunk. Neither can happen for
+			// nodes the encoder emitted; skip defensively rather than panic in
+			// a writer that is holding the caller's audit data.
+			continue
+		}
+		if _, dup := seen[ref.key]; dup {
+			continue
+		}
+		seen[ref.key] = ref.offset
+
+		// Reduce in uint32 before converting. int(ref.key) would be negative
+		// for keys above 2^31 on a 32-bit platform, and a negative modulus
+		// yields a negative bucket index — an out-of-range write in a writer
+		// that is holding the caller's audit data.
+		b := int(ref.key % uint32(buckets))
+		if prev, ok := tail[b]; ok {
+			binary.LittleEndian.PutUint32(chunk[prev:], ref.offset) // chain onto the tail
+		} else {
+			putBucket(chunk, tableStart, b, ref.offset) // first node: becomes the head
+		}
+		tail[b] = ref.offset
+		binary.LittleEndian.PutUint32(chunk[ref.offset:], 0) // terminate the chain here
+	}
 }
