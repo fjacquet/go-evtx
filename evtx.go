@@ -66,7 +66,13 @@ type RotationConfig struct {
 	// FlushIntervalSec > 0.
 	//
 	// The callback is invoked after the writer lock is released, so it may
-	// safely call any Writer method.
+	// safely call any Writer method without deadlocking.
+	//
+	// That safety does not bound recursion: a callback that itself triggers a
+	// new flush — directly, or through a chain of Writer calls — recurses on
+	// the callback's own call stack, because the nested call's drain runs
+	// before control returns to the outer one. Avoid callbacks whose side
+	// effects can generate unbounded further fsyncs.
 	OnFsync func(time.Time)
 }
 
