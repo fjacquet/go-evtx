@@ -584,9 +584,10 @@ func TestDecodeBinXMLFragment_DepthLimitIsError(t *testing.T) {
 	}
 }
 
-// TestDecodeRecordBinXML_RealFixture decodes record 0 of testdata/system.evtx
+// TestDecodeRecordBinXML_RealFixture decodes record 0 of the tracked fixture
 // chunk 0 — a real Windows-generated record, ground-truthed by
-// testdata/system-expected-windows.xml's "RECORD 1" (EventRecordID 12049).
+// testdata/win2025-system-expected.xml's "RECORD 1" (EventRecordID 29910),
+// which is Windows' own ToXml() rendering of that same record.
 // This is the test the review that produced this fix round said would have
 // caught C1 (nested BinXml is a TemplateInstance, not a bare element tree —
 // this record's <UserData><AutoBackup>...</AutoBackup></UserData> is exactly
@@ -603,7 +604,7 @@ func TestDecodeRecordBinXML_RealFixture(t *testing.T) {
 	cache := newTemplateCache(chunk)
 	root, err := decodeRecordBinXML(cache, payloadOff, payloadLen)
 	if err != nil {
-		t.Fatalf("decodeRecordBinXML on testdata/system.evtx record 0: %v", err)
+		t.Fatalf("decodeRecordBinXML on the tracked fixture, record 0: %v", err)
 	}
 
 	if root.Name != "Event" {
@@ -649,18 +650,18 @@ func TestDecodeRecordBinXML_RealFixture(t *testing.T) {
 	if eventID.Value == nil {
 		t.Fatal("EventID has no value")
 	}
-	if got, _ := eventID.Value.Uint64(); got != 105 {
-		t.Errorf("EventID = %d, want 105", got)
+	if got, _ := eventID.Value.Uint64(); got != 104 {
+		t.Errorf("EventID = %d, want 104", got)
 	}
 
 	computer := findChild(t, system, "Computer")
-	if computer.Value == nil || computer.Value.String() != "WKS-WIN764BITB.shieldbase.local" {
-		t.Errorf("Computer value = %v, want %q", computer.Value, "WKS-WIN764BITB.shieldbase.local")
+	if computer.Value == nil || computer.Value.String() != "EC2AMAZ-ETN574G" {
+		t.Errorf("Computer value = %v, want %q", computer.Value, "EC2AMAZ-ETN574G")
 	}
 
 	// UserData wraps the nested BinXml fragment — C1's linchpin case. Its
 	// content is a substitution reference to the BinXml-typed value, so the
-	// decoded <AutoBackup> tree hangs off userData.Value.Node(), not
+	// decoded <LogFileCleared> tree hangs off userData.Value.Node(), not
 	// userData.Children — the substitution array entry is what recursed.
 	userData := root.Children[1]
 	if userData.Name != "UserData" {
@@ -669,17 +670,23 @@ func TestDecodeRecordBinXML_RealFixture(t *testing.T) {
 	if userData.Value == nil || userData.Value.Node() == nil {
 		t.Fatalf("UserData has no resolved BinXml value; got %+v", userData)
 	}
-	autoBackup := *userData.Value.Node()
-	if autoBackup.Name != "AutoBackup" {
-		t.Fatalf("UserData's nested fragment root is %q, want %q", autoBackup.Name, "AutoBackup")
+	cleared := *userData.Value.Node()
+	if cleared.Name != "LogFileCleared" {
+		t.Fatalf("UserData's nested fragment root is %q, want %q", cleared.Name, "LogFileCleared")
 	}
-	channel := findChild(t, autoBackup, "Channel")
+	channel := findChild(t, cleared, "Channel")
 	if channel.Value == nil || channel.Value.String() != "System" {
-		t.Errorf("AutoBackup/Channel = %v, want %q", channel.Value, "System")
+		t.Errorf("LogFileCleared/Channel = %v, want %q", channel.Value, "System")
 	}
-	backupPath := findChild(t, autoBackup, "BackupPath")
-	if backupPath.Value == nil || !strings.Contains(backupPath.Value.String(), "Archive-System-2012-03-14-04-17-39-932.evtx") {
-		t.Errorf("AutoBackup/BackupPath = %v, want it to contain the archive file name", backupPath.Value)
+	// A present-but-empty element: <BackupPath></BackupPath> in the golden
+	// XML. It must decode to an empty value rather than vanish.
+	backupPath := findChild(t, cleared, "BackupPath")
+	if backupPath.Value != nil && backupPath.Value.String() != "" {
+		t.Errorf("LogFileCleared/BackupPath = %v, want empty", backupPath.Value)
+	}
+	subject := findChild(t, cleared, "SubjectUserName")
+	if subject.Value == nil || subject.Value.String() != "Administrator" {
+		t.Errorf("LogFileCleared/SubjectUserName = %v, want %q", subject.Value, "Administrator")
 	}
 }
 
