@@ -37,6 +37,9 @@ baseline the rest of the release compares against.**
 | 11 | `deefe13` | 403 records, 26 chunks, max ObjectName **31248** runes — NOT byte-identical to row 10 (Task 8b/F12 adds 11 substitution slots and 9 `<System>` children to every record's encoding — see "Task 8b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green — the regression guard this task's brief named held) | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-10 |
 | 12 | `2e86005` | 403 records, 27 chunks, max ObjectName **31208** runes — NOT byte-identical to row 11 (Task 8c/F13 adds 2 substitution slots and `<Provider>`'s second attribute plus `<EventID>`'s new attribute to every record's encoding — see "Task 8c" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **BREAKTHROUGH: STAGE1 OPEN: ok / STAGE2 READ: ok, 403 records** — the first non-zero `STAGE2 READ` in this entire table. `Get-WinEvent`'s own older assertion (`$events = @(Get-WinEvent ...)`) still throws `"The data is invalid."` on the same file — see "Task 8c" below |
 | 13 | `72f63a0` | 403 records, 27 chunks, max ObjectName **31208** runes — byte-identical generator output to row 12 (`cmd/gen-fixture/main.go` untouched by this task or its intermediate commit `bdc3ec1`) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records` unchanged. **`GETWINEVENT default` and `GETWINEVENT -Oldest` BOTH FAILED, identical `"The data is invalid."`** — kills the reverse-iteration-metadata hypothesis outright, not just deprioritizes it. Follow-up probes in the same job: `LOGINFO` (`EventLogSession.GetLogInformation()`) ok, `records=403 oldest=1 full=False`; six typed record properties (`Id`, `Level`, `ProviderName`, `TimeCreated`, `RecordId`, `MachineName`) all read without throwing but print **empty**; **`PROP ToXml` FAILED with the identical `"The data is invalid."` string** — the same exception both `Get-WinEvent` orderings throw. Narrows the defect specifically to **XML rendering of a record's content**, not enumeration and not file-level metadata — see "Task 8d" below |
+| 14a | `eecb372` | 403 records, 27 chunks, max ObjectName **31208** runes — byte-identical to row 13 (pure type-byte substitution, no length change) | **FAIL (regression): `Evtx.BinaryParser.ParseException: Invalid substitution value size`** on record 0 — see "Task 8e" below | `STAGE1 OPEN: ok` / **`STAGE2 READ: FAILED after 384 records`** — a third, distinct failure mode, neither "fails at 0" nor "reads all 403" |
+| 14b | `e1f8aca` | byte-identical to row 13/14a | **PASS (regression fixed): `OK: 403 records, all chunk checksums verify`** | `STAGE1 OPEN: ok` / **`STAGE2 READ: FAILED after 0 records`** — a *different* regression from row 13's `ok, 403 records` |
+| 14 | `ab6ae57` | byte-identical to row 13/14a/14b; `binxml.go`'s emitted payload is MD5-identical to row 13's (net zero functional change across 14a/14b/this commit) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **Restored exactly to row 13's result** — `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `LOGINFO` ok, six `PROP` scalars empty-but-no-throw, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all still FAILED with `"The data is invalid."` — see "Task 8e" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -1999,3 +2002,81 @@ substitution array — not in enumeration and not in file-level metadata.
 This does not by itself identify which substitution-array content
 triggers the render failure; see "F14" below for the investigation that
 followed from this lead.
+
+## Task 8e (F14): a substitution-array probe, two false starts, net zero
+
+Full detail — including the complete substitution-array table, the
+byte-for-byte real-file cross-check, and the string null-termination
+lead found but not acted on — is in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-8e-report.md`.
+Summarized here per this document's own convention.
+
+**Starting point.** Task 8d's `ToXml()` lead pointed at XML rendering of a
+record's content. A probe of go-evtx's own record 0's substitution array,
+cross-checked against `task-8b-report.md`'s Step 1 table (a real-file
+decode from an earlier task), found the table claims four NULL-valued
+positions declare their field's own real type (`GUID`, `SID`,
+`UNSIGNED_WORD`) rather than a generic `0x00` marker.
+
+**Attempt 1 (`eecb372`) — regression, caught immediately.** Reclassified
+five NULL fields (`Correlation/@ActivityID`/`@RelatedActivityID`,
+`Execution/@ProcessID`/`@ThreadID`, `Security/@UserID`) from
+`binXMLTypeNull` to `GUID`/`SID`/`UINT32`, trusting that table. Broke
+`python-evtx-differential` outright — its own parser rejects a fixed-width
+type (`GUID` = 16 bytes) declared at a size more than 4 bytes short, and a
+NULL value's size (0) fails that check for any 16-byte type.
+
+**Re-verification, three independent ways**, done in direct response to
+the break: a byte-for-byte raw re-parse of `testdata/system.evtx`'s own
+record 0 (the exact record the Step 1 table cites) found the real bytes at
+all four disputed positions are declared type `0x00`, not
+`GUID`/`SID`/`UNSIGNED_WORD` — the table was wrong there, confirmed by
+`python-evtx`'s own successful real-file parse (impossible if `ActivityID`
+were really `GUID`-typed at size 0) and by `UnsignedWordTypeNode`'s
+narrower 2-byte tolerance explaining why the table's `Qualifiers` error
+never broke anything on its own.
+
+**Attempt 2 (`e1f8aca`) — a second, different regression.** Reverted all
+six NULL fields (the five above, plus `EventID/@Qualifiers`, which F13c
+had declared `UNSIGNED_WORD`) to `binXMLTypeNull`, matching the
+byte-for-byte finding. Fixed `python-evtx`. **Broke `Get-WinEvent`'s
+`STAGE2 READ`** — Task 8c's own breakthrough — from reading all 403
+records to failing on record 0.
+
+**Isolation and final correction (`ab6ae57`).** A third data point
+(`eecb372`'s own `get-winevent` job, checked retroactively: `STAGE2 READ`
+failed after 384 records, a third distinct mode) isolated it to
+`Qualifiers` specifically — of three combinations tried, Windows fully
+accepts only the original F12b/F13c one (five fields `NULL`, `Qualifiers`
+`UNSIGNED_WORD`). Reverted `Qualifiers` back to `UNSIGNED_WORD`, restoring
+`binxml.go`'s emitted bytes to MD5-identical parity with row 13
+(`72f63a0`). Row 14's measurement (above) confirms this: every field
+`get-winevent` prints for `ab6ae57` matches row 13's exactly.
+
+### Reading this result
+
+**Net functional code change: none, and that is the whole point.** Three
+pushes, three CI round-trips, and the release ends exactly where Task 8d
+left it — but with a real, confirmed divergence documented
+(`task-8b-report.md`'s Step 1 table is wrong at four positions, corrected
+in place with its own note) and a real, confirmed non-fix ruled out with
+evidence rather than left as an untested guess for a future task to
+re-attempt. `Correlation`/`Execution`/`Security`'s five fields' reversion
+to `binXMLTypeNull` is solid, independent of the `Qualifiers` question
+(the `python-evtx` crash is type-identity-driven, not tied to which named
+field the type is nominally attached to). `Qualifiers`'s own case is
+**left open, not resolved**: real Windows' file shows `0x00` at the
+position identified as `Qualifiers`; go-evtx's own record needs `0x06`
+there for Windows to read it. The task-8e-report.md "Concerns" section
+names the likeliest reconciliation (the Step 1 table's *index*
+assignments, not just some of its *type* claims, may themselves be
+unreliable) as unchecked, not ruled out.
+
+**A new, unimplemented lead for the next task.** Every `String`-typed
+substitution-array value real Windows writes (28/28 samples checked) has
+**no trailing null terminator** — declared size is exactly character
+count × 2. go-evtx's `encodeSubString` always appends one. This touches
+`ProviderName` directly, plausibly relevant to the still-open "empty
+scalar properties" half of the original symptom — flagged, not
+implemented, per this task's own hard-won caution about unmeasured
+byte-level fixes.
