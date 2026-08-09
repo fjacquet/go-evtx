@@ -42,6 +42,7 @@ baseline the rest of the release compares against.**
 | 14 | `ab6ae57` | byte-identical to row 13/14a/14b; `binxml.go`'s emitted payload is MD5-identical to row 13's (net zero functional change across 14a/14b/this commit) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **Restored exactly to row 13's result** — `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `LOGINFO` ok, six `PROP` scalars empty-but-no-throw, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all still FAILED with `"The data is invalid."` — see "Task 8e" below |
 | 15 | `b41ac76` | 403 records, 27 chunks, max ObjectName **31236** runes — NOT byte-identical to rows 12-14 (F15 drops `encodeSubString`'s null terminator, shrinking every String-typed substitution value by 2 bytes; chunk count unchanged at 27, but the binary-searched near-maximum ObjectName ceiling moves from 31208 to 31236 runes as a direct consequence — see "Task 8f" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records` (held — the win stayed protected). `PROP ToXml FAILED - "The data is invalid."`, `GETWINEVENT default`/`-Oldest` both FAILED, same message — byte-for-byte the same failure shape as row 14. NULL RESULT: the null-terminator fix did not change the outcome — see "Task 8f" below |
 | 16 | `07f81f0` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to row 15 (Task 9a touched no fixture or `binxml.go`/`evtx.go` code; this row is a regression check, not a fix attempt — see "Task 9a" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 15 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two new fixtures measured alongside this one — see "Task 9a" below |
+| 17 | `92b5a3f` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-16 (Task 9b touched no fixture, `binxml.go`, or `evtx.go` code; this row is a regression check — three new hybrid fixtures measured alongside it, not fixture-generator changes — see "Task 9b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 16 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Three hybrid fixtures measured alongside this one — see "Task 9b" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2235,3 +2236,124 @@ and one it rejects (go-evtx's own minimal record). A structural diff between
 them is a far smaller search space than the 42-substitution template this
 release has been debugging by inspection, and the minimal fixture is now the
 natural target to diff against, not the 403-record one.
+
+## Task 9b: bisect by construction — three offset-correct hybrids
+
+Full detail in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9b-report.md`.
+Row 17 above is this task's regression check (main fixture, unchanged — no
+code in `binxml.go`/`evtx.go` touched); this section covers three new hybrid
+fixtures built from task 9a's own two CI-proven payloads (the real
+`testdata/system.evtx` chunk 0 record 0 BinXML that Windows accepts, and
+go-evtx's own minimal-fixture BinXML that it rejects), each with one
+structural region swapped and every position-dependent offset explicitly
+recomputed — not another hex-dump hypothesis.
+
+**Ground truth, gathered before building anything** (a throwaway structural
+walker, deleted before this task's first commit, same discipline as task
+9a's own): real record 0's `<System>` block has the **same 14 children, same
+order, same declared substitution types** as go-evtx's own — diverging in
+exactly one measured place: 5 attribute-only, zero-content children
+(Provider, TimeCreated, Correlation, Execution, Security) close via
+`CloseEmptyElementTag` (`0x03`) in the real file, vs. `CloseStartElementTag`
+(`0x02`) + a separate `EndElementTag` in go-evtx's own output — a fact
+`attrlist_test.go`'s own comment already named but no prior task tested for
+effect. Also found: real record 0 uses `<UserData>` (20 total substitutions)
+where go-evtx uses `<EventData>`/12 `Data` fields (42 substitutions) —
+record 0 is a *different event/template* than the one go-evtx's scheme was
+built from (task-8b's EventRecordID 12049), which rules out directly
+byte-grafting the substitution array or the `<EventData>`/`<UserData>`
+structure (cut points 2 and 4) — an index/count-mismatched graft would fail
+for a reason unrelated to any byte-level defect, not a measurement. Reported
+as not attempted, not forced.
+
+**Hybrid 1 (`cmd/gen-hybrid-preamble-ours`), cut point 1 (fixed preamble),
+real→ours direction:** real record 0's BinXML verbatim except
+`template_id`/GUID replaced by go-evtx's own trivial values. No offset
+rewriting needed (pure identity metadata, referenced by nothing else;
+`WriteRaw` never populates hash tables either). 2148 bytes, unchanged length.
+
+**Hybrid 2 (`cmd/gen-hybrid-preamble-real`), cut point 1, mirror direction:**
+go-evtx's own minimal-fixture BinXML verbatim except `template_id`/GUID
+replaced by the real file's own values. Same offset-safety argument. 2637
+bytes, unchanged length.
+
+**Hybrid 3 (`cmd/gen-hybrid-selfclose`), cut point 3 (individual `<System>`
+children):** go-evtx's own minimal-fixture BinXML with only the 5 identified
+elements' closing bytes rewritten `0x02`+`0x04` → `0x03`. This is where the
+offset problem is real: analysed the *original, valid* payload first (its
+own correct `data_size`/`attr_list_size`/`name_offset` fields locate every
+element/attribute/name reference via one flat linear scan — no nesting stack
+needed, since every field is already self-describing), then recomputed every
+position-dependent field (the 5 edited elements' own `data_size`; every
+ancestor's `data_size`; every `attr_list_size` whose region-end is an edited
+close-tag position; every `name_offset`'s absolute value; the outer
+`data_length`) via one position-remap function, derived from that analysis,
+never patched by assumption. Self-validated twice before ever reaching a
+file: an embedded re-parser, and independently a second, separately-coded
+throwaway walker before push. 2637 → 2632 bytes (−5, exactly the 5
+deletions).
+
+CI run [`31289444649`](https://github.com/fjacquet/go-evtx/actions/runs/31289444649)
+(`Format Verify`, head `92b5a3f`), jobs: `generate`/`generate-minimal`/
+`generate-splice`/`generate-hybrid-preamble-ours`/`generate-hybrid-preamble-real`/
+`generate-hybrid-selfclose`/`python-evtx-differential`/`get-winevent-splice`/
+**`get-winevent-hybrid-preamble-ours`** all **success**;
+`get-winevent`/`get-winevent-minimal` **failure** (expected, no regression —
+row 17 above); `get-winevent-hybrid-preamble-real`/`get-winevent-hybrid-selfclose`
+**failure**. `CI` run
+[`31289444818`](https://github.com/fjacquet/go-evtx/actions/runs/31289444818):
+**success**.
+
+| Hybrid | Direction | Cut point | Content | Result |
+|---|---|---|---|---|
+| H1 preamble-ours | real → graft ours | 1 (fixed preamble) | real body+subs, our template_id/GUID | **PASS** |
+| H2 preamble-real | ours → graft real | 1 (fixed preamble) | our body+subs, real template_id/GUID | **FAIL** — `"The data is invalid."`, identical to every other go-evtx-generated record tested |
+| H3 selfclose | ours → graft real | 3 (`<System>` children) | our body+subs, 5 elements' close-tag rewritten | **FAIL** — same message |
+
+### Reading this result
+
+**Cut point 1 (fixed preamble) is eliminated in both directions.** H1 shows
+go-evtx's own trivial `template_id`/GUID do not break an otherwise real,
+passing record; H2 shows the reverse doesn't fix anything either. Combined
+with Experiment B (task 9a, real preamble unmodified), every value in the
+outer preamble has now been tested and eliminated.
+
+**Cut point 3's one measured, previously-unmeasured structural divergence —
+the self-closing-tag convention for 5 `<System>` children — is eliminated.**
+This was the strongest lead this task started with (an exact match between
+real record 0's own self-closing elements and go-evtx's own zero-content
+elements, already named in `attrlist_test.go`'s comment but never tested).
+Correcting it, with every downstream offset rigorously recomputed and
+doubly self-validated, produces the exact same exception on the exact same
+call. NULL RESULT, held cleanly, same discipline as row 15's.
+
+**Narrowest region this task can honestly report:** somewhere in go-evtx's
+own template body or substitution array (per task 9a's own conclusion),
+excluding the outer preamble's identity fields (eliminated both directions)
+and excluding the 5-element self-closing-tag convention within `<System>`
+(eliminated). The rest of `<System>` already matches the real file's own
+structure/order/types exactly (established by the ground-truth walk, not
+grafted because it already provably matches). What remains untested and is
+not byte-graftable against record 0, due to the template mismatch: the
+`<EventData>`/`Data` element structure, and the substitution array's actual
+value encoding for go-evtx's own 42 substitutions (cut points 2 and 4).
+
+### Concerns
+
+1. Cut points 2 and 4 remain genuinely untested, not merely deprioritised —
+   a next task wanting to close them needs either a real record whose
+   template structurally matches go-evtx's own 42-substitution scheme and
+   sits at some chunk's own record-0 position (self-contained, offset-safe
+   by task 9a's own argument — not located this task), or real
+   offset-rewriting against EventRecordID 12049 itself (option 2 from task
+   9a's own preference order, not attempted this task).
+2. The structural ground-truth walker was, again, throwaway — written, run
+   locally, deleted before this task's first commit. Its findings are
+   reproduced in this report, `task-9b-report.md`, and
+   `cmd/gen-hybrid-selfclose/main.go`'s own doc comment.
+3. This task made no code change to `binxml.go` or `evtx.go`. Every hybrid
+   lives in a new, independent `cmd/gen-hybrid-*` package;
+   `cmd/gen-fixture/main.go`'s output is confirmed byte-identical (empty
+   `git diff --stat`). The release's only hard-won win (`STAGE2 READ: ok,
+   403 records`) was not put at risk and did not regress.
