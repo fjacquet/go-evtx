@@ -37,8 +37,10 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `errors.go` | Sentinel errors (`ErrClosed`, `ErrRecordTooLarge`) and capacity limits (`maxChunkPayload`, `maxRecordPayload`) |
 | `reader.go` | Reader API: `Reader`, `Record`, `Open()`, `ReadRecord()`, `ReadRaw()`, `Close()`, `ErrNoMoreRecords` |
 | `binformat.go` | Binary format helpers: file/chunk headers, event record wrapper, CRC32, `toFILETIME`/`fromFILETIME`, UTF-16LE encoding |
-| `binxml.go` | BinXML encoder: template body, substitution array, token writers |
+| `binxml.go` | BinXML encoder: template body, substitution array, token writers, `fieldPatch` back-patching for `data_size`/`attr_list_size` |
 | `binxml_reader.go` | BinXML decoder: `decodeBinXML()`, substitution array parser, UTF-16LE decoder |
+| `chunkhash.go` | Per-chunk hash tables: `sdbmHash` (UTF-16 code units), `guidHash`, bucket rules, `fillHashTables` |
+| `binxml_variants.go` | Encoder variants used only by the `cmd/gen-ladder-*` bisection tools — never on the production write path |
 | `evtx_unix.go` | `syncDir()` — fsyncs the containing directory so a rename is durable (`//go:build !windows`) |
 | `evtx_windows.go` | `syncDir()` no-op — NTFS makes the directory entry durable on `MoveFileEx` (`//go:build windows`) |
 
@@ -57,7 +59,19 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `oversize_test.go` | Oversized records rejected, not truncated |
 | `example_test.go` | Godoc examples |
 | `reader_concurrency_test.go` | `Reader` is safe for concurrent use: parallel callers, `r.mu` held for each exported method |
-| `flush_atomicity_test.go` | `flushChunkLocked` commits `chunkCount`/`currentSize`/`records`/`firstID` together or not at all |
+| `flush_atomicity_test.go` | `flushChunkLocked` commits `chunkCount`/`currentSize`/`records`/`firstID`/`lastRecordOffset` together or not at all |
+| `onfsync_test.go` | `OnFsync` fires on every sync, and outside `w.mu` |
+| `evtx_unix_test.go` / `evtx_windows_test.go` | `isLinkUnsupported` classification per platform |
+| `chunkhash_test.go` | Bucket rules validated against `testdata/system.evtx`; `fillHashTables` unit tests |
+| `nodecollect_test.go` | `buildBinXML` reports NameNode/TemplateNode offsets; `goldenFields()` lives here |
+| `hashtable_integration_test.go` | A written file's chunk tables are populated and self-consistent; the CRC-ordering guard |
+| `fileheader_test.go` | `LastEventRecordDataOffset`, dirty/full flags, `LastChunkNumber` underflow, chunk ceiling |
+| `dependency_test.go` | Every `OpenStartElement` carries the `0xffff` "not set" sentinel |
+| `datasize_test.go` | `data_size` spans the element rather than being zero |
+| `attrlist_test.go` | `attr_list_size` sits after the inline NameNode and carries a real value |
+| `namespace_test.go` | The `<Event>` root declares the event schema namespace |
+| `system_test.go` | `<System>` children, their value types and optional substitutions |
+| `binxml_variants_test.go` | The bisection variants encode what they claim (`walkVariantBody`) |
 
 **Write data flow:**
 
@@ -72,6 +86,40 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 2. `nextRecord()` → reads 24-byte event record header from buffer, slices BinXML payload, advances offset; on chunk exhaustion loads next chunk
 3. `ReadRaw()` → returns raw BinXML bytes (compatible with `WriteRaw`)
 4. `ReadRecord()` → calls `decodeBinXML()` → parses substitution array → maps indices to `Record` fields
+
+## `cmd/` — the format bisection harness
+
+Thirteen `main` packages, none of them shipped: `.goreleaser.yaml` sets `builds: [{skip: true}]` because this is a library. They exist so a CI job can produce a specific `.evtx` file and a Windows runner can report whether it parses.
+
+| Command | Role |
+|---|---|
+| `gen-fixture` | **Frozen.** Produces the main measurement fixture. Every row of `docs/format-baseline.md` compares against it, so changing its output silently invalidates the comparison chain. Do not touch it. |
+| `gen-fixture-minimal` | One record, one chunk, pure ASCII — the smallest file the library can produce |
+| `gen-splice-fixture` | Writes a **real** record's BinXML into our container via `WriteRaw`. This is what proved the container sound |
+| `gen-hybrid-*` | Real/ours grafts at the preamble and the self-closing-tag convention |
+| `gen-ladder-*` | Shrink-ladder variants: `<System>`-only, one data pair, literal data names, all-normal-substitution, no-xmlns, all-string, four-string |
+
+The `gen-hybrid-*` and `gen-ladder-*` commands are experiments whose results are already recorded in `docs/format-baseline.md`. They can be deleted once the remaining defect is found — but until then each is a reproducible measurement, not dead code.
+
+## Measurement discipline
+
+The release's method is a table of CI measurements compared across commits. Three rules keep that table meaningful, and each exists because it was broken at least once:
+
+- **`docs/format-baseline.md` is append-only.** Earlier rows are the evidence later comparisons rest on. Add a row; never edit one. A correction goes in a new row or a clearly marked correction note.
+- **Select a CI run by `head_sha`, never by recency.** `rtk gh api repos/fjacquet/go-evtx/actions/runs/<id> --jq '.head_sha'` must equal the commit you are measuring. A run was once cited whose head was two commits stale, so its "identical" result was mechanically guaranteed and proved nothing.
+- **A message comparison is only valid across a byte-identical fixture.** Windows' rejection message is content-dependent: the same writer produced `The event log file is corrupted.` on one fixture and `The data is invalid.` on another with no code change. Whether the file *opens* is the one signal immune to this.
+
+## Reverse-engineering discipline
+
+This format was implemented against another parser's behaviour before it was implemented against its specification. That cost seventeen tasks. The rules below are not general advice — each is a mistake this repo actually made.
+
+- **Check the specification before writing a rule down.** The project spec claimed templates bucket by `template_id % 32`. Measured against two real Windows files it scored 10 of 386 entries; the correct rule — SDBM over the full 16-byte GUID read as 8 little-endian `uint16` units — scores 386 of 386. Nobody had checked before writing it. `docs/evtx-format-notes.md` marks every claim as measured or read-from-source; preserve that distinction when adding to it.
+
+- **A permissive parser passing is not the format being correct.** `binxml.go` once carried `writeUint32LE(b, 0) // data_size (unused by python-evtx)`. python-evtx's own source says `TODO: use this size() field`. Windows enforces what python-evtx ignores. Never justify an encoding choice by what a reader tolerates.
+
+- **Normative sources first, reverse-engineered second, blogs never.** [MS-EVEN6] is Microsoft's own BinXml specification and includes a worked byte-level example; libyal/libevtx is the best reverse-engineered reference and has the complete value-type table. Both are linked from `docs/evtx-format-notes.md`. Microsoft's "Event Log File Format" Win32 page documents the *legacy* `.evt` format and says so — it does not apply here.
+
+- **CI is the arbiter, not the hex dump.** One change "corrected" our bytes to match a real file and regressed `STAGE2 READ` from 403 records to zero. When a byte-level decode and a CI measurement disagree, the measurement wins, and the disagreement gets recorded rather than resolved by preference — see the `EventID/@Qualifiers` comment in `binxml.go` for the standing example.
 
 ## Rotation
 
