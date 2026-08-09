@@ -108,6 +108,20 @@ const (
 // which explanation is right — that byte-level finding (about real Windows
 // output) stands on its own, independent of what go-evtx's own encoder
 // needs to satisfy .NET's reader.
+//
+// F16 (v0.7.0, Task 9f): a full audit of all 42 substitutions' declared
+// type vs. actual byte width (docs/format-baseline.md, task-9f-report.md)
+// found exactly one disagreement: sub 41 (EventID/@Qualifiers) declared
+// UNSIGNED_WORD (a 2-byte fixed-width type) but carried zero-length data —
+// the only one of the 42 substitutions where the declared type's required
+// width and the actual written width disagreed. This is a different axis
+// from F14's type question above: F14 asked "is UNSIGNED_WORD the right
+// type for this field," found no resolution, and left the type as CI
+// requires it (UNSIGNED_WORD). F16 leaves that question exactly where F14
+// left it and instead asks "given that declared type, is the data shaped
+// the way that type requires" — and corrects the width from 0 to 2 bytes
+// without touching the type. See collectSubstitutionsFromFields's sub 41
+// line for the fix itself.
 
 // depIDNotSet is the "not set" sentinel for an OpenStartElementTag's
 // dependency_id field (libyal EVTX docs: "-1 (0xffff) => not set"). An
@@ -356,7 +370,7 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 //	38: Channel                    (STRING)   — F12b, from fields["Channel"]
 //	39: Security/@UserID               (NULL) — F12b, no source
 //	40: Provider/@Guid             (STRING)   — F13b, from fields["ProviderGuid"]
-//	41: EventID/@Qualifiers            (NULL, type UNSIGNED_WORD) — F13c, no source; F14 tried NULL-type here and it broke STAGE2 READ — see the F14 doc comment by the type constants
+//	41: EventID/@Qualifiers            (typed zero, type UNSIGNED_WORD, 2-byte width) — F13c/F16, no source; F14 tried NULL-type here and it broke STAGE2 READ; F16 (Task 9f) widened the data from 0 to 2 bytes to match UNSIGNED_WORD's required width without changing the type — see the F14/F16 doc comments by the type constants and above collectSubstitutionsFromFields's sub 41 line
 //
 // Total: 29 + 13 = 42 substitutions.
 //
@@ -430,28 +444,37 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c)
+	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c/F16)
 	//
-	// F13c declares Qualifiers UNSIGNED_WORD (0x06) at size 0.
-	// task-8b-report.md's Step 1 table cites this as the real file's own
-	// encoding; F14 (Task 8e) partly disputed that (a byte-for-byte re-parse
-	// of the real record the table cites found index 4 declared type 0x00,
-	// not 0x06) and briefly changed this to binXMLTypeNull to match — but
-	// that change made Windows' EventLogReader.ReadEvent() regress from
+	// F13c declares Qualifiers UNSIGNED_WORD (0x06); F16 (Task 9f) widened
+	// its value data from 0 to 2 bytes to match that type's required width
+	// (see the F16 doc comment above collectSubstitutionsFromFields's sub 41
+	// line) — the type itself is unchanged by F16.
+	//
+	// task-8b-report.md's Step 1 table cites size-0 UNSIGNED_WORD as the real
+	// file's own encoding; F14 (Task 8e) partly disputed that (a byte-for-byte
+	// re-parse of the real record the table cites found index 4 declared type
+	// 0x00, not 0x06) and briefly changed this to binXMLTypeNull to match —
+	// but that change made Windows' EventLogReader.ReadEvent() regress from
 	// reading all 403 records to failing on record 0 (STAGE2 READ), an
 	// unambiguous, directly-measured CI signal stronger than the byte-level
 	// re-parse it contradicts. Reverted back to UNSIGNED_WORD on that
-	// evidence. The two findings are not reconciled: either this task's
-	// index-to-field identification of "Qualifiers = substitution index 4 in
-	// the real file's own numbering" doesn't actually hold (the Step 1
-	// table's index assignments, not just its types, may themselves be
-	// unreliable — this task did not re-derive them independently, only
-	// re-checked the types at the indices the table already named), or some
-	// other mechanism ties Windows' acceptance to this declared type in a
-	// way not yet understood. See task-8e-report.md's "Concerns" for the
-	// open question this leaves. F13a: the element's own dependency_id
-	// becomes subEventID (its own content index), and the content
-	// substitution switches to OptionalSubstitution.
+	// evidence. The two findings on WHICH TYPE is correct are still not
+	// reconciled — F16 does not resolve that question and does not try to;
+	// it only makes the WIDTH of whichever type is declared internally
+	// consistent, which task 9f's own fresh decode of testdata/system.evtx
+	// found true of every one of the real file's own substitution entries
+	// without exception. Either this task's index-to-field identification of
+	// "Qualifiers = substitution index 4 in the real file's own numbering"
+	// doesn't actually hold (the Step 1 table's index assignments, not just
+	// its types, may themselves be unreliable — this task did not re-derive
+	// them independently, only re-checked the types at the indices the table
+	// already named), or some other mechanism ties Windows' acceptance to
+	// this declared type in a way not yet understood. See
+	// task-8e-report.md's "Concerns" for the open question this leaves.
+	// F13a: the element's own dependency_id becomes subEventID (its own
+	// content index), and the content substitution switches to
+	// OptionalSubstitution.
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", subEventID, baseOffset, names, dataSizeStack)
 	writeAttributeOptional(b, "Qualifiers", subEventIDQualifiers, binXMLTypeUint16, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
@@ -744,16 +767,37 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// defaulting to "" when the caller doesn't supply one.
 	//
 	// EventID/@Qualifiers has no caller-supplied source (go-evtx's WriteRecord
-	// API has no concept of an event qualifier code), so it is NULL —
-	// declaring its own real type, UNSIGNED_WORD, with zero-length data, per
-	// F13c. F14 (Task 8e) tried declaring it binXMLTypeNull instead, matching
-	// a byte-for-byte re-parse of testdata/system.evtx's own record, and that
-	// made Get-WinEvent's STAGE2 READ regress from all 403 records to failing
-	// on record 0 — reverted back to UNSIGNED_WORD on that stronger, directly
-	// measured signal. See the F14 doc comment by the type constants for the
-	// full, unresolved story.
+	// API has no concept of an event qualifier code), so it carries a typed
+	// zero — declaring its own real type, UNSIGNED_WORD, with a real 2-byte
+	// zero value, per F13c/F16. F14 (Task 8e) tried declaring it
+	// binXMLTypeNull instead, matching a byte-for-byte re-parse of
+	// testdata/system.evtx's own record, and that made Get-WinEvent's STAGE2
+	// READ regress from all 403 records to failing on record 0 — reverted
+	// back to UNSIGNED_WORD on that stronger, directly measured signal. See
+	// the F14 doc comment by the type constants for the full, unresolved
+	// story.
+	//
+	// F16 (v0.7.0, Task 9f): the value-spec descriptor declared UNSIGNED_WORD
+	// (a fixed-width, 2-byte type per the normative table in
+	// docs/evtx-format-notes.md) but carried zero-length data — the ONLY one
+	// of go-evtx's 42 substitutions where the declared type's required width
+	// disagreed with the byte count actually written. An independent decode
+	// of testdata/system.evtx's own record 0 substitution array (20 entries,
+	// none of go-evtx's own indices), done fresh for this task rather than
+	// re-trusting an earlier report, found every single one of the real
+	// file's entries width-consistent with its own declared type, without
+	// exception (nine NullType entries at size 0, and every fixed-width
+	// entry — UInt8/UInt16/UInt32/UInt64/FileTime/HexInt64 — at exactly the
+	// width that type requires). go-evtx's own sub 41 was the one exception
+	// to that pattern. This task widens the data to a real 2-byte zero,
+	// matching UNSIGNED_WORD's required width, WITHOUT changing the declared
+	// type — a third option distinct from F14's two prior attempts (which
+	// changed the type to NullType and regressed STAGE2 READ). This is a
+	// value-encoding fix, not a type change: it keeps the type CI has always
+	// accepted and only corrects the byte count to match what that type
+	// requires.
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 40 Provider/@Guid
-	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 41 EventID/@Qualifiers
+	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(0)})                        // 41 EventID/@Qualifiers (F16: real 2-byte width, matching UNSIGNED_WORD)
 
 	return subs
 }
