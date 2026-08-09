@@ -143,7 +143,7 @@ func (v Value) String() string {
 		return ""
 	}
 	switch v.Type {
-	case ValString, ValGuid, ValSid:
+	case ValString, ValGuid, ValSid, ValSysTime:
 		return v.str
 	case ValString | valArrayFlag:
 		return strings.Join(v.strs, ", ")
@@ -277,9 +277,21 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 	case ValAnsiString:
 		return Value{}, fmt.Errorf("go_evtx: AnsiString is not supported: the format " +
 			"carries no codepage, and it occurs zero times across the measured corpus")
-	case ValSysTime, ValEvtHandle, ValEvtXML:
+	case ValSysTime:
+		// Win32 SYSTEMTIME: wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute,
+		// wSecond, wMilliseconds — eight little-endian uint16. wDayOfWeek is
+		// redundant with the date and is not read. Measured: 8 records of the
+		// derivation corpus carry this type.
+		if len(data) != 16 {
+			return Value{}, fmt.Errorf("go_evtx: SysTime declares 16 bytes, got %d", len(data))
+		}
+		f := func(i int) int { return int(binary.LittleEndian.Uint16(data[2*i:])) }
+		ts := time.Date(f(0), time.Month(f(1)), f(3), f(4), f(5), f(6),
+			f(7)*int(time.Millisecond), time.UTC)
+		return Value{Type: t, str: ts.Format(time.RFC3339Nano)}, nil
+	case ValEvtHandle, ValEvtXML:
 		return Value{}, fmt.Errorf("go_evtx: value type %s is not implemented "+
-			"(zero occurrences across the measured corpus)", t)
+			"(not observed in the derivation corpus, 320 398 records)", t)
 	}
 	// Unreachable while fixedWidths/this switch together cover every entry of
 	// valueTypeNames (checked above) — kept as a safety net against the two
@@ -389,7 +401,7 @@ func (v Value) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	switch v.Type {
-	case ValString, ValGuid, ValSid:
+	case ValString, ValGuid, ValSid, ValSysTime:
 		return json.Marshal(v.str)
 	case ValString | valArrayFlag:
 		return json.Marshal(v.strs)

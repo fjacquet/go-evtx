@@ -170,6 +170,36 @@ func TestValue_MarshalJSON_StringArray(t *testing.T) {
 	}
 }
 
+// TestDecodeValue_SysTime covers value type 0x12 — Win32 SYSTEMTIME, eight
+// little-endian uint16 fields. 8 records of the derivation corpus carry it.
+func TestDecodeValue_SysTime(t *testing.T) {
+	// wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds
+	data := make([]byte, 16)
+	for i, f := range []uint16{2020, 1, 3, 1, 12, 34, 56, 789} {
+		binary.LittleEndian.PutUint16(data[2*i:], f)
+	}
+	v, err := decodeValue(ValSysTime, data)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	if got, want := v.String(), "2020-01-01T12:34:56.789Z"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got, want := string(b), `"2020-01-01T12:34:56.789Z"`; got != want {
+		t.Errorf("JSON got %s, want %s", got, want)
+	}
+}
+
+func TestDecodeValue_SysTimeWrongLength(t *testing.T) {
+	if _, err := decodeValue(ValSysTime, make([]byte, 8)); err == nil {
+		t.Fatal("expected an error for an 8-byte SysTime")
+	}
+}
+
 func TestDecodeValue_Guid(t *testing.T) {
 	data := []byte{
 		0x2d, 0x6d, 0x5c, 0x6e, 0x1a, 0x2b, 0x3c, 0x4d,
