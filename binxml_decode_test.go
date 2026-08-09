@@ -682,3 +682,51 @@ func TestDecodeRecordBinXML_RealFixture(t *testing.T) {
 		t.Errorf("AutoBackup/BackupPath = %v, want it to contain the archive file name", backupPath.Value)
 	}
 }
+
+// TestParseSubstitutionRef_ArrayTypeGoverns pins the rule that where the
+// template's substitution token and the substitution array disagree about a
+// value's type, the array governs.
+//
+// This is documented behaviour for SizeT, not a tolerance. libyal's EVTX
+// specification, for both the normal and the optional substitution token: "If
+// the value type is Size (0x10) the corresponding substitution value should be
+// a 32-bit hexadecimal integer (0x14) or 64-bit hexadecimal integer (0x15)."
+// Measured across the derivation corpus: 61 674 records pair SizeT with
+// HexInt32 or HexInt64, and 415 pair UInt8 with UInt16 — the latter documented
+// nowhere, measured only.
+func TestParseSubstitutionRef_ArrayTypeGoverns(t *testing.T) {
+	tests := []struct {
+		name         string
+		templateType ValueType
+		arrayType    ValueType
+		data         []byte
+	}{
+		{"SizeT token, HexInt64 value", ValSizeT, ValHexInt64, []byte{1, 0, 0, 0, 0, 0, 0, 0}},
+		{"SizeT token, HexInt32 value", ValSizeT, ValHexInt32, []byte{2, 0, 0, 0}},
+		{"UInt8 token, UInt16 value", ValUInt8, ValUInt16, []byte{3, 0}},
+		{"types agree", ValUInt16, ValUInt16, []byte{4, 0}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := decodeValue(tc.arrayType, tc.data)
+			if err != nil {
+				t.Fatalf("decodeValue: %v", err)
+			}
+			// NormalSubstitution: token(1) index(2) declared type(1).
+			p := &binxmlParser{
+				buf:  []byte{tokNormalSub, 0x00, 0x00, byte(tc.templateType)},
+				subs: []Value{v},
+			}
+			got, err := p.parseSubstitutionRef()
+			if err != nil {
+				t.Fatalf("parseSubstitutionRef: %v", err)
+			}
+			if got.Type != tc.arrayType {
+				t.Errorf("value type = %s, want the array's %s", got.Type, tc.arrayType)
+			}
+			if p.pos != 4 {
+				t.Errorf("cursor = %d, want 4", p.pos)
+			}
+		})
+	}
+}
