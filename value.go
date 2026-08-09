@@ -332,26 +332,33 @@ func (v Value) MarshalJSON() ([]byte, error) {
 		return json.Marshal(uint32(v.num))
 	case ValInt64:
 		n := int64(v.num)
-		if n > int64(maxExactJSONInt) || n < -int64(maxExactJSONInt) {
+		if n >= int64(maxExactJSONInt) || n <= -int64(maxExactJSONInt) {
 			return json.Marshal(strconv.FormatInt(n, 10))
 		}
 		return json.Marshal(n)
-	case ValUInt64, ValSizeT:
+	case ValUInt64:
+		if v.num >= maxExactJSONInt {
+			return json.Marshal(strconv.FormatUint(v.num, 10))
+		}
+		return json.Marshal(v.num)
+	case ValSizeT:
+		// SizeT shares UInt64's quoting rule: an 8-byte SizeT can exceed 2^53, and
+		// a silently rounded number is the same defect quoting exists to prevent.
 		if v.num >= maxExactJSONInt {
 			return json.Marshal(strconv.FormatUint(v.num, 10))
 		}
 		return json.Marshal(v.num)
 	case ValReal32:
-		return json.Marshal(float32(math.Float32frombits(uint32(v.num))))
+		return json.Marshal(math.Float32frombits(uint32(v.num)))
 	case ValReal64:
 		return json.Marshal(math.Float64frombits(v.num))
 	case ValHexInt32, ValHexInt64, ValFileTime:
 		return json.Marshal(v.String())
 	case ValBinXML:
-		if v.node != nil {
-			return json.Marshal(v.node)
+		if v.node == nil {
+			return nil, fmt.Errorf("go_evtx: BinXml value has no decoded fragment")
 		}
-		return []byte("null"), nil
+		return json.Marshal(v.node)
 	}
 	return nil, fmt.Errorf("go_evtx: cannot marshal value type %s", v.Type)
 }

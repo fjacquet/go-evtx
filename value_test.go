@@ -2,6 +2,7 @@ package evtx
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -218,5 +219,152 @@ func TestValue_MarshalJSON_LargeUint64BecomesString(t *testing.T) {
 	}
 	if string(b) != `"9007199254740992"` {
 		t.Errorf("Marshal = %s, want a quoted string at 2^53", b)
+	}
+}
+
+// Int64 at the 2^53 boundary must also quote to maintain precision.
+func TestValue_MarshalJSON_Int64At2Pow53Quotes(t *testing.T) {
+	// 2^53 = 0x0000000020000000 in little-endian bytes
+	v, err := decodeValue(ValInt64, []byte{0, 0, 0, 0, 0, 0, 0x20, 0})
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `"9007199254740992"` {
+		t.Errorf("Marshal = %s, want a quoted string at 2^53", b)
+	}
+}
+
+// Int64 just inside the boundary stays a bare number.
+func TestValue_MarshalJSON_Int64JustInside2Pow53(t *testing.T) {
+	// 2^53 - 1 = 0x00000000ffffff1f in little-endian
+	v, err := decodeValue(ValInt64, []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0})
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) == `"9007199254740991"` {
+		t.Errorf("Marshal = %s, but 2^53-1 should stay a bare number", b)
+	}
+	if string(b) != `9007199254740991` {
+		t.Errorf("Marshal = %s, want bare number", b)
+	}
+}
+
+// Int64 at -2^53 must quote.
+func TestValue_MarshalJSON_Int64AtNeg2Pow53Quotes(t *testing.T) {
+	// -2^53 = 0xffffffffe0000000 in little-endian two's complement
+	v, err := decodeValue(ValInt64, []byte{0, 0, 0, 0, 0, 0, 0xe0, 0xff})
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `"-9007199254740992"` {
+		t.Errorf("Marshal = %s, want a quoted string at -2^53", b)
+	}
+}
+
+// BinXml present-but-undecoded must error, not silently produce null.
+func TestValue_MarshalJSON_BinXmlUndecoded(t *testing.T) {
+	data := []byte{0x01, 0x02, 0x03}
+	v, err := decodeValue(ValBinXML, data)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	_, err = json.Marshal(v)
+	if err == nil {
+		t.Fatal("Marshal should error for undecoded BinXml, not return null")
+	}
+	if !strings.Contains(err.Error(), "BinXml value has no decoded fragment") {
+		t.Errorf("error message = %q, want to contain 'BinXml value has no decoded fragment'", err.Error())
+	}
+}
+
+// Guid marshals to its canonical string form.
+func TestValue_MarshalJSON_Guid(t *testing.T) {
+	data := []byte{
+		0x2d, 0x6d, 0x5c, 0x6e, 0x1a, 0x2b, 0x3c, 0x4d,
+		0x9a, 0xbc, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+	}
+	v, err := decodeValue(ValGuid, data)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `"6e5c6d2d-2b1a-4d3c-9abc-010203040506"` {
+		t.Errorf("Marshal = %s, want canonical GUID form", b)
+	}
+}
+
+// FileTime marshals via String() to RFC 3339 form.
+func TestValue_MarshalJSON_FileTime(t *testing.T) {
+	// 2020-01-01T00:00:00Z
+	v, err := decodeValue(ValFileTime, []byte{0x00, 0x00, 0x05, 0x69, 0x36, 0xc0, 0xd5, 0x01})
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	// String() returns RFC3339Nano format
+	if !strings.Contains(string(b), "2020") {
+		t.Errorf("Marshal = %s, want RFC 3339 time format", b)
+	}
+}
+
+// HexInt32 marshals to hex notation.
+func TestValue_MarshalJSON_HexInt32(t *testing.T) {
+	v, err := decodeValue(ValHexInt32, []byte{0xef, 0xbe, 0xad, 0xde})
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `"0xdeadbeef"` {
+		t.Errorf("Marshal = %s, want hex notation", b)
+	}
+}
+
+// Real64 (double precision float) marshals as a JSON number.
+func TestValue_MarshalJSON_Real64(t *testing.T) {
+	// IEEE 754 double for pi ≈ 3.14159...
+	v, err := decodeValue(ValReal64, []byte{0x6e, 0x2d, 0x44, 0x54, 0xfb, 0x21, 0x09, 0x40})
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	// Should be a JSON number close to 3.14
+	if !strings.Contains(string(b), "3.14") {
+		t.Errorf("Marshal = %s, want a JSON number close to 3.14", b)
+	}
+}
+
+// Unknown value type returns an error.
+func TestValue_MarshalJSON_UnknownType(t *testing.T) {
+	v := Value{Type: ValEvtHandle}
+	_, err := json.Marshal(v)
+	if err == nil {
+		t.Fatal("Marshal should error for unknown type")
+	}
+	if !strings.Contains(err.Error(), "cannot marshal value type") {
+		t.Errorf("error message = %q, want to contain 'cannot marshal value type'", err.Error())
 	}
 }
