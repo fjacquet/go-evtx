@@ -200,3 +200,210 @@ jobs:
               if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
               throw "Get-WinEvent ordering(s) failed: $($failures -join '; ')"
           }
+
+  # ---------------------------------------------------------------------
+  # Experiment A (task-9a): a second, minimal fixture -- one record, one
+  # chunk, pure ASCII, no boundary cases -- run through the same probe
+  # sequence as the main fixture above. Added beside the existing
+  # generate/get-winevent jobs, which stay untouched: this isolates whether
+  # a render failure needs the big fixture's surface (403 records, 21+
+  # chunks, non-BMP strings, a near-maximum record) or reproduces on the
+  # simplest record this library can produce.
+  # ---------------------------------------------------------------------
+  generate-minimal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate minimal fixture
+        run: |
+          mkdir -p artifacts-minimal
+          go run ./cmd/gen-fixture-minimal -out artifacts-minimal
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: minimal-evtx
+          path: artifacts-minimal/
+          retention-days: 7
+
+  get-winevent-minimal:
+    needs: generate-minimal
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: minimal-evtx
+          path: artifacts-minimal
+      - name: Parse minimal fixture with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-minimal/minimal.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "MINIMAL STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "MINIMAL STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # Unlike the main fixture's job, a STAGE2 READ failure here does NOT
+          # abort the script: with only one record, throwing here would skip
+          # ToXml/Get-WinEvent too and cost a second CI round trip to learn
+          # what those report. Every probe below runs regardless, and the
+          # final assertion still fails the job if Get-WinEvent itself fails
+          # -- that is what keeps this job's red/green status meaningful.
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "MINIMAL STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "MINIMAL STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "MINIMAL PROP ToXml ok" }
+              catch { Write-Host "MINIMAL PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "MINIMAL PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "MINIMAL GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "MINIMAL GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "MINIMAL GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "MINIMAL GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on minimal fixture: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Experiment B (task-9a): splice a REAL record's BinXML (extracted from
+  # testdata/system.evtx chunk 0 record 0, verified self-contained -- see
+  # cmd/gen-splice-fixture/main.go's doc comment) into one of go-evtx's own
+  # chunks via WriteRaw, then run it through the same probes. Separates
+  # "our chunk/file container is wrong" from "our BinXML generation is
+  # wrong" -- nothing measured before this task distinguishes those two.
+  # ---------------------------------------------------------------------
+  generate-splice:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate spliced fixture
+        run: |
+          mkdir -p artifacts-splice
+          go run ./cmd/gen-splice-fixture -out artifacts-splice
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spliced-evtx
+          path: artifacts-splice/
+          retention-days: 7
+
+  get-winevent-splice:
+    needs: generate-splice
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spliced-evtx
+          path: artifacts-splice
+      - name: Parse spliced fixture with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-splice/spliced.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "SPLICE STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "SPLICE STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # See the minimal-fixture job above for why STAGE2 READ does not
+          # abort the script here.
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "SPLICE STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "SPLICE STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "SPLICE PROP ToXml ok" }
+              catch { Write-Host "SPLICE PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "SPLICE PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "SPLICE GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "SPLICE GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "SPLICE GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "SPLICE GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on spliced fixture: $($failures -join '; ')"
+          }

@@ -40,6 +40,7 @@ baseline the rest of the release compares against.**
 | 14a | `eecb372` | 403 records, 27 chunks, max ObjectName **31208** runes — byte-identical to row 13 (pure type-byte substitution, no length change) | **FAIL (regression): `Evtx.BinaryParser.ParseException: Invalid substitution value size`** on record 0 — see "Task 8e" below | `STAGE1 OPEN: ok` / **`STAGE2 READ: FAILED after 384 records`** — a third, distinct failure mode, neither "fails at 0" nor "reads all 403" |
 | 14b | `e1f8aca` | byte-identical to row 13/14a | **PASS (regression fixed): `OK: 403 records, all chunk checksums verify`** | `STAGE1 OPEN: ok` / **`STAGE2 READ: FAILED after 0 records`** — a *different* regression from row 13's `ok, 403 records` |
 | 14 | `ab6ae57` | byte-identical to row 13/14a/14b; `binxml.go`'s emitted payload is MD5-identical to row 13's (net zero functional change across 14a/14b/this commit) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **Restored exactly to row 13's result** — `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `LOGINFO` ok, six `PROP` scalars empty-but-no-throw, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all still FAILED with `"The data is invalid."` — see "Task 8e" below |
+| 15 | `b41ac76` | 403 records, 27 chunks, max ObjectName **31236** runes — NOT byte-identical to rows 12-14 (F15 drops `encodeSubString`'s null terminator, shrinking every String-typed substitution value by 2 bytes; chunk count unchanged at 27, but the binary-searched near-maximum ObjectName ceiling moves from 31208 to 31236 runes as a direct consequence — see "Task 8f" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records` (held — the win stayed protected). `PROP ToXml FAILED - "The data is invalid."`, `GETWINEVENT default`/`-Oldest` both FAILED, same message — byte-for-byte the same failure shape as row 14. NULL RESULT: the null-terminator fix did not change the outcome — see "Task 8f" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2080,3 +2081,78 @@ count × 2. go-evtx's `encodeSubString` always appends one. This touches
 scalar properties" half of the original symptom — flagged, not
 implemented, per this task's own hard-won caution about unmeasured
 byte-level fixes.
+
+## Task 8f: F15 (substitution-value string null terminator) — backfilled
+
+**Paperwork gap, not a missing measurement.** This row was never written:
+the implementing task pushed the fix, CI ran and completed, and the task
+was interrupted before its report and this row were committed — consistent
+with the pattern named in task-9a's own brief ("Four agents have now burned
+their budgets waiting on CI and had to be killed"). The commit
+(`b41ac76`, "fix: encodeSubString drops the substitution-value null
+terminator (F15)") and the CI run it produced (`31287980079`) both already
+existed and are unchanged by this backfill — only the documentation was
+missing. Recorded here by Task 9a before adding its own rows, so the table
+has no unexplained gap and so Task 9a's own fixture-length delta (see
+below) has a documented cause rather than looking like an unexplained
+discrepancy.
+
+**The fix.** `encodeSubString` (binxml.go) stopped appending a trailing
+UTF-16 null pair to String-typed substitution-array *values* — confirmed
+against `testdata/system.evtx` by decoding the substitution arrays of 45
+records using a "full" (inline, non-cached) template instance: 28/28
+non-empty String entries have a declared size of exactly `char_count*2`,
+none carry a trailing null. `NameNode` strings are unaffected (real Windows
+does null-terminate those, and `writeNameNode` was never touched).
+
+**Measurement, verbatim, from run [`31287980079`](https://github.com/fjacquet/go-evtx/actions/runs/31287980079) (head `b41ac76`):**
+
+```console
+$ gh api repos/fjacquet/go-evtx/actions/runs/31287980079 --jq '.head_sha'
+b41ac7643fed78390148d84e23154360dd40858c
+```
+
+`generate` job: `wrote artifacts/generated.evtx (403 records, max ObjectName
+31236 runes)` — independently reproduced locally by re-running
+`cmd/gen-fixture` unmodified against this same commit, confirming the
+binary search is deterministic and the CI number is not a fluke.
+
+`python-evtx-differential`: `OK: 403 records, all chunk checksums verify` —
+stayed green.
+
+`get-winevent`:
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: ok, 403 records
+PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+GETWINEVENT default: FAILED - The data is invalid.
+GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+### Reading this result
+
+**NULL RESULT, held cleanly.** `STAGE2 READ: ok, 403 records` — the
+release's hard-won win — was not put at risk by this fix, and
+`python-evtx` stayed green. But `ToXml`/`Get-WinEvent` fail with the exact
+same exception type and message as row 14, on a fixture that is not
+byte-identical (the near-maximum ObjectName ceiling moved by 28 runes as an
+arithmetic side effect of shrinking every String value by 2 bytes) —
+consistent with this baseline's own standing rule that Windows' rejection
+message is content-dependent and a repeated message alone is not by itself
+proof that nothing changed structurally, only that whatever *did* change
+was not the defect `ToXml` hits. The null-terminator lead is closed, not
+open: it was a real, independently-confirmed divergence from the real
+file's own bytes, worth fixing on its own merits, but it was not (or was
+not sufficient on its own to be) the cause of `ToXml`'s failure.
+
+## Task 9a: Experiment A (minimal fixture) and Experiment B (splice)
+
+Full detail in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9a-report.md`.
+Both experiments were run beside the existing fixture/jobs, which are
+untouched — `cmd/gen-fixture/main.go`'s output stays byte-identical to row
+15, and this task's own re-measurement of it (via the unmodified
+`generate`/`python-evtx-differential`/`get-winevent` jobs, re-run because
+pushing to this branch re-triggers the whole workflow) is recorded as row
+16 below once CI completes.
