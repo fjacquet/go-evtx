@@ -45,6 +45,7 @@ baseline the rest of the release compares against.**
 | 17 | `92b5a3f` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-16 (Task 9b touched no fixture, `binxml.go`, or `evtx.go` code; this row is a regression check — three new hybrid fixtures measured alongside it, not fixture-generator changes — see "Task 9b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 16 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Three hybrid fixtures measured alongside this one — see "Task 9b" below |
 | 18 | `69ca68a` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-17, confirmed two ways (empty `git diff --stat` on `binxml.go`/`evtx.go`/`cmd/gen-fixture/main.go`, and a matching SHA-256 hash of the fixture bytes before/after this task's change — Task 9c touched no fixture or production encoder code; four new ladder-rung fixtures measured alongside it — see "Task 9c" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 17 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Four ladder-rung fixtures measured alongside this one — see "Task 9c" below |
 | 19 | `084ab01` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-18 (Task 9d touched no fixture or production encoder code — `binxml.go`/`evtx.go`/`binformat.go`/`binxml_reader.go`/`chunkhash.go`/`errors.go`/`cmd/gen-fixture/main.go` all empty in `git diff --stat`; two new secondary-rung fixtures measured alongside it — see "Task 9d" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 18 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two secondary-rung fixtures measured alongside this one, plus a decisive experiment that could not be constructed — see "Task 9d" below |
+| 20 | `489ecd3` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-19 (Task 9e touched no fixture or production encoder code — `binxml.go`/`evtx.go`/`binformat.go`/`binxml_reader.go`/`chunkhash.go`/`errors.go`/`cmd/gen-fixture/main.go` all empty in `git diff --stat`; SHA-256 of `generated.evtx` confirmed identical before/after; two new value-type-experiment fixtures measured alongside it — see "Task 9e" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 19 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two value-type variants measured alongside this one — see "Task 9e" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2691,3 +2692,171 @@ Full verbatim job output, method detail (including the MS-EVEN6/libyal
 citations and the scratch decoder's own self-validation), and concerns are
 in
 `.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9d-report.md`.
+
+## Task 9e: value-type experiment — all-string (decisive) and four-field (secondary)
+
+Task 9d's own ladder (task 9c) found no size boundary anywhere from
+`<System>` alone to the full 42-substitution control, and its own decisive
+all-literal experiment could not be built at all — MS-EVEN6's own grammar
+has no `ValueText` production for a non-string type, confirmed against
+`testdata/system.evtx` (35/35 real substitutions there are typed, 15/15
+real literals are all `StringType`). What had never been isolated, across
+every measurement this release has made, was the declared **value type**
+of each substitution.
+
+**Decisive: `VariantAllString`.** Every one of the control's 42
+substitutions (`<System>`'s 18 plus `<EventData>`'s 12 Data pairs) forced
+to `StringType` (0x01) — both the template body's own substitution tokens
+and the substitution array's value-spec descriptors, kept consistent by
+construction — each value reformatted as it would render in XML (decimal
+digits for an integer, a hex string for `Keywords`, ISO-8601 for
+`SystemTime`, an empty string for a field with no source).
+
+**Secondary: `VariantFourFieldsString`**, batched into the same run:
+production's own declared types unchanged except for the four
+substitutions whose types were never independently verified as
+strings — `Security/@UserID`, `Execution/@ProcessID`,
+`Execution/@ThreadID`, `Keywords` — the four positions task 8e's F14
+correction showed a prior type table was wrong about.
+
+Both implemented as `evtx.VariantAllString`/`evtx.VariantFourFieldsString`
+(`binxml_variants.go`), reusing `binxml.go`'s own low-level token writers
+via a `typeFor` closure (`writeVariantSystemBlockTyped`) — not a parallel
+reimplementation — at the control's own scale, production's own
+`OptionalSubstitution`/`dependency_id` convention unchanged (task 9d's
+`VariantAllNormalSubstitution` already isolated that axis as a null
+result). New fixtures via `cmd/gen-ladder-all-string` /
+`cmd/gen-ladder-four-string`. New CI jobs
+`generate`/`get-winevent-ladder-{all,four}-string`; no dedicated
+`python-evtx` job (xmlns stays present in both, so no divergence from the
+control was predicted there — same precedent as rung A/`all-normal-sub`).
+
+`binxml_variants_test.go` extends `walkVariantBody` with `subRefs`
+(index + declared type of every substitution token in document order) and
+adds a `parseSubstitutionSpecs` helper reading the array's own value-specs
+directly, so both new tests check the brief's own "the two stay
+consistent" requirement by direct comparison rather than by construction
+alone: `TestBuildVariantBinXML_AllStringEveryTypeIsStringAndConsistent`
+(all 42 array specs AND all 42 body-token references are `StringType`) and
+`TestBuildVariantBinXML_FourFieldsStringOnlyFourChanged` (exactly 4 of 42
+positions differ from the production-convention control, all four to
+`StringType`, no others).
+
+Commit `489ecd3` (`test(format): task 9e — all-string value-type
+experiment + four-field secondary rung`), pushed to
+`feat/v0.7.0-format-correctness` (`54de692..489ecd3`).
+
+**Run selection, by head SHA:**
+
+```console
+$ git rev-parse HEAD
+489ecd38ccfd71b0e614a3bc050635e10d766140
+```
+
+`CI` run [`31291948673`](https://github.com/fjacquet/go-evtx/actions/runs/31291948673)
+and `Format Verify` run [`31291948507`](https://github.com/fjacquet/go-evtx/actions/runs/31291948507),
+both confirmed at head_sha `489ecd3` via the API. `CI`: **success**.
+`Format Verify`: overall **failure** (expected — every `get-winevent-*` job
+carrying a go-evtx-authored record fails by design).
+
+### Result: a real split — the two variants fail differently
+
+```text
+ALLSTRING STAGE1 OPEN: ok
+ALLSTRING STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+ALLSTRING PROP ToXml: skipped - no record captured from the raw reader
+ALLSTRING GETWINEVENT default: FAILED - The data is invalid.
+ALLSTRING GETWINEVENT -Oldest: FAILED - The data is invalid.
+
+FOURSTRING STAGE1 OPEN: ok
+FOURSTRING STAGE2 READ: ok, 1 records
+FOURSTRING PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+FOURSTRING GETWINEVENT default: FAILED - The data is invalid.
+FOURSTRING GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+**`VariantFourFieldsString` matches the standard failure mode** every
+control-scale rung has shown since task 8c's breakthrough: `STAGE2 READ`
+succeeds, only `ToXml`/`Get-WinEvent` fail. Forcing `UserID`/`ProcessID`/
+`ThreadID`/`Keywords` to `StringType` changes nothing measurable.
+
+**`VariantAllString` does not just fail to render — it fails at an
+earlier stage than every control-scale measurement since task 8c.**
+`STAGE2 READ` itself throws on record 0 (`ReadEvent()` fails before
+returning anything), the same failure mode row 5 through row 12 of this
+table had *before* task 8c's F13 fix, not the "opens and reads fine, only
+`ToXml` fails" shape every rung since has shown. Because
+`VariantFourFieldsString` — identical in scale, identical in every other
+respect, differing from `VariantAllString` only in *which* substitutions
+are forced to `StringType` — does **not** reproduce this regression, the
+four fields it isolates (`UserID`/`ProcessID`/`ThreadID`/`Keywords`) are
+independently cleared as the cause. The regression must come from one or
+more of the ten substitutions `VariantAllString` changes that
+`VariantFourFieldsString` leaves alone: `EventID`, `Level`, `SystemTime`,
+`Version`, `Task`, `Opcode`, `EventRecordID`, `Correlation/@ActivityID`,
+`Correlation/@RelatedActivityID`, `EventID/@Qualifiers` — every one of
+them either a field task 8d's own `PROP` probe showed .NET's
+`EventRecord` reads independent of `ToXml` (`Id`, `Level`, `TimeCreated`,
+`RecordId`), or a field whose declared type flips from NULL (0 bytes, no
+render) to a non-null `StringType` (a structural change: the attribute
+now always renders instead of being conditionally omitted).
+
+**No regression on the release's own protected win.** `generate`: `wrote
+artifacts/generated.evtx (403 records, max ObjectName 31236 runes)` —
+byte-identical to row 19. `python-evtx-differential`: `OK: 403 records,
+all chunk checksums verify` — stayed green. `get-winevent`: `STAGE1 OPEN:
+ok` / **`STAGE2 READ: ok, 403 records`** (held) / `PROP ToXml FAILED` /
+both `GETWINEVENT` orderings `FAILED` — `"The data is invalid."` —
+identical to row 19 in every respect. The `STAGE2 READ` regression above
+is confined to the experimental `VariantAllString` fixture; the
+production-authored main fixture is untouched by this task and unaffected.
+
+### Reading this result against the brief's own two branches
+
+The brief posed two outcomes: renders (a type mismatch on one specific
+value) or still fails (value types exonerated, template/token encoding is
+the sole remaining surface). The actual result is neither cleanly — it
+still fails, but in a way that is itself informative and was not
+anticipated by either branch: `VariantAllString` regresses relative to
+every rung since task 8c, and the paired secondary rung proves the
+regression's cause lives in a specific, now-much-smaller subset (10 of
+42 substitutions) rather than in the four fields the brief flagged as
+least-verified. Value types are **not** exonerated as a category — at
+least one of those ten fields' declared type materially affects whether
+`ReadEvent()` itself succeeds, a stronger and more specific finding than
+"it still fails." What remains open is which one (or which combination)
+of the ten is responsible, and whether fixing `ToXml` still requires a
+different, additional finding once that regression is understood — this
+task did not reach either answer, only the boundary between "matters for
+`STAGE2 READ`" and "does not."
+
+## Task 9e's concerns
+
+1. **The regression is real but not yet localized past 10 candidates.**
+   `VariantAllString`'s `STAGE2 READ` failure is a directly measured CI
+   fact, cross-checked against `VariantFourFieldsString`'s own
+   non-regression at identical scale — but no experiment in this task
+   narrows further than "one or more of `EventID`/`Level`/`SystemTime`/
+   `Version`/`Task`/`Opcode`/`EventRecordID`/`Correlation/@ActivityID`/
+   `Correlation/@RelatedActivityID`/`EventID/@Qualifiers`". A follow-up
+   bisect (the same batched-secondary-rung technique this task used)
+   splitting that set — starting with `EventID`/`Level`/`SystemTime` as
+   the fields task 8d's own `PROP` probe showed .NET reads independent of
+   `ToXml` — is the concrete, small next step.
+2. **`ToXml` itself is not exonerated or implicated by this task.** Every
+   variant this task measured that reached `ToXml` (`VariantFourFieldsString`,
+   the main fixture) failed there with the same message every rung has
+   shown since task 8c. This task's finding is entirely about `STAGE2
+   READ`'s own, earlier failure surface in `VariantAllString` — it says
+   nothing new about what blocks `ToXml` once a record is successfully
+   read.
+3. **No regression on the main fixture** — confirmed above, verbatim.
+4. **Batched secondary rung paid off exactly as the brief predicted**: it
+   was cheap (same CI run) and it narrowed the search — from "value types
+   might be exonerated entirely" to "a specific 10-substitution subset is
+   implicated, and 4 named candidates are cleared" — without needing a
+   second task.
+
+Full verbatim job output and the complete field-by-field type table for
+both variants are in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9e-report.md`.
