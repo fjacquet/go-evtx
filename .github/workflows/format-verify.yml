@@ -283,14 +283,26 @@ jobs:
 
               # Count alone proves nothing — a parser returning the right number of
               # empty records would pass. Check content survives the round trip.
+              #
+              # Order matters and this assertion got it wrong for as long as it
+              # existed, harmlessly: Get-WinEvent's default order is NEWEST
+              # first, so $verified[0] is the LAST record written, not the
+              # first. Nothing noticed because Get-WinEvent threw on every
+              # go-evtx file ever measured, so this block never ran. The first
+              # time it did run (F15, the run where ToXml finally succeeded) it
+              # compared the 31236-character ObjectName of the last record
+              # against the first record's and failed. Pick the expected value
+              # from the same end the variant reads from.
+              $usedDefault = $null -ne $events
+              $wantIndex = if ($usedDefault) { $expected.object_names.Count - 1 } else { 0 }
               $first = $verified[0]
               $xml = [xml]$first.ToXml()
               $objectName = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ObjectName' }).'#text'
-              if ($objectName -ne $expected.object_names[0]) {
-                  throw "ObjectName mismatch: got '$objectName', want '$($expected.object_names[0])'"
+              if ($objectName -ne $expected.object_names[$wantIndex]) {
+                  throw "ObjectName mismatch at index $wantIndex : got '$objectName', want '$($expected.object_names[$wantIndex])'"
               }
 
-              Write-Host "OK: $($verified.Count) records, ObjectName round-trips (variant: $(if ($null -ne $events) { 'default' } else { '-Oldest' }))"
+              Write-Host "OK: $($verified.Count) records, ObjectName round-trips (variant: $(if ($usedDefault) { 'default' } else { '-Oldest' }))"
           }
 
           # The job must still fail while either ordering is broken -- do
@@ -408,3 +420,4 @@ jobs:
               if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
               if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
               throw "Get-WinEvent ordering(s) failed on minimal fixture: $($failures -join '; ')"
+          }
