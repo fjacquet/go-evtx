@@ -836,31 +836,9 @@ func writeSubstitutionArray(b *bytes.Buffer, subs []substitutionEntry) {
 	writeUint32LE(b, uint32(len(subs)))
 
 	// Value specs.
-	//
-	// F17: a zero-length value declares type NULL, never its own type. This is
-	// absolute in real output — across 333 100 records of the derivation
-	// corpus, every one of the 1 686 434 zero-length descriptors declares
-	// 0x00, and a zero-length String (0x01) occurs exactly zero times.
-	//
-	// go-evtx wrote {size 0, type String} whenever a caller left ProviderName,
-	// Computer or Channel unset. Windows tolerates that on its own, but the
-	// moment the record also carries trailing bytes its reader rejects the
-	// whole file — which is what blocked W1 (the fragment EOF token) and W2
-	// (8-byte alignment) for two releases. Isolated to two 400-record files
-	// differing only in whether those three fields were supplied.
-	//
-	// It is the same mistake F15 fixed at the other end of the record: F15 was
-	// the OptionalSubstitution TOKEN declaring NULL where it should declare the
-	// field's real type; this is the substitution ARRAY declaring a real type
-	// where the value is absent and it should declare NULL. Both invented a
-	// shape no real record uses.
 	for _, s := range subs {
-		typ := s.typ
-		if len(s.data) == 0 {
-			typ = binXMLTypeNull
-		}
 		writeUint16LE(b, uint16(len(s.data)))
-		b.WriteByte(typ)
+		b.WriteByte(s.typ)
 		b.WriteByte(0x00) // padding
 	}
 
