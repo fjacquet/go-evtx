@@ -61,6 +61,10 @@ var valueTypeNames = map[ValueType]string{
 	ValGuid: "Guid", ValSizeT: "SizeT", ValFileTime: "FileTime", ValSysTime: "SysTime",
 	ValSid: "Sid", ValHexInt32: "HexInt32", ValHexInt64: "HexInt64",
 	ValEvtHandle: "EvtHandle", ValBinXML: "BinXml", ValEvtXML: "EvtXml",
+
+	// The only array type that occurs: 22 036 records of the derivation
+	// corpus, across every file in it. No other array type appears at all.
+	ValString | valArrayFlag: "StringArray",
 }
 
 func (t ValueType) String() string {
@@ -75,11 +79,21 @@ func (t ValueType) String() string {
 type Value struct {
 	Type ValueType
 
-	absent bool   // declared type present, zero-length data
-	num    uint64 // every fixed-width scalar, as raw bits
-	str    string // String; also the rendered form of Guid and Sid
-	raw    []byte // Binary
-	node   *Node  // BinXML — populated in Task 5
+	absent bool     // declared type present, zero-length data
+	num    uint64   // every fixed-width scalar, as raw bits
+	str    string   // String; also the rendered form of Guid and Sid
+	strs   []string // StringArray (0x81)
+	raw    []byte   // Binary
+	node   *Node    // BinXML — populated in Task 5
+}
+
+// Strings returns the elements of a StringArray value. ok is false for every
+// other type and for an absent value.
+func (v Value) Strings() ([]string, bool) {
+	if v.absent || v.Type != (ValString|valArrayFlag) {
+		return nil, false
+	}
+	return v.strs, true
 }
 
 // IsAbsent reports an optional substitution that carries a declared type but
@@ -131,6 +145,8 @@ func (v Value) String() string {
 	switch v.Type {
 	case ValString, ValGuid, ValSid:
 		return v.str
+	case ValString | valArrayFlag:
+		return strings.Join(v.strs, ", ")
 	case ValInt8:
 		return strconv.FormatInt(int64(int8(v.num)), 10)
 	case ValInt16:
@@ -179,8 +195,13 @@ var fixedWidths = map[ValueType]int{
 // is absent, which real Windows records rely on.
 func decodeValue(t ValueType, data []byte) (Value, error) {
 	if t&valArrayFlag != 0 {
+		if t == ValString|valArrayFlag {
+			return decodeStringArray(data)
+		}
 		return Value{}, fmt.Errorf("go_evtx: array value type %#02x is not supported "+
-			"(measured zero occurrences across the corpus)", uint8(t))
+			"(not observed in the derivation corpus, where %#02x — an array of "+
+			"UTF-16 strings — is the only array type that occurs)",
+			uint8(t), uint8(ValString|valArrayFlag))
 	}
 	// A type must be recognised before zero-length data is accepted as
 	// "absent" — checking this first, rather than after the zero-length
@@ -267,6 +288,41 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 	return Value{}, fmt.Errorf("go_evtx: unknown value type %#02x", uint8(t))
 }
 
+// decodeStringArray decodes value type 0x81: UTF-16LE runs separated by a NUL
+// code unit. A NUL at the very end terminates the final element and leaves
+// nothing behind; a run after the last NUL is a final element that was written
+// unterminated. An empty element in the middle is legitimate and is preserved
+// — only the last element's terminator may vanish.
+//
+// Measured across the derivation corpus (320 398 records, both format
+// versions): 22 036 records carry this type, and no other array type occurs.
+func decodeStringArray(data []byte) (Value, error) {
+	t := ValString | valArrayFlag
+	if len(data) == 0 {
+		return Value{Type: t, absent: true}, nil
+	}
+	if len(data)%2 != 0 {
+		return Value{}, fmt.Errorf("go_evtx: StringArray has odd length %d", len(data))
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(data[2*i:])
+	}
+	out := make([]string, 0, 1)
+	start := 0
+	for i, u := range units {
+		if u != 0 {
+			continue
+		}
+		out = append(out, string(utf16.Decode(units[start:i])))
+		start = i + 1
+	}
+	if start < len(units) {
+		out = append(out, string(utf16.Decode(units[start:])))
+	}
+	return Value{Type: t, strs: out}, nil
+}
+
 // decodeUTF16 decodes UTF-16LE, tolerating one trailing null terminator.
 // It returns an error if the remaining data (after null-terminator strip) has odd length.
 func decodeUTF16(data []byte) (string, error) {
@@ -335,6 +391,8 @@ func (v Value) MarshalJSON() ([]byte, error) {
 	switch v.Type {
 	case ValString, ValGuid, ValSid:
 		return json.Marshal(v.str)
+	case ValString | valArrayFlag:
+		return json.Marshal(v.strs)
 	case ValBinary:
 		return json.Marshal(base64.StdEncoding.EncodeToString(v.raw))
 	case ValBool:

@@ -1,11 +1,36 @@
 package evtx
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
+
+// u16LE encodes s as bare UTF-16LE code units — no count prefix and no
+// terminator, unlike binformat.go's encodeUTF16LE, which writes a NameNode's
+// framing as well.
+func u16LE(s string) []byte {
+	var b []byte
+	for _, c := range utf16.Encode([]rune(s)) {
+		b = binary.LittleEndian.AppendUint16(b, c)
+	}
+	return b
+}
+
+// u16Array builds an array-of-String (0x81) payload: each element as UTF-16LE
+// followed by a NUL code unit.
+func u16Array(parts ...string) []byte {
+	var b []byte
+	for _, p := range parts {
+		b = append(b, u16LE(p)...)
+		b = append(b, 0, 0)
+	}
+	return b
+}
 
 func TestDecodeValue_FixedWidths(t *testing.T) {
 	tests := []struct {
@@ -69,10 +94,79 @@ func TestDecodeValue_WrongWidthIsError(t *testing.T) {
 
 // Measured zero times across 284635 real records. Rejected rather than guessed.
 func TestDecodeValue_UnsupportedTypesRejected(t *testing.T) {
-	for _, typ := range []ValueType{ValAnsiString, 0x81, 0x8a, 0x7f} {
+	// 0x81 — array of UTF-16 strings — used to be here. It is the one array
+	// type that occurs in the corpus (22 036 records) and is now decoded; see
+	// TestDecodeValue_StringArray. Every other array type stays rejected.
+	for _, typ := range []ValueType{ValAnsiString, 0x8a, 0x7f} {
 		if _, err := decodeValue(typ, []byte{0x00}); err == nil {
 			t.Errorf("type %#x: expected an error, got none", typ)
 		}
+	}
+}
+
+// TestDecodeValue_StringArray covers value type 0x81 — ValString with the
+// array flag — laid out as NUL-separated UTF-16 runs. Measured across the
+// derivation corpus: 22 036 records carry it, and it is the only array type
+// that occurs at all.
+func TestDecodeValue_StringArray(t *testing.T) {
+	arrayOfString := ValString | valArrayFlag
+	tests := []struct {
+		name string
+		data []byte
+		want []string
+	}{
+		{"two terminated elements", u16Array("AB", "CD"), []string{"AB", "CD"}},
+		{"single element", u16Array("Service"), []string{"Service"}},
+		// A run after the last NUL is a final element that was not terminated.
+		{"final element unterminated", append(u16Array("AB"), u16LE("CD")...), []string{"AB", "CD"}},
+		// An empty element in the middle is legitimate and must survive; only
+		// the terminator of the last element is allowed to vanish.
+		{"empty middle element", u16Array("AB", "", "CD"), []string{"AB", "", "CD"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := decodeValue(arrayOfString, tc.data)
+			if err != nil {
+				t.Fatalf("decodeValue: %v", err)
+			}
+			got, ok := v.Strings()
+			if !ok {
+				t.Fatal("Strings() reported this is not a string array")
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeValue_StringArrayZeroLengthIsAbsent(t *testing.T) {
+	v, err := decodeValue(ValString|valArrayFlag, nil)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	if !v.IsAbsent() {
+		t.Error("a zero-length string array is an absent optional substitution, not an error")
+	}
+}
+
+func TestDecodeValue_StringArrayOddLength(t *testing.T) {
+	if _, err := decodeValue(ValString|valArrayFlag, []byte{0x41, 0x00, 0x42}); err == nil {
+		t.Fatal("expected an error for an odd-length string array")
+	}
+}
+
+func TestValue_MarshalJSON_StringArray(t *testing.T) {
+	v, err := decodeValue(ValString|valArrayFlag, u16Array("alpha", "beta"))
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got, want := string(b), `["alpha","beta"]`; got != want {
+		t.Errorf("got %s, want %s", got, want)
 	}
 }
 

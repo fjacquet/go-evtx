@@ -277,12 +277,20 @@ func TestCorpusScan(t *testing.T) {
 }
 
 // decodedFloor is how many of testdata/system.evtx's 1601 records the strict
-// decoder reads today. It is NOT 1601: the remaining 105 fail on the value.go
-// gaps tracked as #40 (array types inside nested fragments, and a declared
-// type that disagrees between a template and its array). Asserted as a floor
-// rather than an exact count so the number can only go up — raise it here when
-// #40 closes, and never lower it.
-const decodedFloor = 1496
+// decoder reads today.
+//
+// It is a crash-regression smoke gate, NOT a conformance target. system.evtx
+// is excluded as evidence about the format: 55 of its records carry a
+// Null-typed substitution with data, a construct occurring zero times in the
+// other 320 398 records of the local corpus, and every rule this project mined
+// it mined from this one file (see the plan's "Why system.evtx is out"). No
+// task is judged by moving this number; it exists so that a decoder change
+// which silently starts refusing records fails loudly.
+//
+// Asserted as a floor, never an equality, so it can only go up. 1496 before
+// StringArray (0x81) landed; the 55 remaining failures are the Null-with-data
+// construct, which stays deliberately unimplemented.
+const decodedFloor = 1546
 
 // TestCorpusScanTracked runs the dumper over the one fixture the repository
 // tracks, so the scanner itself stays honest in CI. The counts are the file's
