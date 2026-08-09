@@ -8,7 +8,9 @@
 package evtx
 
 import (
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -297,4 +299,59 @@ func formatSID(data []byte) (string, error) {
 		fmt.Fprintf(&sb, "-%d", binary.LittleEndian.Uint32(data[8+i*4:]))
 	}
 	return sb.String(), nil
+}
+
+// maxExactJSONInt is the largest integer a JSON number holds exactly. Above
+// it, encoders that parse into a float64 lose precision silently, so we quote.
+const maxExactJSONInt = uint64(1) << 53
+
+// MarshalJSON renders the value according to its declared type: numbers stay
+// numbers, hex types keep their hex form, binary is base64, times are RFC 3339.
+func (v Value) MarshalJSON() ([]byte, error) {
+	if v.IsAbsent() {
+		return []byte("null"), nil
+	}
+	switch v.Type {
+	case ValString, ValGuid, ValSid:
+		return json.Marshal(v.str)
+	case ValBinary:
+		return json.Marshal(base64.StdEncoding.EncodeToString(v.raw))
+	case ValBool:
+		return json.Marshal(v.num != 0)
+	case ValInt8:
+		return json.Marshal(int8(v.num))
+	case ValInt16:
+		return json.Marshal(int16(v.num))
+	case ValInt32:
+		return json.Marshal(int32(v.num))
+	case ValUInt8:
+		return json.Marshal(uint8(v.num))
+	case ValUInt16:
+		return json.Marshal(uint16(v.num))
+	case ValUInt32:
+		return json.Marshal(uint32(v.num))
+	case ValInt64:
+		n := int64(v.num)
+		if n > int64(maxExactJSONInt) || n < -int64(maxExactJSONInt) {
+			return json.Marshal(strconv.FormatInt(n, 10))
+		}
+		return json.Marshal(n)
+	case ValUInt64, ValSizeT:
+		if v.num >= maxExactJSONInt {
+			return json.Marshal(strconv.FormatUint(v.num, 10))
+		}
+		return json.Marshal(v.num)
+	case ValReal32:
+		return json.Marshal(float32(math.Float32frombits(uint32(v.num))))
+	case ValReal64:
+		return json.Marshal(math.Float64frombits(v.num))
+	case ValHexInt32, ValHexInt64, ValFileTime:
+		return json.Marshal(v.String())
+	case ValBinXML:
+		if v.node != nil {
+			return json.Marshal(v.node)
+		}
+		return []byte("null"), nil
+	}
+	return nil, fmt.Errorf("go_evtx: cannot marshal value type %s", v.Type)
 }

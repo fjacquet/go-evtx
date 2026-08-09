@@ -1,6 +1,7 @@
 package evtx
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -163,5 +164,59 @@ func TestDecodeValue_Binary(t *testing.T) {
 	}
 	if s := v.String(); s != "48656c6c6f" {
 		t.Errorf("String() = %q, want %q", s, "48656c6c6f")
+	}
+}
+
+func TestValue_MarshalJSON(t *testing.T) {
+	mk := func(typ ValueType, data []byte) Value {
+		v, err := decodeValue(typ, data)
+		if err != nil {
+			t.Fatalf("decodeValue(%s): %v", typ, err)
+		}
+		return v
+	}
+	tests := []struct {
+		name string
+		v    Value
+		want string
+	}{
+		{"absent", mk(ValUInt16, nil), `null`},
+		{"null type", mk(ValNull, nil), `null`},
+		{"uint32 is a number", mk(ValUInt32, []byte{0x2a, 0, 0, 0}), `42`},
+		{"bool", mk(ValBool, []byte{0x01, 0, 0, 0}), `true`},
+		{"string", mk(ValString, []byte{'h', 0, 'i', 0}), `"hi"`},
+		{"hex keeps hex", mk(ValHexInt64, []byte{0x10, 0, 0, 0, 0, 0, 0, 0}), `"0x0000000000000010"`},
+		{"sid", mk(ValSid, []byte{0x01, 0x01, 0, 0, 0, 0, 0, 0x05, 0x12, 0, 0, 0}), `"S-1-5-18"`},
+		{"binary is base64", mk(ValBinary, []byte{0xde, 0xad}), `"3q0="`},
+		{"small uint64 stays a number",
+			mk(ValUInt64, []byte{0x01, 0, 0, 0, 0, 0, 0, 0}), `1`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.v)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if string(b) != tc.want {
+				t.Errorf("Marshal = %s, want %s", b, tc.want)
+			}
+		})
+	}
+}
+
+// A JSON number cannot hold more than 2^53 exactly. Keywords and
+// EventRecordID are 64-bit and reach that range, so large values become
+// strings rather than being silently rounded in a downstream pipeline.
+func TestValue_MarshalJSON_LargeUint64BecomesString(t *testing.T) {
+	v, err := decodeValue(ValUInt64, []byte{0, 0, 0, 0, 0, 0, 0x20, 0}) // 2^53
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `"9007199254740992"` {
+		t.Errorf("Marshal = %s, want a quoted string at 2^53", b)
 	}
 }
