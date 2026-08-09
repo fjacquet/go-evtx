@@ -7,11 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-09
+
+Windows reads the files this library writes, and this library reads the files
+Windows writes. Neither was true in 0.6.0.
+
+### Fixed
+
+- **`EventLogRecord.ToXml()` and `Get-WinEvent` rejected every file go-evtx
+  had ever produced** — `"The data is invalid."`, on records that
+  `EventLogReader` itself read without complaint. The cause was five bytes per
+  record: an `OptionalSubstitution`'s *token* declares the field's own type,
+  while its entry in the *substitution array* declares `NULL` when the value
+  is absent. go-evtx wrote `NULL` in both places. That combination occurs zero
+  times in 27 million structural observations across 320 398 real records; the
+  correct one occurs 1.15 million times. `Correlation/@ActivityID` and
+  `@RelatedActivityID` now declare `Guid`, `Execution/@ProcessID` and
+  `@ThreadID` declare `UInt32`, `Security/@UserID` declares `Sid`.
+
+  Verified on a Windows VM and then in CI, run `31331708365`, `head_sha`
+  `78c1894`: `ToXml ok`, both `Get-WinEvent` orderings at 403 records, and the
+  content assertion passing. `docs/format-baseline.md` row 22.
+
+- **The decoder refused a quarter of all real records.** Three causes, all
+  measured against the corpus rather than guessed:
+  - value type `0x81`, an array of UTF-16 strings, was rejected by a guard
+    whose comment claimed "measured zero occurrences" — 22 036 records carry
+    one;
+  - a template's declared type disagreeing with the substitution array's was
+    treated as fatal, when libyal documents exactly that for `SizeT`, whose
+    pointer width only the array knows — 62 089 records;
+  - `SysTime` was unimplemented — 8 records.
+
+  Local corpus decode: 73.8 % → **99.995 %**.
+
+- `SysTime` now rejects out-of-range components instead of letting
+  `time.Date` normalise month 13 into January of the next year.
+
 ### Added
 
 - Generic strict BinXML decoding: any Windows-generated `.evtx` file can be
   read, with values carrying their declared type and JSON encoding that
   preserves it.
+- A corpus fact dumper and a structural shape census
+  (`corpus_scan_test.go`, `corpus_shape_test.go`), both skipped unless pointed
+  at a corpus. This is how the `ToXml` defect was found: census what Windows
+  writes, profile what go-evtx writes, and list every shape only go-evtx
+  emits. The list had one entry. `testdata/shape-census.json` is the committed
+  result — 68 shapes, no names and no values.
 
 ### Changed
 
@@ -19,6 +62,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Reader.ReadEvent()`, which returns a typed `Event`. The previous decoder
   assumed go-evtx's own template and returned empty fields with fabricated
   names on any real Windows file, without reporting an error.
+
+### Removed
+
+- **`testdata/system.evtx`.** Every format rule this project encoded was
+  derived from that one 1601-record sample, and the same file was then used to
+  assert the rules were right — an assertion that cannot fail when the
+  derivation is wrong. It did not fail; the rules were wrong. No `.evtx` is
+  tracked now, and `isExcludedFixture` refuses any file by that name. The
+  consequence is stated rather than hidden: CI no longer checks the chunk
+  hash-table rules against a real file. See `testdata/README.md`.
+- **The format bisection harness** — eleven `cmd/` packages,
+  `binxml_variants.go` and its test, 3067 lines. Its results stay in
+  `docs/format-baseline.md`. `Format Verify` drops from 28 jobs to 5,
+  including all eleven that had been permanently red and therefore mute.
+
+### Known limitations
+
+- Records are not 8-byte aligned and carry no fragment EOF token, where real
+  Windows does both on 37 364 of 37 364 measured records. Windows reads
+  go-evtx files regardless.
+- Each record re-declares its template inline; real Windows declares one per
+  chunk and points back at it.
+- The template hash-table bucket rule is correct for format 3.1 and is at
+  chance on 3.2. The 3.2 rule is unknown. Reading is unaffected.
+- `AnsiString` is rejected, not guessed: the format carries no codepage.
 
 ## [0.6.0] - 2026-08-08
 
@@ -150,7 +218,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/fjacquet/go-evtx/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/fjacquet/go-evtx/compare/v0.5.0...v0.6.0
 [0.4.0]: https://github.com/fjacquet/go-evtx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fjacquet/go-evtx/compare/v0.2.0...v0.3.0

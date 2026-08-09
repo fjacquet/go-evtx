@@ -9,13 +9,23 @@
 
 A pure Go library for reading and writing Windows Event Log (`.evtx`) binary files — no Windows, no CGO, no external dependencies.
 
-Generated files are parseable by [python-evtx](https://github.com/williballenthin/python-evtx), but this is not exercised in CI — tracked for v0.7.0 alongside the `Get-WinEvent` job below.
+**Files this library writes are read by Windows itself.** Every CI run
+generates a 403-record file and hands it to a Windows runner, which opens it
+with `EventLogReader`, reads every record, renders each one through
+`EventLogRecord.ToXml()`, and enumerates the log with `Get-WinEvent` in both
+orderings. The same file is parsed by
+[python-evtx](https://github.com/williballenthin/python-evtx) 0.8.1 on a Linux
+runner. All of it is a merge gate — see
+[`docs/format-baseline.md`](docs/format-baseline.md) for the measurement
+record, which includes the seventeen tasks where this did *not* work.
 
-> **Windows Event Viewer compatibility is not yet verified.** The per-chunk
-> string and template hash tables are currently written as zeros, which some
-> parsers require. This is tracked for v0.7.0, where a `Get-WinEvent` CI job
-> will either confirm the claim or retire it. Velociraptor compatibility is
-> untested — do not rely on it.
+**Files Windows writes are read by this library.** The decoder is generic and
+strict: it reads 320 382 of 320 398 records across a 281-file corpus of real
+logs in both format versions (3.1 and 3.2). The 16 it refuses carry
+`AnsiString`, which the format stores without a codepage — decoding it would
+mean guessing.
+
+Velociraptor compatibility is untested — do not rely on it.
 
 > Full requirements and roadmap: [docs/PRD.md](docs/PRD.md)
 
@@ -83,16 +93,29 @@ if err != nil {
 defer r.Close()
 
 for {
-    rec, err := r.ReadRecord()
+    ev, err := r.ReadEvent()
     if errors.Is(err, evtx.ErrNoMoreRecords) {
         break
     }
     if err != nil {
         log.Fatal(err)
     }
-    fmt.Println(rec.EventID, rec.Provider, rec.Fields["ObjectName"])
+    fmt.Println(ev.System.EventID, ev.System.Provider.Name, ev.System.Computer)
+    for _, d := range ev.EventData {
+        fmt.Printf("  %s = %s\n", d.Name, d.Value)
+    }
 }
 ```
+
+`Event` carries a typed `System` block — provider, event ID, level, keywords,
+channel, computer, process and thread — plus `EventData` as an ordered slice of
+named values, and `UserData` for events that use it instead.
+
+Every value keeps the type the file declared it with, rather than being
+flattened to a string. That matters for JSON: `json.Marshal(ev)` renders a
+`FileTime` as an RFC3339 timestamp, a `HexInt64` as `0x…`, a SID and a GUID in
+their canonical text forms, `Binary` as base64, and a `uint64` too large for a
+double as a quoted string rather than silently losing precision.
 
 Use `ReadRaw` to retrieve the raw BinXML payload, which can be passed directly to `WriteRaw` to copy records between files.
 
@@ -122,9 +145,32 @@ Missing keys default to `""`.
 
 ## Limitations
 
+Reading is general; writing is not. The asymmetry is deliberate and worth
+knowing before you choose this library.
+
+**Writing**
+
+- `WriteRecord` emits one fixed template: a `<System>` block plus a 12-field
+  `EventData` schema. Arbitrary Windows event schemas are not supported. Use
+  `WriteRaw` to copy records verbatim from an existing file.
 - `WriteRecord` and `WriteRaw` must not be mixed in the same session.
-- Fixed 12-field `EventData` schema; arbitrary Windows event schemas are not yet supported.
-- BinXML decoder targets the library's own template format; complex Windows-native templates may not parse correctly.
+- Each record re-declares its template inline. Real Windows writes the
+  definition once per chunk and points later records at it, so a go-evtx file
+  is larger than it needs to be. Tracked for v0.7.1.
+- Records are not 8-byte aligned and carry no fragment EOF token, where real
+  Windows does both on every record measured. Windows reads our files anyway;
+  this is a conformance gap, not a defect. Tracked for v0.7.1.
+
+**Reading**
+
+- `AnsiString` values are rejected rather than guessed at: the format carries
+  no codepage. 16 records in a 320 398-record corpus.
+- The template hash-table bucket rule this library writes is correct for
+  format 3.1 and does not hold for 3.2 — the 3.2 rule is not known. Reading is
+  unaffected; only files go-evtx *writes* use it.
+- CI checks the hash-table rules against no real file, because the repository
+  tracks none. See [`testdata/README.md`](testdata/README.md) for why that is
+  the lesser evil, and how to run those tests locally.
 
 ## License
 
