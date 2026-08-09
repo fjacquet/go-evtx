@@ -100,20 +100,66 @@ jobs:
 
           $expected = (Get-Content artifacts/expected.json | ConvertFrom-Json)
 
-          # Get-WinEvent returns a scalar for a single record; coerce to an array.
-          $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction Stop)
+          # Get-WinEvent enumerates newest-first by default. Stage 2 above
+          # reads forward and (as of this task) succeeds; reverse iteration
+          # depends on metadata forward reading never touches --
+          # LastEventRecordNumber/LastEventRecordDataOffset in the chunk
+          # header, LastChunkNumber/NextRecordIdentifier in the file header.
+          # Run both orderings independently and report each on its own line
+          # -- do not replace one with the other, since the difference
+          # between them is itself the finding.
 
-          if ($events.Count -ne $expected.record_count) {
-              throw "record count mismatch: got $($events.Count), want $($expected.record_count)"
+          # Default order (newest-first) — the historical assertion.
+          $events = $null
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction Stop)
+              Write-Host "GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "GETWINEVENT default: FAILED - $($_.Exception.Message)"
           }
 
-          # Count alone proves nothing — a parser returning the right number of
-          # empty records would pass. Check content survives the round trip.
-          $first = $events[0]
-          $xml = [xml]$first.ToXml()
-          $objectName = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ObjectName' }).'#text'
-          if ($objectName -ne $expected.object_names[0]) {
-              throw "ObjectName mismatch: got '$objectName', want '$($expected.object_names[0])'"
+          # Forward order.
+          $oldest = $null
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path artifacts/generated.evtx -Oldest -ErrorAction Stop)
+              Write-Host "GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
           }
 
-          Write-Host "OK: $($events.Count) records, ObjectName round-trips"
+          # Run the existing content assertions against whichever variant
+          # succeeded, so a pass still means something. Prefer the default
+          # order (the historical assertion) when both succeed.
+          $verified = if ($null -ne $events) { $events } elseif ($null -ne $oldest) { $oldest } else { $null }
+
+          if ($null -ne $verified) {
+              if ($verified.Count -ne $expected.record_count) {
+                  throw "record count mismatch: got $($verified.Count), want $($expected.record_count)"
+              }
+
+              # Count alone proves nothing — a parser returning the right number of
+              # empty records would pass. Check content survives the round trip.
+              $first = $verified[0]
+              $xml = [xml]$first.ToXml()
+              $objectName = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ObjectName' }).'#text'
+              if ($objectName -ne $expected.object_names[0]) {
+                  throw "ObjectName mismatch: got '$objectName', want '$($expected.object_names[0])'"
+              }
+
+              Write-Host "OK: $($verified.Count) records, ObjectName round-trips (variant: $(if ($null -ne $events) { 'default' } else { '-Oldest' }))"
+          }
+
+          # The job must still fail while either ordering is broken -- do
+          # not weaken this to "at least one succeeded". No continue-on-error,
+          # no softened assertion: report both failures together so a rerun
+          # doesn't need to be re-triaged from scratch.
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed: $($failures -join '; ')"
+          }
