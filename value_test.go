@@ -51,6 +51,16 @@ func TestDecodeValue_ZeroLengthIsAbsentNotError(t *testing.T) {
 	}
 }
 
+// TestDecodeValue_UnknownTypeAtZeroLengthIsError is carried finding B:
+// decodeValue used to return an absent value for ANY zero-length data before
+// checking that the declared type byte is recognised, so [size 0, type 0x99]
+// decoded silently instead of erroring — a silent accept of malformed input.
+func TestDecodeValue_UnknownTypeAtZeroLengthIsError(t *testing.T) {
+	if _, err := decodeValue(ValueType(0x99), nil); err == nil {
+		t.Fatal("expected an error for an unknown type at zero length, got none")
+	}
+}
+
 func TestDecodeValue_WrongWidthIsError(t *testing.T) {
 	if _, err := decodeValue(ValUInt32, []byte{0x01, 0x02}); err == nil {
 		t.Fatal("expected an error for a 2-byte UInt32")

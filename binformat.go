@@ -14,7 +14,9 @@ package evtx
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
+	"math"
 	"time"
 	"unicode/utf16"
 )
@@ -48,9 +50,23 @@ func toFILETIME(t time.Time) uint64 {
 }
 
 // fromFILETIME converts a Windows FILETIME value to a Go time.Time.
-func fromFILETIME(ft uint64) time.Time {
-	ns := (int64(ft) - filetimeEpochDelta) * 100
-	return time.Unix(0, ns).UTC()
+//
+// An out-of-range ft is reported as an error rather than silently wrapping:
+// (int64(ft)-filetimeEpochDelta)*100 overflows int64 for any FILETIME far
+// below the Unix epoch — ft == 0 included, which is exactly what a corrupt
+// or absent timestamp field yields. Realistic post-1970 timestamps are well
+// inside the safe range.
+func fromFILETIME(ft uint64) (time.Time, error) {
+	if ft > math.MaxInt64 {
+		return time.Time{}, fmt.Errorf("go_evtx: FILETIME %d exceeds int64 range", ft)
+	}
+	delta := int64(ft) - filetimeEpochDelta
+	const maxDelta = math.MaxInt64 / 100
+	const minDelta = math.MinInt64 / 100
+	if delta > maxDelta || delta < minDelta {
+		return time.Time{}, fmt.Errorf("go_evtx: FILETIME %d is out of range for a 100ns Unix offset", ft)
+	}
+	return time.Unix(0, delta*100).UTC(), nil
 }
 
 // encodeUTF16LE encodes a Go string as a length-prefixed, null-terminated UTF-16LE byte slice.

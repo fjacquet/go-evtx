@@ -107,12 +107,19 @@ func (v Value) Bytes() []byte { return v.raw }
 // Node returns the decoded fragment of a BinXml value, or nil.
 func (v Value) Node() *Node { return v.node }
 
-// Time converts a FileTime value. ok is false for any other type.
+// Time converts a FileTime value. ok is false for any other type, and for a
+// FileTime whose value is out of fromFILETIME's representable range (see its
+// doc comment) — such a value is not usable as a time, so it is reported the
+// same way a wrong type is, rather than as a plausible-looking wrong time.
 func (v Value) Time() (time.Time, bool) {
 	if v.absent || v.Type != ValFileTime {
 		return time.Time{}, false
 	}
-	return fromFILETIME(v.num), true
+	t, err := fromFILETIME(v.num)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // String renders the value for human consumption. JSON uses MarshalJSON, which
@@ -145,7 +152,13 @@ func (v Value) String() string {
 	case ValHexInt64:
 		return fmt.Sprintf("0x%016x", v.num)
 	case ValFileTime:
-		return fromFILETIME(v.num).UTC().Format(time.RFC3339Nano)
+		t, err := fromFILETIME(v.num)
+		if err != nil {
+			// Out of range rather than silently wrong: this deliberately does
+			// not look like a valid RFC3339 timestamp.
+			return fmt.Sprintf("invalid FILETIME %d", v.num)
+		}
+		return t.UTC().Format(time.RFC3339Nano)
 	case ValBinary:
 		return fmt.Sprintf("%x", v.raw)
 	}
@@ -168,6 +181,15 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 	if t&valArrayFlag != 0 {
 		return Value{}, fmt.Errorf("go_evtx: array value type %#02x is not supported "+
 			"(measured zero occurrences across the corpus)", uint8(t))
+	}
+	// A type must be recognised before zero-length data is accepted as
+	// "absent" — checking this first, rather than after the zero-length
+	// short-circuit below, is what keeps [size 0, type 0x99] an error while
+	// testdata/system.evtx's own EventID/@Qualifiers, encoded as
+	// [size 0, type UNSIGNED_WORD], still decodes as absent: UNSIGNED_WORD is
+	// a recognised type, 0x99 is not.
+	if _, ok := valueTypeNames[t]; !ok {
+		return Value{}, fmt.Errorf("go_evtx: unknown value type %#02x", uint8(t))
 	}
 	if len(data) == 0 {
 		return Value{Type: t, absent: true}, nil
@@ -238,6 +260,10 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 		return Value{}, fmt.Errorf("go_evtx: value type %s is not implemented "+
 			"(zero occurrences across the measured corpus)", t)
 	}
+	// Unreachable while fixedWidths/this switch together cover every entry of
+	// valueTypeNames (checked above) — kept as a safety net against the two
+	// tables drifting apart, not as the path that actually rejects unknown
+	// types.
 	return Value{}, fmt.Errorf("go_evtx: unknown value type %#02x", uint8(t))
 }
 

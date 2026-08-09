@@ -52,6 +52,39 @@ func TestToFILETIME(t *testing.T) {
 	}
 }
 
+// TestFromFILETIME_RoundTrip verifies the ordinary case: a modern timestamp
+// converted to FILETIME and back returns exactly what went in, with no error.
+func TestFromFILETIME_RoundTrip(t *testing.T) {
+	want := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	got, err := fromFILETIME(toFILETIME(want))
+	if err != nil {
+		t.Fatalf("fromFILETIME: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Errorf("fromFILETIME(toFILETIME(%v)) = %v, want %v", want, got, want)
+	}
+}
+
+// TestFromFILETIME_OutOfRangeIsError is carried finding A: ft == 0 is exactly
+// what a corrupt or absent timestamp field yields, and the pre-fix formula
+// (int64(ft)-filetimeEpochDelta)*100 silently overflows int64 for it instead
+// of failing. A decoder built to read untrusted forensic files must detect
+// this rather than return a silently wrong time.
+func TestFromFILETIME_OutOfRangeIsError(t *testing.T) {
+	if _, err := fromFILETIME(0); err == nil {
+		t.Fatal("fromFILETIME(0) must report an error, not a silently wrapped time")
+	}
+}
+
+// TestFromFILETIME_AboveInt64RangeIsError verifies the other overflow
+// direction: a FILETIME so large that int64(ft) itself would reinterpret as
+// negative must also be rejected, not silently misread.
+func TestFromFILETIME_AboveInt64RangeIsError(t *testing.T) {
+	if _, err := fromFILETIME(math.MaxUint64); err == nil {
+		t.Fatal("fromFILETIME(MaxUint64) must report an error")
+	}
+}
+
 // TestEncodeUTF16LE verifies the length-prefixed null-terminated UTF-16LE encoding.
 func TestEncodeUTF16LE(t *testing.T) {
 	cases := []struct {

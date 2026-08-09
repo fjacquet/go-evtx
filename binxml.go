@@ -37,6 +37,7 @@ const (
 	binXMLNormalSubstitution   = 0x0D // Normal substitution token
 	binXMLOptionalSubstitution = 0x0E // Optional substitution token (F12c)
 	binXMLValueText            = 0x05 // Value token: literal (non-substituted) value
+	binXMLEOF                  = 0x00 // Fragment end-of-file token (W1, v0.7.0 Task 7)
 
 	binXMLTypeNull     = 0x00 // Value type: NULL — no data (F12c)
 	binXMLTypeString   = 0x01 // Value type: UTF-16LE string (WSTRING)
@@ -351,6 +352,29 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 
 	// 5. Substitution array.
 	writeSubstitutionArray(out, subs)
+
+	// 6. Fragment EOF token (W1, v0.7.0 Task 7). Real Windows always writes a
+	// single 0x00 immediately after the substitution array — measured on all
+	// 1601 records of testdata/system.evtx and on 100,683 of 100,683 records
+	// across the wider corpus (docs/format-baseline.md). Without this byte no
+	// go-evtx-written record can pass decodeBinXMLFragment's full-consumption
+	// check, which every real Windows record satisfies exactly this way; this
+	// project shipped without it through v0.6.0 because the reader that
+	// existed until then never checked for it.
+	out.WriteByte(binXMLEOF)
+
+	// 7. 8-byte record alignment (W2, v0.7.0 Task 7). size % 8 == 0 holds for
+	// 100,683 of 100,683 real records, where size = 24 (record header) +
+	// payload + 4 (trailing size copy) — see wrapEventRecord. Real Windows
+	// padding is measured NON-zero (docs/format-baseline.md); go-evtx
+	// zero-fills instead. That is this writer's own choice, not something the
+	// format requires: decodeBinXMLFragment (the read side) only checks the
+	// padding's length, never its content.
+	const evtxRecordTrailerSize = 4 // trailing Size copy, see wrapEventRecord
+	onDiskSize := evtxRecordHeaderSize + out.Len() + evtxRecordTrailerSize
+	if pad := (8 - onDiskSize%8) % 8; pad > 0 {
+		out.Write(make([]byte, pad))
+	}
 
 	return binXMLResult{payload: out.Bytes(), names: names, templates: templates}
 }

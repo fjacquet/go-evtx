@@ -201,23 +201,67 @@ for the trailing size copy]** via `wrapEventRecord` (`binformat.go`):
 [end-4:end]           Size copy (same value as offset 4)
 ```
 
-**Known gap: 8-byte record alignment (F2) was never implemented.** The
-original spec (`docs/superpowers/specs/2026-08-08-durability-and-format-correctness-design.md`,
+**8-byte record alignment (F2), and the missing fragment EOF token (W1),
+were both fixed in `buildBinXML` (`binxml.go`) — v0.7.0's
+`2026-08-09-generic-evtx-decoder` plan, Task 7.** F2 stayed genuinely
+unimplemented for the reason the paragraph below (kept for its own history)
+describes, through this release's original writer-conformance effort. The
+generic-decoder plan's Task 5 review then found a second, previously
+undocumented gap while building the strict reader: `buildBinXML` never wrote
+a fragment EOF token (`0x00`) after the substitution array at all — real
+Windows always does, measured on all 1601 records of `testdata/system.evtx`
+and 100,683 of 100,683 records across the wider corpus (`docs/format-baseline.md`).
+Fixing F2 alone (padding with no EOF token first) would not satisfy a strict
+reader's full-consumption check, so both were fixed together: `buildBinXML`
+now appends a single `0x00` immediately after `writeSubstitutionArray`, then
+zero-pads (real Windows padding is measured non-zero; the decoder only
+checks the padding's *length*, never its content, so zero-fill is this
+writer's own choice, not a format requirement) so that
+`24 (record header) + len(payload) + 4 (trailing size copy)` is a multiple
+of 8. Both bytes-added steps live *inside* the payload `buildBinXML` returns
+— `wrapEventRecord`'s header and trailing size copy are fixed-size and have
+nowhere else to put them — which is a narrower placement than the original
+spec's "between the BinXML payload and the trailing size copy" framing
+describes below, but is not "inside the BinXML token stream" in the sense
+that framing warns against: both bytes sit strictly after the fragment's own
+terminating EOF token, which is exactly where the strict reader
+(`binxml_decode.go`'s `decodeBinXMLFragment`, `top` branch) requires them.
+`testdata/binxml-golden.bin` was regenerated in the same commit (it grew by
+5 bytes: 1 EOF token + 4 padding, for the fixture's own field set). **This
+does not fix the still-unsolved `ToXml` rejection** — the coordinator
+authorizing this fix had independently probed all four combinations
+(as-is, +EOF, +alignment, +both) via hand-built `WriteRaw` payloads on the
+Windows VM before authorizing it; all four still failed with
+`The data is invalid.` These are real, independent conformance defects
+worth fixing on their own merits, not candidates for the unsolved defect.
+The real-Windows verdict for this specific writer change (via the normal
+`gen-fixture` / `format-verify.yml` CI path, not the hand-built VM probe
+above) had not yet been measured as of this edit — `python-evtx` was not
+installed in the environment implementing the fix, so the differential
+check could not be run locally; see `docs/format-baseline.md` for whatever
+CI measurement follows.
+
+**Original paragraph, kept for the history of why F2 was deferred rather than
+skipped:** the original spec
+(`docs/superpowers/specs/2026-08-08-durability-and-format-correctness-design.md`,
 §F2) calls for rounding every record's `Size` up to the next multiple of 8,
 with the padding bytes placed *between* the BinXML payload and the trailing
 size copy — never inside the BinXML token stream itself, which would corrupt
 parsing. A full task brief for it exists
 (`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-7-brief.md`,
 "Task 7b: 8-byte record alignment (F2)"), including the planned
-`alignment_test.go`. **It was never executed**: during the Task 7 reorder,
-the original alignment task was renamed "Task 7b" and the slot was filled
-instead by the B1/B2/B3 fixes (fragment header, nested template fragment
-header, chunk `[120:124]`) — a different, unrelated set of findings. No
-commit in this release's history touches record alignment; `alignment_test.go`
-does not exist; `wrapEventRecord`'s `Size` computation is unchanged from
-before the release. This is a real, unresolved gap in this release's own
-coverage, not a candidate that was tried and eliminated — flag it for
-whoever picks this up next.
+`alignment_test.go` (still never written — the alignment coverage that
+exists instead is `nodecollect_test.go`'s golden-payload comparison and
+`binxml_decode.go`'s own strict-decoder round trip). During the original
+Task 7 reorder, the alignment task was renamed "Task 7b" and its slot was
+filled instead by the B1/B2/B3 fixes (fragment header, nested template
+fragment header, chunk `[120:124]`) — a different, unrelated set of
+findings — and no commit in that effort's history touched record alignment.
+It remained a real, unresolved gap in that release's own coverage,
+deliberately deferred (not eliminated) to protect the row-to-row CI
+comparisons in `docs/format-baseline.md`, until the generic-decoder plan's
+Task 7 above overrode that deferral once a local Windows oracle made the
+round trip cost seconds rather than a CI run.
 
 ### The per-chunk hash tables
 
@@ -764,7 +808,7 @@ verbatim CI output behind every "changed"/"no change" cell.
 | F13b | `<Provider>` gains a second attribute, `Guid` | `2e86005` | none (stayed green) | see F13a |
 | F13c | `<EventID>` gains a NULL `Qualifiers` attribute | `2e86005` | none (stayed green) | see F13a |
 | F15 | Substitution-array `String` values carried a spurious null terminator | `b41ac76` | none (stayed green) | none |
-| F2 | 8-byte record alignment | **never implemented** | — | — |
+| F2 | 8-byte record alignment | fixed later, `2026-08-09-generic-evtx-decoder` Task 7 (not this release's own commit set — see "Event record wrapper" above) | not yet measured | not yet measured |
 
 **F13's attribution is genuinely unresolved, not simplified for this table.**
 F13a/F13b/F13c were deliberately batched against one Step-1 measurement (the
@@ -907,12 +951,14 @@ metadata.
   disqualifying, but a genuinely shared/cache-referenced template has never
   been attempted from go-evtx's own encoder. Named here as the most concrete
   untried structural lead.
-- **8-byte record alignment (F2) was never implemented** (see the Event
-  record wrapper section above) — not eliminated, simply never attempted
-  after the Task 7 reorder dropped it. Given that every other named
-  candidate in the original spec and every candidate discovered along the
-  way has now been tried, this is the most concrete *unattempted* item
-  remaining, alongside the cache-referenced-template lead above.
+- **8-byte record alignment (F2) is no longer unattempted** — fixed, along
+  with the previously undocumented missing fragment EOF token (W1), by the
+  `2026-08-09-generic-evtx-decoder` plan's Task 7 (see the Event record
+  wrapper section above). Confirmed via hand-built `WriteRaw` payloads on the
+  Windows VM (all four EOF/alignment combinations) that this does **not**
+  resolve the still-unsolved `ToXml` rejection, so the cache-referenced-
+  template lead above is now the most concrete untried structural item
+  remaining.
 - **`ToXml()` itself is not exonerated or implicated by the Task 9e
   finding.** Every variant that experiment measured that *reached*
   `ToXml()` (the four-field variant, the main fixture) still failed there

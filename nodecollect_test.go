@@ -87,10 +87,14 @@ func goldenFields() map[string]string {
 }
 
 // TestBuildBinXML_PayloadUnchangedByCollection compares against bytes captured
-// from the pre-refactor encoder. Task 4 is plumbing: it must not alter a single
-// byte of the payload. Task 6 changes the chunk header, not the payload, and
-// Task 7 pads the record around the payload rather than the payload itself, so
-// this golden file stays valid for the whole plan.
+// from the pre-refactor encoder. Task 4 was plumbing: it did not alter a
+// single byte of the payload, nor did Task 6 (which changed the chunk header,
+// not the payload). That held only through Task 6 — v0.7.0 Task 7 fixed W1/W2
+// (buildBinXML now appends the fragment EOF token and pads to 8-align the
+// on-disk record, both inside the payload buildBinXML returns, since
+// wrapEventRecord's own header/trailer are fixed size and have nowhere else
+// to put them), so the golden file was deliberately regenerated in that same
+// commit; this comparison protects the encoding from here forward.
 //
 // If a later change deliberately alters the encoding, it regenerates the golden
 // file in the same commit and says so in the commit message.

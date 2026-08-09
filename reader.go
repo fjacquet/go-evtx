@@ -9,14 +9,14 @@
 //	defer r.Close()
 //
 //	for {
-//	    rec, err := r.ReadRecord()
+//	    ev, err := r.ReadEvent()
 //	    if errors.Is(err, evtx.ErrNoMoreRecords) {
 //	        break
 //	    }
 //	    if err != nil {
 //	        log.Fatal(err)
 //	    }
-//	    fmt.Println(rec.EventID, rec.Provider)
+//	    fmt.Println(ev.System.EventID, ev.System.Provider.Name)
 //	}
 package evtx
 
@@ -26,23 +26,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 )
 
-// ErrNoMoreRecords is returned by ReadRaw and ReadRecord when all records have been read.
+// ErrNoMoreRecords is returned by ReadRaw and ReadEvent when all records have been read.
 var ErrNoMoreRecords = errors.New("go_evtx: no more records")
-
-// Record holds the decoded fields of a single EVTX event.
-type Record struct {
-	RecordID    uint64
-	Timestamp   time.Time         // from event record header (FILETIME)
-	EventID     uint16            // from System/EventID substitution
-	Level       uint16            // from System/Level substitution (0 = LogAlways)
-	Provider    string            // from System/Provider/@Name
-	Computer    string            // from System/Computer
-	TimeCreated time.Time         // from System/TimeCreated/@SystemTime
-	Fields      map[string]string // EventData Name → value
-}
 
 // Reader reads EVTX event records sequentially from a file.
 // All exported methods are safe for concurrent use.
@@ -54,6 +41,12 @@ type Reader struct {
 	buf       []byte // current chunk (evtxChunkSize bytes)
 	recOff    int    // byte offset within buf of the next record to read
 	freeOff   int    // byte offset within buf where records end (FreeSpaceOffset)
+
+	// templates caches this chunk's template definitions and owns the chunk
+	// buffer it was built for (templateCache's own invariant). Offsets in the
+	// BinXML stream are chunk-relative, so this MUST be rebuilt whenever a new
+	// chunk is loaded — see loadChunk.
+	templates *templateCache
 }
 
 // Open opens an .evtx file for sequential reading.
@@ -102,38 +95,47 @@ func (r *Reader) loadChunk(idx int) error {
 		return fmt.Errorf("go_evtx: invalid chunk magic at index %d", idx)
 	}
 	r.chunkIdx = idx
+	// r.buf was just refilled in place; any template definitions cached
+	// against the previous chunk's bytes now alias the wrong data. Rebuild
+	// rather than reset-on-next-use so there is no window where a stale cache
+	// could be queried.
+	r.templates = newTemplateCache(r.buf)
 	r.recOff = int(evtxChunkHeaderSize)                       // records begin after 512-byte chunk header
 	r.freeOff = int(binary.LittleEndian.Uint32(r.buf[48:52])) // FreeSpaceOffset
 	return nil
 }
 
 // nextRecord advances to and parses the next event record header.
-// Returns the raw BinXML payload (without the 24-byte record header or the trailing size copy).
+// Returns the raw BinXML payload (without the 24-byte record header or the
+// trailing size copy) and payloadChunkOffset, the chunk-relative byte offset
+// of that same payload within r.buf — ReadEvent needs the offset (to resolve
+// template and name references, which are chunk-relative) in addition to the
+// copy ReadRaw returns.
 //
 // CALLER MUST HOLD r.mu.
-func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, err error) {
+func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, payloadChunkOffset int, err error) {
 	for {
 		if r.recOff >= r.freeOff {
 			// Exhausted this chunk; try the next one.
 			if loadErr := r.loadChunk(r.chunkIdx + 1); loadErr != nil {
-				return 0, 0, nil, ErrNoMoreRecords
+				return 0, 0, nil, 0, ErrNoMoreRecords
 			}
 			continue
 		}
 
 		if r.recOff+24 > len(r.buf) {
-			return 0, 0, nil, fmt.Errorf("go_evtx: truncated record at offset %d", r.recOff)
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: truncated record at offset %d", r.recOff)
 		}
 		rec := r.buf[r.recOff:]
 
 		sig := binary.LittleEndian.Uint32(rec[0:4])
 		if sig != evtxRecordSignature {
-			return 0, 0, nil, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, r.recOff)
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, r.recOff)
 		}
 
 		size := int(binary.LittleEndian.Uint32(rec[4:8]))
 		if size < 28 || r.recOff+size > len(r.buf) {
-			return 0, 0, nil, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, r.recOff)
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, r.recOff)
 		}
 
 		recordID = binary.LittleEndian.Uint64(rec[8:16])
@@ -143,8 +145,9 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, err e
 		raw := make([]byte, size-24-4)
 		copy(raw, rec[24:size-4])
 
+		payloadOffset := r.recOff + 24
 		r.recOff += size
-		return recordID, ts, raw, nil
+		return recordID, ts, raw, payloadOffset, nil
 	}
 }
 
@@ -158,25 +161,40 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, err e
 func (r *Reader) ReadRaw() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, _, payload, err := r.nextRecord()
+	_, _, payload, _, err := r.nextRecord()
 	return payload, err
 }
 
-// ReadRecord reads and decodes the next event record.
+// ReadEvent reads and decodes the next event record.
 // Returns ErrNoMoreRecords when all records have been read.
-func (r *Reader) ReadRecord() (*Record, error) {
+//
+// A decode failure is returned for that record alone: record framing comes
+// from the 24-byte record header, independently of the BinXML payload, so the
+// Reader stays positioned on the next record and the caller chooses whether to
+// stop or skip. No partial Event is ever returned.
+func (r *Reader) ReadEvent() (*Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	recordID, ts, payload, err := r.nextRecord()
+
+	recordID, ts, payload, payloadOffset, err := r.nextRecord()
 	if err != nil {
 		return nil, err
 	}
-	rec := &Record{
-		RecordID:  recordID,
-		Timestamp: fromFILETIME(ts),
+	root, err := decodeRecordBinXML(r.templates, payloadOffset, len(payload))
+	if err != nil {
+		return nil, fmt.Errorf("go_evtx: chunk %d, record %d: %w", r.chunkIdx, recordID, err)
 	}
-	decodeBinXML(payload, rec)
-	return rec, nil
+	ev, err := eventFromNode(root)
+	if err != nil {
+		return nil, fmt.Errorf("go_evtx: chunk %d, record %d: %w", r.chunkIdx, recordID, err)
+	}
+	timestamp, err := fromFILETIME(ts)
+	if err != nil {
+		return nil, fmt.Errorf("go_evtx: chunk %d, record %d: %w", r.chunkIdx, recordID, err)
+	}
+	ev.RecordID = recordID
+	ev.Timestamp = timestamp
+	return ev, nil
 }
 
 // Close closes the underlying file.

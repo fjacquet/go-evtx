@@ -99,14 +99,14 @@ func ExampleReader() {
 	defer func() { _ = r.Close() }()
 
 	for {
-		rec, err := r.ReadRecord()
+		ev, err := r.ReadEvent()
 		if errors.Is(err, evtx.ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println(rec.EventID, rec.Provider, rec.Fields["ObjectName"])
+		fmt.Println(ev.System.EventID, ev.System.Provider.Name, ev.EventData)
 	}
-	// Output: 4663 Microsoft-Windows-Security-Auditing /mnt/share/report.xlsx
+	// Output: 4663 Microsoft-Windows-Security-Auditing [{SubjectUserSid } {SubjectUserName } {SubjectDomainName } {SubjectLogonId } {ObjectServer } {ObjectType } {ObjectName /mnt/share/report.xlsx} {HandleId } {AccessList } {AccessMask } {ProcessId } {ProcessName }]
 }

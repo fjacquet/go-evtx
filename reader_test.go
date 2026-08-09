@@ -53,9 +53,9 @@ func TestOpen_InvalidMagic(t *testing.T) {
 	}
 }
 
-// TestReadRecord_RoundTrip writes a record with all fields and reads it back,
-// verifying every field is decoded correctly.
-func TestReadRecord_RoundTrip(t *testing.T) {
+// TestReadEvent_AllFields writes a record with all fields and reads it back
+// with the generic decoder, verifying every field is decoded correctly.
+func TestReadEvent_AllFields(t *testing.T) {
 	ts := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 	fields := map[string]string{
 		"ProviderName":      "Microsoft-Windows-Security-Auditing",
@@ -82,25 +82,25 @@ func TestReadRecord_RoundTrip(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 
-	rec, err := r.ReadRecord()
+	ev, err := r.ReadEvent()
 	if err != nil {
-		t.Fatalf("ReadRecord: %v", err)
+		t.Fatalf("ReadEvent: %v", err)
 	}
 
-	if rec.RecordID != 1 {
-		t.Errorf("RecordID = %d, want 1", rec.RecordID)
+	if ev.RecordID != 1 {
+		t.Errorf("RecordID = %d, want 1", ev.RecordID)
 	}
-	if rec.EventID != 4663 {
-		t.Errorf("EventID = %d, want 4663", rec.EventID)
+	if ev.System.EventID != 4663 {
+		t.Errorf("EventID = %d, want 4663", ev.System.EventID)
 	}
-	if rec.Provider != "Microsoft-Windows-Security-Auditing" {
-		t.Errorf("Provider = %q, want %q", rec.Provider, "Microsoft-Windows-Security-Auditing")
+	if ev.System.Provider.Name != "Microsoft-Windows-Security-Auditing" {
+		t.Errorf("Provider.Name = %q, want %q", ev.System.Provider.Name, "Microsoft-Windows-Security-Auditing")
 	}
-	if rec.Computer != "myhost.example.com" {
-		t.Errorf("Computer = %q, want %q", rec.Computer, "myhost.example.com")
+	if ev.System.Computer != "myhost.example.com" {
+		t.Errorf("Computer = %q, want %q", ev.System.Computer, "myhost.example.com")
 	}
-	if !rec.TimeCreated.Equal(ts) {
-		t.Errorf("TimeCreated = %v, want %v", rec.TimeCreated, ts)
+	if !ev.System.TimeCreated.Equal(ts) {
+		t.Errorf("TimeCreated = %v, want %v", ev.System.TimeCreated, ts)
 	}
 
 	// Verify EventData fields.
@@ -118,10 +118,63 @@ func TestReadRecord_RoundTrip(t *testing.T) {
 		"ProcessId":         "0x0",
 		"ProcessName":       "",
 	}
+	got := make(map[string]string, len(ev.EventData))
+	for _, d := range ev.EventData {
+		got[d.Name] = d.Value.String()
+	}
 	for k, want := range wantFields {
-		if got := rec.Fields[k]; got != want {
-			t.Errorf("Fields[%q] = %q, want %q", k, got, want)
+		if got[k] != want {
+			t.Errorf("EventData[%q] = %q, want %q", k, got[k], want)
 		}
+	}
+}
+
+// The writer's own output must survive the generic decoder. This is the
+// round-trip that the old decoder made meaningless: it and the writer shared
+// the same wrong assumptions, so a green result proved only their mutual
+// agreement.
+func TestReadEvent_RoundTripsWriterOutput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rt.evtx")
+
+	w, err := New(path, RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.WriteRecord(4624, map[string]string{
+		"ProviderName": "TestProvider",
+		"ObjectName":   "C:\\secret.txt",
+	}); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	ev, err := r.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if ev.System.Provider.Name != "TestProvider" {
+		t.Errorf("Provider.Name = %q, want %q", ev.System.Provider.Name, "TestProvider")
+	}
+	if ev.System.EventID != 4624 {
+		t.Errorf("EventID = %d, want 4624", ev.System.EventID)
+	}
+	var found bool
+	for _, d := range ev.EventData {
+		if d.Name == "ObjectName" && d.Value.String() == "C:\\secret.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ObjectName not found in EventData: %+v", ev.EventData)
 	}
 }
 
@@ -204,18 +257,18 @@ func TestErrNoMoreRecords(t *testing.T) {
 	defer func() { _ = r.Close() }()
 
 	// Read the single record.
-	if _, err := r.ReadRecord(); err != nil {
-		t.Fatalf("ReadRecord: %v", err)
+	if _, err := r.ReadEvent(); err != nil {
+		t.Fatalf("ReadEvent: %v", err)
 	}
 	// Next read must return ErrNoMoreRecords.
-	_, err = r.ReadRecord()
+	_, err = r.ReadEvent()
 	if !errors.Is(err, ErrNoMoreRecords) {
-		t.Errorf("second ReadRecord error = %v, want ErrNoMoreRecords", err)
+		t.Errorf("second ReadEvent error = %v, want ErrNoMoreRecords", err)
 	}
 }
 
-// TestReadRecord_MultipleRecords verifies sequential reading of multiple records.
-func TestReadRecord_MultipleRecords(t *testing.T) {
+// TestReadEvent_MultipleRecords verifies sequential reading of multiple records.
+func TestReadEvent_MultipleRecords(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "multi.evtx")
 	w, err := New(path, RotationConfig{})
@@ -246,41 +299,22 @@ func TestReadRecord_MultipleRecords(t *testing.T) {
 
 	var got int
 	for {
-		rec, err := r.ReadRecord()
+		ev, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord %d: %v", got, err)
+			t.Fatalf("ReadEvent %d: %v", got, err)
 		}
 		got++
-		if rec.EventID != 4663 {
-			t.Errorf("record %d EventID = %d, want 4663", got, rec.EventID)
+		if ev.System.EventID != 4663 {
+			t.Errorf("record %d EventID = %d, want 4663", got, ev.System.EventID)
 		}
-		if rec.RecordID != uint64(got) {
-			t.Errorf("record %d RecordID = %d, want %d", got, rec.RecordID, got)
+		if ev.RecordID != uint64(got) {
+			t.Errorf("record %d RecordID = %d, want %d", got, ev.RecordID, got)
 		}
 	}
 	if got != count {
 		t.Errorf("read %d records, want %d", got, count)
-	}
-}
-
-// TestDecodeSubString verifies the UTF-16LE decoder.
-func TestDecodeSubString(t *testing.T) {
-	cases := []struct {
-		input string
-	}{
-		{""},
-		{"hello"},
-		{"Microsoft-Windows-Security-Auditing"},
-		{"S-1-5-21-1234567890"},
-	}
-	for _, tc := range cases {
-		encoded := encodeSubString(tc.input)
-		got := decodeSubString(encoded)
-		if got != tc.input {
-			t.Errorf("round-trip(%q) = %q", tc.input, got)
-		}
 	}
 }

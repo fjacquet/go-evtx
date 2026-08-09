@@ -246,9 +246,32 @@ func TestCollectSubstitutions_ProviderGuidIsString(t *testing.T) {
 	if got.typ != binXMLTypeString {
 		t.Errorf("Provider/@Guid (substitution %d) value type = 0x%02x, want 0x%02x (STRING)", subProviderGuid, got.typ, binXMLTypeString)
 	}
-	if decoded := decodeSubString(got.data); decoded != want {
+	if decoded := decodeSubStringForTest(got.data); decoded != want {
 		t.Errorf("Provider/@Guid round-trip = %q, want %q", decoded, want)
 	}
+}
+
+// decodeSubStringForTest decodes raw UTF-16LE substitution value bytes, as
+// produced by encodeSubString, for writer-side test assertions. This used to
+// be binxml_reader.go's decodeSubString; that file (the old template-specific
+// reader) is gone as of the generic decoder, but this writer test still needs
+// the inverse of encodeSubString to check what collectSubstitutionsFromFields
+// produced. Tolerant of a trailing null terminator for the same reason the
+// original was: encodeSubString itself stopped appending one (F15), but a
+// caller that fed raw bytes carrying one anyway must still decode correctly.
+func decodeSubStringForTest(data []byte) string {
+	end := len(data)
+	if end >= 2 && data[end-2] == 0 && data[end-1] == 0 {
+		end -= 2
+	}
+	if end == 0 {
+		return ""
+	}
+	u16 := make([]uint16, end/2)
+	for i := range u16 {
+		u16[i] = binary.LittleEndian.Uint16(data[i*2:])
+	}
+	return string(utf16.Decode(u16))
 }
 
 // TestBuildTemplateBody_EventIDQualifiersIsNullOptional (F13c; F14

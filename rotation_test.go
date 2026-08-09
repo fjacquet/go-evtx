@@ -198,12 +198,12 @@ func TestWriter_ManualRotate(t *testing.T) {
 
 	var count int
 	for {
-		_, err := r.ReadRecord()
+		_, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord from archive at count=%d: %v", count, err)
+			t.Fatalf("ReadEvent from archive at count=%d: %v", count, err)
 		}
 		count++
 	}
@@ -267,24 +267,24 @@ func TestWriter_RotatedFileValid(t *testing.T) {
 	var count int
 	var prevID uint64
 	for {
-		rec, err := r.ReadRecord()
+		ev, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord from archive at count=%d: %v", count, err)
+			t.Fatalf("ReadEvent from archive at count=%d: %v", count, err)
 		}
 		count++
 		if count == 1 {
-			if rec.RecordID != 1 {
-				t.Errorf("first RecordID = %d, want 1", rec.RecordID)
+			if ev.RecordID != 1 {
+				t.Errorf("first RecordID = %d, want 1", ev.RecordID)
 			}
 		} else {
-			if rec.RecordID != prevID+1 {
-				t.Errorf("RecordID gap at %d: got %d, want %d", count, rec.RecordID, prevID+1)
+			if ev.RecordID != prevID+1 {
+				t.Errorf("RecordID gap at %d: got %d, want %d", count, ev.RecordID, prevID+1)
 			}
 		}
-		prevID = rec.RecordID
+		prevID = ev.RecordID
 	}
 
 	if count != 10 {

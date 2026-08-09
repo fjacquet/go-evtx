@@ -53,24 +53,24 @@ func TestWriter_MultiChunk_EventCount(t *testing.T) {
 	var count int
 	var prevID uint64
 	for {
-		rec, err := r.ReadRecord()
+		ev, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord at count=%d: %v", count, err)
+			t.Fatalf("ReadEvent at count=%d: %v", count, err)
 		}
 		count++
 		if count == 1 {
-			if rec.RecordID != 1 {
-				t.Errorf("first RecordID = %d, want 1", rec.RecordID)
+			if ev.RecordID != 1 {
+				t.Errorf("first RecordID = %d, want 1", ev.RecordID)
 			}
 		} else {
-			if rec.RecordID != prevID+1 {
-				t.Errorf("RecordID gap: got %d after %d", rec.RecordID, prevID)
+			if ev.RecordID != prevID+1 {
+				t.Errorf("RecordID gap: got %d after %d", ev.RecordID, prevID)
 			}
 		}
-		prevID = rec.RecordID
+		prevID = ev.RecordID
 	}
 
 	if count != numEvents {
@@ -168,12 +168,12 @@ func TestWriter_TwoFlushSession(t *testing.T) {
 
 	var count int
 	for {
-		_, err := r.ReadRecord()
+		_, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord at count=%d: %v", count, err)
+			t.Fatalf("ReadEvent at count=%d: %v", count, err)
 		}
 		count++
 	}
@@ -258,12 +258,12 @@ func TestWriter_OpenHandle_NoRace(t *testing.T) {
 
 	var count int
 	for {
-		_, err := r.ReadRecord()
+		_, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord at count=%d: %v", count, err)
+			t.Fatalf("ReadEvent at count=%d: %v", count, err)
 		}
 		count++
 	}

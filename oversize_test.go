@@ -49,12 +49,12 @@ func TestWriteRecord_Oversized(t *testing.T) {
 
 	n := 0
 	for {
-		_, err := r.ReadRecord()
+		_, err := r.ReadEvent()
 		if errors.Is(err, ErrNoMoreRecords) {
 			break
 		}
 		if err != nil {
-			t.Fatalf("ReadRecord: %v", err)
+			t.Fatalf("ReadEvent: %v", err)
 		}
 		n++
 	}
