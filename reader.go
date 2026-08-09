@@ -102,8 +102,8 @@ func (r *Reader) loadChunk(idx int) error {
 		return fmt.Errorf("go_evtx: invalid chunk magic at index %d", idx)
 	}
 	r.chunkIdx = idx
-	r.recOff = int(evtxChunkHeaderSize)                            // records begin after 512-byte chunk header
-	r.freeOff = int(binary.LittleEndian.Uint32(r.buf[48:52]))     // FreeSpaceOffset
+	r.recOff = int(evtxChunkHeaderSize)                       // records begin after 512-byte chunk header
+	r.freeOff = int(binary.LittleEndian.Uint32(r.buf[48:52])) // FreeSpaceOffset
 	return nil
 }
 

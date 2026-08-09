@@ -140,7 +140,7 @@ const evtxChunkUnknownField120 = uint32(1)
 // chunk must be at least 512 bytes.
 func patchChunkCRC(chunk []byte) {
 	binary.LittleEndian.PutUint32(chunk[120:], evtxChunkUnknownField120) // [120:124]: B3
-	binary.LittleEndian.PutUint32(chunk[124:], 0)                       // [124:128]: CRC32 placeholder, zero during calculation
+	binary.LittleEndian.PutUint32(chunk[124:], 0)                        // [124:128]: CRC32 placeholder, zero during calculation
 	h := crc32.New(crc32.IEEETable)
 	h.Write(chunk[0:120])
 	h.Write(chunk[128:512])
