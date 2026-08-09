@@ -212,14 +212,14 @@ the contract for the pipeline goal:
 | Null | `null` |
 | String, AnsiString | string |
 | Int8–Int64, UInt8–UInt64, Real32/64 | number |
-| UInt64, Int64 | string when the value exceeds 2^53, else number — JSON numbers lose precision above that |
+| UInt64, Int64, SizeT | string when the magnitude reaches 2^53, else number — a JSON number cannot hold a larger integer exactly, and a float64 parser downstream would round it silently |
 | Bool | boolean |
 | Binary | base64 string |
 | Guid | `"6e5c6d2d-…"`, canonical lower-case, no braces |
 | FileTime, SysTime | RFC 3339 string, UTC |
 | Sid | `"S-1-5-18"` |
 | HexInt32, HexInt64 | `"0x0000000000000010"` — hex is the point of the type |
-| SizeT | number |
+| SizeT | see the 64-bit row above — an 8-byte SizeT reaches the same range |
 | BinXml | the nested fragment's own decoded object |
 | array variants | JSON array of the above |
 
