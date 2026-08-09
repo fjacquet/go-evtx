@@ -1,5 +1,12 @@
 # ToXml invariant diff — implementation plan (phases 0–2)
 
+> **STATUS: complete.** Phases 0-2 shipped; the diff returned one entry and
+> F15 fixed it (`docs/format-baseline.md` row 22, CI run 31331139326). Task 3
+> was dropped by decision, and `decodedFloor` — referenced below as a smoke
+> gate — no longer exists: `testdata/system.evtx` was removed from the
+> repository, so nothing pins a count against it. Read the rest as the record
+> of what was planned, not as instructions.
+>
 > **Execution:** inline, in the main session. Not subagent-driven — the work
 > depends on measurement context that does not survive a fresh dispatch. Steps
 > use checkbox (`- [ ]`) syntax for tracking.

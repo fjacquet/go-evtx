@@ -286,8 +286,25 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 			return Value{}, fmt.Errorf("go_evtx: SysTime declares 16 bytes, got %d", len(data))
 		}
 		f := func(i int) int { return int(binary.LittleEndian.Uint16(data[2*i:])) }
-		ts := time.Date(f(0), time.Month(f(1)), f(3), f(4), f(5), f(6),
-			f(7)*int(time.Millisecond), time.UTC)
+		year, month, day := f(0), f(1), f(3)
+		hour, minute, second, milli := f(4), f(5), f(6), f(7)
+		ts := time.Date(year, time.Month(month), day, hour, minute, second,
+			milli*int(time.Millisecond), time.UTC)
+		// time.Date normalises out-of-range components — month 13 becomes
+		// January of the next year, day 32 rolls into the next month — so
+		// malformed bytes would decode as a plausible but different timestamp.
+		// This decoder rejects rather than guesses, the same way it rejects a
+		// wrong fixed width or an unknown type. Reading the components back off
+		// the constructed value is what detects the normalisation.
+		gotYear, gotMonth, gotDay := ts.Date()
+		gotHour, gotMin, gotSec := ts.Clock()
+		if gotYear != year || int(gotMonth) != month || gotDay != day ||
+			gotHour != hour || gotMin != minute || gotSec != second ||
+			ts.Nanosecond() != milli*int(time.Millisecond) {
+			return Value{}, fmt.Errorf(
+				"go_evtx: SysTime has out-of-range components: %04d-%02d-%02d %02d:%02d:%02d.%03d",
+				year, month, day, hour, minute, second, milli)
+		}
 		return Value{Type: t, str: ts.Format(time.RFC3339Nano)}, nil
 	case ValEvtHandle, ValEvtXML:
 		return Value{}, fmt.Errorf("go_evtx: value type %s is not implemented "+

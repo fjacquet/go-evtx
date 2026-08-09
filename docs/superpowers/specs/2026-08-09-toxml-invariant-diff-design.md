@@ -1,7 +1,11 @@
 # ToXml: invariant diff against the real-file corpus — design
 
 **Date:** 2026-08-09
-**Status:** approved
+**Status:** delivered. The census returned a one-entry list, F15 fixed it, and
+CI run `31331139326` (`head_sha` `5c3b32f`) is green on every job — see
+`docs/format-baseline.md` row 22. Two details below did not survive contact:
+`testdata/system.evtx` was removed from the repository rather than held out,
+so `decodedFloor` and the held-out validation step no longer exist.
 **Supersedes as the active method:** the `gen-ladder-*` / `gen-hybrid-*`
 bisection harness (kept in the tree, no longer extended)
 

@@ -855,8 +855,11 @@ EVTX_CORPUS=/path/to/corpus go test -run TestCorpusScan -v .
 
 It is a test rather than a `cmd/` because the facts worth measuring live in
 unexported structures; exporting them would mean a permanent public contract
-for scaffolding. `TestCorpusScanTracked` is the CI half — it runs on
-`testdata/system.evtx` with no environment variable.
+for scaffolding. It skips unless `EVTX_CORPUS` names one or more directories,
+so CI never runs it, and `isExcludedFixture` refuses any file called
+`system.evtx` — see "No `.evtx` is tracked" in `testdata/README.md`. Facts
+carry a session-local file id, never a path: corpus directories are named
+after machines, accounts and campaigns.
 
 **It reports facts for records the decoder REJECTS.** Measuring only what
 already decodes is the round-trip blindness that hid every v0.6.0 defect.
@@ -909,10 +912,18 @@ it has not been built.
 
 The first two are 99 % of all failures.
 
-**A correction the scan forced.** The strict decoder reads **1496 of
-`testdata/system.evtx`'s 1601 records**, not all of them — the remaining 105
-are the table above. `corpus_scan_test.go`'s `decodedFloor` pins 1496 as a
-number that may only go up.
+**All four were then closed**, except `AnsiString`, which stays unimplemented
+because the format carries no codepage and any decoding would be invention.
+The derivation corpus now decodes **320 382 of 320 398 records — 99.995 %** —
+and the 16 that remain are exactly those `AnsiString` records.
+
+**A correction the scan forced, and its consequence.** The strict decoder read
+1496 of `testdata/system.evtx`'s 1601 records, not all of them, and the repo
+had believed otherwise. A `decodedFloor` constant briefly pinned that number
+as a CI smoke gate. Both are gone: `testdata/system.evtx` was removed from the
+repository altogether, because every rule this project encodes was derived
+from that one sample and the same file was then used to assert the rules were
+right — an assertion that cannot fail when the derivation is wrong.
 
 ### What this changes about method
 

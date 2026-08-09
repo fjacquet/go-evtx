@@ -124,11 +124,12 @@ func censusCorpus(t *testing.T, roots []string) (tally map[shapeEvent]int, files
 				t.Logf("skip %s: excluded as evidence", filepath.Base(p))
 				return nil
 			}
-			if scanErr := scanEVTX(p, filepath.Base(p), func(any) {}, onShape); scanErr != nil {
+			files++
+			if scanErr := scanEVTX(p, files, func(any) {}, onShape); scanErr != nil {
 				t.Logf("skip %s: %v", filepath.Base(p), scanErr)
+				files--
 				return nil
 			}
-			files++
 			return nil
 		})
 		if err != nil {
@@ -203,7 +204,7 @@ func TestShapeDiffTarget(t *testing.T) {
 	}
 
 	tally := map[shapeEvent]int{}
-	if err := scanEVTX(target, filepath.Base(target), func(any) {}, func(e shapeEvent) {
+	if err := scanEVTX(target, 0, func(any) {}, func(e shapeEvent) {
 		tally[e]++
 	}); err != nil {
 		t.Fatalf("scan %s: %v", target, err)

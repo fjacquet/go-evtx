@@ -200,6 +200,42 @@ func TestDecodeValue_SysTimeWrongLength(t *testing.T) {
 	}
 }
 
+// TestDecodeValue_SysTimeOutOfRange pins that malformed components are
+// rejected rather than normalised. time.Date turns month 13 into January of
+// the following year and day 32 into the next month, so without this check a
+// corrupt record would decode as a plausible wrong timestamp.
+func TestDecodeValue_SysTimeOutOfRange(t *testing.T) {
+	sysTime := func(fields ...uint16) []byte {
+		b := make([]byte, 16)
+		for i, f := range fields {
+			binary.LittleEndian.PutUint16(b[2*i:], f)
+		}
+		return b
+	}
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		// wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds
+		{"month 13", sysTime(2020, 13, 0, 1, 0, 0, 0, 0)},
+		{"month 0", sysTime(2020, 0, 0, 1, 0, 0, 0, 0)},
+		{"day 32", sysTime(2020, 1, 0, 32, 0, 0, 0, 0)},
+		{"day 0", sysTime(2020, 1, 0, 0, 0, 0, 0, 0)},
+		{"31 February", sysTime(2020, 2, 0, 31, 0, 0, 0, 0)},
+		{"hour 24", sysTime(2020, 1, 0, 1, 24, 0, 0, 0)},
+		{"minute 60", sysTime(2020, 1, 0, 1, 0, 60, 0, 0)},
+		{"second 60", sysTime(2020, 1, 0, 1, 0, 0, 60, 0)},
+		{"millisecond 1000", sysTime(2020, 1, 0, 1, 0, 0, 0, 1000)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if v, err := decodeValue(ValSysTime, tc.data); err == nil {
+				t.Fatalf("expected an error, got %q", v.String())
+			}
+		})
+	}
+}
+
 func TestDecodeValue_Guid(t *testing.T) {
 	data := []byte{
 		0x2d, 0x6d, 0x5c, 0x6e, 0x1a, 0x2b, 0x3c, 0x4d,

@@ -48,7 +48,7 @@ import (
 // a hash — never content.
 type fileFact struct {
 	Kind    string `json:"kind"`
-	Path    string `json:"path"`
+	File    int    `json:"file"`
 	Major   uint16 `json:"major"`
 	Minor   uint16 `json:"minor"`
 	Chunks  int    `json:"chunks"`
@@ -58,7 +58,7 @@ type fileFact struct {
 
 type chunkFact struct {
 	Kind       string   `json:"kind"`
-	Path       string   `json:"path"`
+	File       int      `json:"file"`
 	Chunk      int      `json:"chunk"`
 	Records    int      `json:"records"`
 	FreeOff    int      `json:"free_off"`
@@ -71,7 +71,7 @@ type chunkFact struct {
 
 type recordFact struct {
 	Kind     string         `json:"kind"`
-	Path     string         `json:"path"`
+	File     int            `json:"file"`
 	Chunk    int            `json:"chunk"`
 	Off      int            `json:"off"`
 	Size     int            `json:"size"`
@@ -86,6 +86,7 @@ type recordFact struct {
 	Subs     int            `json:"subs"`
 	Types    map[string]int `json:"sub_types"`
 	Trailing int            `json:"trailing"` // bytes after the substitution array
+	HasDef   bool           `json:"has_def"`  // a template instance was found; DefOff/DefWhere mean nothing without it
 	ScanErr  string         `json:"scan_err,omitempty"`
 	DecErr   string         `json:"decode_err,omitempty"`
 }
@@ -113,6 +114,7 @@ func fragScan(cache *templateCache, chunkOff, length int, f *recordFact) {
 		return
 	}
 	f.DefOff = int(le32(payload[pos+6:]))
+	f.HasDef = true
 	pos += 10
 	f.Inline = f.DefOff == chunkOff+pos
 
@@ -146,7 +148,7 @@ func fragScan(cache *templateCache, chunkOff, length int, f *recordFact) {
 // scanEVTX walks one file's chunks and records, emitting one fact per file,
 // per chunk and per record. It never stops on a bad record: a corpus scan that
 // aborts at the first surprise measures nothing.
-func scanEVTX(path, label string, emit func(any), onShape func(shapeEvent)) error {
+func scanEVTX(path string, fileID int, emit func(any), onShape func(shapeEvent)) error {
 	b, err := os.ReadFile(path) // #nosec G304 — a developer-supplied corpus path
 	if err != nil {
 		return err
@@ -156,7 +158,7 @@ func scanEVTX(path, label string, emit func(any), onShape func(shapeEvent)) erro
 	}
 	ff := fileFact{
 		Kind:   "file",
-		Path:   label,
+		File:   fileID,
 		Minor:  binary.LittleEndian.Uint16(b[36:38]),
 		Major:  binary.LittleEndian.Uint16(b[38:40]),
 		Chunks: int(binary.LittleEndian.Uint16(b[42:44])),
@@ -174,7 +176,7 @@ func scanEVTX(path, label string, emit func(any), onShape func(shapeEvent)) erro
 		cache := newTemplateCache(chunk)
 		cache.onShape = onShape
 
-		cf := chunkFact{Kind: "chunk", Path: label, Chunk: ci,
+		cf := chunkFact{Kind: "chunk", File: fileID, Chunk: ci,
 			FreeOff: int(binary.LittleEndian.Uint32(chunk[48:52]))}
 		for i := 0; i < 64; i++ {
 			if binary.LittleEndian.Uint32(chunk[128+4*i:]) != 0 {
@@ -201,19 +203,27 @@ func scanEVTX(path, label string, emit func(any), onShape func(shapeEvent)) erro
 			if size < 28 || off+size > len(chunk) {
 				break
 			}
-			rf := recordFact{Kind: "record", Path: label, Chunk: ci, Off: off,
+			rf := recordFact{Kind: "record", File: fileID, Chunk: ci, Off: off,
 				Size: size, SizeMod8: size % 8, OffMod8: off % 8, Payload: size - 28}
 			fragScan(cache, off+24, size-28, &rf)
 
-			switch {
-			case rf.DefOff >= off && rf.DefOff < off+size:
-				rf.DefWhere = "inside"
-			case rf.DefOff < off:
-				rf.DefWhere = "before"
-			default:
-				rf.DefWhere = "after"
+			// Only a record whose template instance was actually located
+			// contributes a definition offset. Classifying a bailed-out scan
+			// as "before" and counting its zero offset would silently inflate
+			// distinct_template_defs and corrupt the def_where distribution —
+			// a measuring instrument must not invent the value it failed to
+			// read.
+			if rf.HasDef {
+				switch {
+				case rf.DefOff >= off && rf.DefOff < off+size:
+					rf.DefWhere = "inside"
+				case rf.DefOff < off:
+					rf.DefWhere = "before"
+				default:
+					rf.DefWhere = "after"
+				}
+				seenDefs[rf.DefOff] = true
 			}
-			seenDefs[rf.DefOff] = true
 
 			if _, err := decodeRecordBinXML(cache, off+24, size-28); err != nil {
 				rf.DecErr = err.Error()
@@ -255,7 +265,7 @@ func TestCorpusScan(t *testing.T) {
 	}
 
 	files, failed := 0, 0
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	walk := func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".evtx") {
 			return nil //nolint:nilerr // an unreadable entry is skipped, not fatal
 		}
@@ -263,20 +273,35 @@ func TestCorpusScan(t *testing.T) {
 			t.Logf("skip %s: excluded as evidence", filepath.Base(p))
 			return nil
 		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			rel = filepath.Base(p)
-		}
-		if scanErr := scanEVTX(p, rel, emit, nil); scanErr != nil {
-			t.Logf("skip %s: %v", rel, scanErr)
+		// Facts carry a session-local integer, never a path. A corpus lives
+		// under a developer's home directory and its subdirectories are named
+		// after machines, accounts and campaigns; this output is quoted in
+		// docs/. The id-to-path mapping is logged to the console instead,
+		// where it stays ephemeral and correlation is still possible.
+		files++
+		fileID := files
+		t.Logf("file %d = %s", fileID, filepath.Base(p))
+		if scanErr := scanEVTX(p, fileID, emit, nil); scanErr != nil {
+			t.Logf("skip file %d: %v", fileID, scanErr)
+			files--
 			failed++
 			return nil
 		}
-		files++
 		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+	}
+	// Same multi-root form as the census: a corpus is usually more than one
+	// directory, and having the two tools disagree about their input syntax
+	// is how a scan silently walks a path that does not exist.
+	for _, r := range filepath.SplitList(root) {
+		if err := filepath.WalkDir(r, walk); err != nil {
+			t.Fatalf("walk %s: %v", r, err)
+		}
+	}
+	// A scan that found nothing must fail. The walk callback swallows
+	// per-entry errors by design, so a mistyped root would otherwise produce
+	// an empty output file and a passing test.
+	if files == 0 {
+		t.Fatalf("no .evtx files found under %q", root)
 	}
 	t.Logf("scanned %d files (%d unreadable) -> %s", files, failed, outPath)
 }
