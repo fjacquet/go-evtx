@@ -41,6 +41,7 @@ baseline the rest of the release compares against.**
 | 14b | `e1f8aca` | byte-identical to row 13/14a | **PASS (regression fixed): `OK: 403 records, all chunk checksums verify`** | `STAGE1 OPEN: ok` / **`STAGE2 READ: FAILED after 0 records`** — a *different* regression from row 13's `ok, 403 records` |
 | 14 | `ab6ae57` | byte-identical to row 13/14a/14b; `binxml.go`'s emitted payload is MD5-identical to row 13's (net zero functional change across 14a/14b/this commit) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **Restored exactly to row 13's result** — `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `LOGINFO` ok, six `PROP` scalars empty-but-no-throw, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all still FAILED with `"The data is invalid."` — see "Task 8e" below |
 | 15 | `b41ac76` | 403 records, 27 chunks, max ObjectName **31236** runes — NOT byte-identical to rows 12-14 (F15 drops `encodeSubString`'s null terminator, shrinking every String-typed substitution value by 2 bytes; chunk count unchanged at 27, but the binary-searched near-maximum ObjectName ceiling moves from 31208 to 31236 runes as a direct consequence — see "Task 8f" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records` (held — the win stayed protected). `PROP ToXml FAILED - "The data is invalid."`, `GETWINEVENT default`/`-Oldest` both FAILED, same message — byte-for-byte the same failure shape as row 14. NULL RESULT: the null-terminator fix did not change the outcome — see "Task 8f" below |
+| 16 | `07f81f0` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to row 15 (Task 9a touched no fixture or `binxml.go`/`evtx.go` code; this row is a regression check, not a fix attempt — see "Task 9a" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 15 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two new fixtures measured alongside this one — see "Task 9a" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2152,7 +2153,85 @@ Full detail in
 `.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9a-report.md`.
 Both experiments were run beside the existing fixture/jobs, which are
 untouched — `cmd/gen-fixture/main.go`'s output stays byte-identical to row
-15, and this task's own re-measurement of it (via the unmodified
-`generate`/`python-evtx-differential`/`get-winevent` jobs, re-run because
-pushing to this branch re-triggers the whole workflow) is recorded as row
-16 below once CI completes.
+15 (row 16 confirms this: no regression, see the table above).
+
+Two experiments neither guesses at another field, each answering a question
+seventeen prior field-level fixes could not: does the defect need the big
+fixture's scale/variety, and is go-evtx's own file/chunk container sound
+independent of its BinXML encoding?
+
+**Experiment A — new `cmd/gen-fixture-minimal` (public API only:
+`New`/`WriteRecord`/`Close`), one record, one chunk, pure ASCII, fixed
+timestamp — run through new `generate-minimal`/`get-winevent-minimal` jobs:**
+
+```text
+MINIMAL STAGE1 OPEN: ok
+MINIMAL STAGE2 READ: ok, 1 records
+MINIMAL PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+MINIMAL GETWINEVENT default: FAILED - The data is invalid.
+MINIMAL GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+**Fails identically to the 403-record fixture** — same exception type, same
+message, on the simplest record this library can produce. 403 records, 21+
+chunks, non-BMP strings, and a 31,236-rune record are eliminated from the
+variable set: the defect reproduces on one ordinary ASCII record in one
+chunk.
+
+**Experiment B — new `cmd/gen-splice-fixture`: extracts `testdata/system.evtx`
+chunk 0 record 0's real BinXML (2148 bytes) via `Reader.ReadRaw()`, writes it
+into a fresh go-evtx file via `Writer.WriteRaw()`.** Chosen deliberately
+(option 1 of the brief's own preference order — a self-relative record, not
+rewritten offsets): it is the first record ever written into that chunk, so
+by construction every name/template it references is introduced inline,
+within its own bytes — verified, not assumed, by a throwaway structural walk
+(not committed) that found 27 `name_offset` references and 1
+`template_offset`, all 28 resolving inside the record's own `[536, 536+2148)`
+byte range. `WriteRaw`'s first call on a fresh `Writer` places its record at
+that identical chunk-relative offset (512-byte header + 24-byte record
+header = 536), so the bytes needed **zero rewriting**. Run through new
+`generate-splice`/`get-winevent-splice` jobs:
+
+```text
+SPLICE STAGE1 OPEN: ok
+SPLICE STAGE2 READ: ok, 1 records
+SPLICE PROP ToXml ok
+SPLICE GETWINEVENT default: ok, 1 records
+SPLICE GETWINEVENT -Oldest: ok, 1 records
+```
+
+**Succeeds completely.** `ToXml()` — the exact call that throws on every
+go-evtx-generated record tested, including Experiment A's minimal one —
+succeeds on a real record's BinXML wrapped in nothing but go-evtx's own
+writer code (file header, chunk header with all-zero hash tables, record
+wrapper, CRC32s).
+
+CI run [`31288541480`](https://github.com/fjacquet/go-evtx/actions/runs/31288541480)
+(`Format Verify`, head `07f81f0`), jobs: `generate`/`generate-minimal`/
+`generate-splice`/`python-evtx-differential`/`get-winevent-splice` all
+**success**; `get-winevent`/`get-winevent-minimal` **failure** (expected,
+per above — not a regression). `CI` run
+[`31288541677`](https://github.com/fjacquet/go-evtx/actions/runs/31288541677)
+(build/vet/test/lint/security): **success**.
+
+### Reading this result
+
+**The two experiments localise the defect completely, in the same
+direction.** Experiment B proves go-evtx's file/chunk *container* is sound —
+real BinXML renders under both Windows APIs wrapped in nothing but go-evtx's
+own writer code. Experiment A proves the defect needs none of the big
+fixture's scale or variety — it reproduces on the single simplest record
+go-evtx's encoder can produce. Together: **the defect is entirely inside
+`buildBinXML`/`buildTemplateBody`'s own encoding** (`binxml.go`) — the half
+seventeen prior fixes targeted, but evidently not at the right byte(s) yet —
+and not in the file header, chunk header, hash tables, record wrapper, or
+CRC computation.
+
+This does not identify which byte(s) differ. It does hand the next task a
+much cheaper tool than a hex dump: two BinXML payloads already proven by CI
+to sit on opposite sides of the same pass/fail line, in the identical
+container — one Windows accepts (the spliced real record, 20 substitutions)
+and one it rejects (go-evtx's own minimal record). A structural diff between
+them is a far smaller search space than the 42-substitution template this
+release has been debugging by inspection, and the minimal fixture is now the
+natural target to diff against, not the 403-record one.
