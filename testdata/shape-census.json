@@ -1,0 +1,468 @@
+[
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "only",
+    "array_type": "FileTime",
+    "count": 320382
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "last",
+    "array_type": "Guid",
+    "count": 196536
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "last",
+    "array_type": "Null",
+    "count": 320408
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "only",
+    "array_type": "Null",
+    "count": 534324
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "only",
+    "array_type": "Sid",
+    "count": 12147
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "last",
+    "array_type": "String",
+    "count": 117787
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "only",
+    "array_type": "String",
+    "count": 3091545
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "only",
+    "array_type": "UInt16",
+    "count": 94293
+  },
+  {
+    "kind": "attribute",
+    "token": "0x06",
+    "attr_pos": "last",
+    "array_type": "UInt32",
+    "count": 319578
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "first",
+    "array_type": "Guid",
+    "count": 73940
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "first",
+    "array_type": "Null",
+    "count": 246053
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "middle",
+    "array_type": "Null",
+    "count": 415
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "first",
+    "array_type": "String",
+    "count": 314323
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "middle",
+    "array_type": "String",
+    "count": 88119
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "middle",
+    "array_type": "UInt16",
+    "count": 415
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "first",
+    "array_type": "UInt32",
+    "count": 319993
+  },
+  {
+    "kind": "attribute",
+    "token": "0x46",
+    "attr_pos": "middle",
+    "array_type": "UInt32",
+    "count": 1245
+  },
+  {
+    "kind": "body-fragment",
+    "token": "0x0f",
+    "count": 640764
+  },
+  {
+    "kind": "element",
+    "token": "0x01",
+    "count": 30640
+  },
+  {
+    "kind": "element",
+    "token": "0x01",
+    "has_children": true,
+    "count": 639085
+  },
+  {
+    "kind": "element",
+    "token": "0x01",
+    "has_value": true,
+    "count": 470933
+  },
+  {
+    "kind": "element",
+    "token": "0x01",
+    "dep_set": true,
+    "has_value": true,
+    "count": 2193468
+  },
+  {
+    "kind": "element",
+    "token": "0x41",
+    "count": 117
+  },
+  {
+    "kind": "element",
+    "token": "0x41",
+    "has_children": true,
+    "count": 641
+  },
+  {
+    "kind": "element",
+    "token": "0x41",
+    "has_value": true,
+    "count": 2764540
+  },
+  {
+    "kind": "element",
+    "token": "0x41",
+    "empty_close": true,
+    "count": 1601132
+  },
+  {
+    "kind": "element",
+    "token": "0x41",
+    "dep_set": true,
+    "has_value": true,
+    "count": 320382
+  },
+  {
+    "kind": "element",
+    "token": "0x41",
+    "dep_set": true,
+    "has_value": true,
+    "has_children": true,
+    "count": 320188
+  },
+  {
+    "kind": "literal",
+    "token": "0x05",
+    "declared_type": "String",
+    "array_type": "String",
+    "count": 3829942
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "Binary",
+    "array_type": "Binary",
+    "count": 55882
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "Bool",
+    "array_type": "Bool",
+    "count": 1200
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "FileTime",
+    "array_type": "FileTime",
+    "count": 11760
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "Guid",
+    "array_type": "Guid",
+    "count": 97612
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "HexInt32",
+    "array_type": "HexInt32",
+    "count": 4388
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "HexInt64",
+    "array_type": "HexInt64",
+    "count": 301524
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "Int16",
+    "array_type": "Int16",
+    "count": 14
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "Int32",
+    "array_type": "Int32",
+    "count": 1137
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "Sid",
+    "array_type": "Sid",
+    "count": 243579
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "SizeT",
+    "array_type": "HexInt32",
+    "count": 319
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "SizeT",
+    "array_type": "HexInt64",
+    "count": 64740
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "String",
+    "array_type": "String",
+    "count": 1659054
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "StringArray",
+    "array_type": "StringArray",
+    "count": 1
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "SysTime",
+    "array_type": "SysTime",
+    "count": 8
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "UInt16",
+    "array_type": "UInt16",
+    "count": 1321
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "UInt32",
+    "array_type": "UInt32",
+    "count": 370755
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "UInt64",
+    "array_type": "UInt64",
+    "count": 5315
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "UInt8",
+    "array_type": "UInt8",
+    "count": 2152
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0d",
+    "declared_type": "ValueType(0x8e)",
+    "array_type": "Binary",
+    "count": 8
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "BinXml",
+    "array_type": "BinXml",
+    "count": 320382
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "Binary",
+    "array_type": "Binary",
+    "count": 1706
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "Binary",
+    "array_type": "Null",
+    "count": 35905
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "FileTime",
+    "array_type": "FileTime",
+    "count": 320382
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "Guid",
+    "array_type": "Guid",
+    "count": 270476
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "Guid",
+    "array_type": "Null",
+    "count": 566046
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "HexInt64",
+    "array_type": "HexInt64",
+    "count": 320382
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "Sid",
+    "array_type": "Null",
+    "count": 308235
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "Sid",
+    "array_type": "Sid",
+    "count": 12147
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "String",
+    "array_type": "String",
+    "count": 393074
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "StringArray",
+    "array_type": "Null",
+    "count": 15624
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "StringArray",
+    "array_type": "StringArray",
+    "count": 21985
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt16",
+    "array_type": "Null",
+    "count": 226089
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt16",
+    "array_type": "UInt16",
+    "count": 735057
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt32",
+    "array_type": "Null",
+    "count": 415
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt32",
+    "array_type": "UInt32",
+    "count": 640818
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt64",
+    "array_type": "Null",
+    "count": 415
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt64",
+    "array_type": "UInt64",
+    "count": 320382
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt8",
+    "array_type": "UInt16",
+    "count": 415
+  },
+  {
+    "kind": "substitution",
+    "token": "0x0e",
+    "declared_type": "UInt8",
+    "array_type": "UInt8",
+    "count": 960368
+  }
+]
