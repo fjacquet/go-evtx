@@ -999,11 +999,32 @@ func writeNameNode(b *bytes.Buffer, name string, binXMLBase uint32, refs *[]chun
 	writeUint16LE(b, 0) // null terminator
 }
 
-// encodeSubString encodes a string as raw UTF-16LE with null terminator
-// for use in the substitution value data.
+// encodeSubString encodes a string as raw UTF-16LE for use in the
+// substitution value data, WITHOUT a null terminator.
+//
+// F15 (Task 8f): real Windows never null-terminates a String-typed
+// substitution-array VALUE — confirmed independently against
+// testdata/system.evtx by parsing 45 records that use a "full" (inline,
+// non-cached) template instance and decoding their substitution arrays
+// directly (count + size/type/pad specs + concatenated value_data, no
+// decoding library involved): all 28 non-empty String-typed entries found
+// had a declared size of exactly char_count*2, none had a trailing
+// UTF-16 null pair. Two examples: "Microsoft-Windows-WindowsUpdateClient"
+// (37 chars, declared size 74) and "System" (6 chars, declared size 12).
+// This independently reproduces task-8e-report.md's own Part 4 finding
+// (28/28 samples, same two examples).
+//
+// This is NOT true of NameNode strings, which real Windows DOES
+// null-terminate — confirmed directly against the same file: the "Event"
+// NameNode occurs as bytes `00 00 00 00 ba 0c 05 00 45 00 76 00 65 00 6e
+// 00 74 00 00 00` (next_offset=0, hash=0x0cba, char_count=5, "Event",
+// then a 2-byte null terminator), matching CLAUDE.md's documented pattern
+// exactly. writeNameNode's own terminator is therefore untouched by this
+// change — only this function, which feeds substitution-array value data,
+// changes.
 func encodeSubString(s string) []byte {
 	u16 := utf16.Encode([]rune(s))
-	buf := make([]byte, len(u16)*2+2) // +2 for null terminator
+	buf := make([]byte, len(u16)*2)
 	for i, v := range u16 {
 		binary.LittleEndian.PutUint16(buf[i*2:], v)
 	}

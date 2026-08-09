@@ -131,8 +131,12 @@ func applySubstitutions(subs []substitutionEntry, rec *Record) {
 	}
 }
 
-// decodeSubString decodes a UTF-16LE byte slice (with null terminator) to a Go string.
-// This is the inverse of encodeSubString in binxml.go.
+// decodeSubString decodes a UTF-16LE byte slice to a Go string. This is the
+// inverse of encodeSubString in binxml.go, which (F15, Task 8f) no longer
+// appends a null terminator, matching real Windows. Kept tolerant of a
+// trailing terminator anyway — it strips one if present rather than
+// assuming either convention — so it stays correct against both go-evtx's
+// own (post-F15) output and any real .evtx bytes that do carry one.
 func decodeSubString(data []byte) string {
 	if len(data) < 2 {
 		return ""
