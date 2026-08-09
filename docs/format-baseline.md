@@ -3077,3 +3077,90 @@ definition in every record where real Windows declares one per chunk and
 points back at it (36 819 backward references to 545 definitions, zero
 forward). And with `testdata/system.evtx` removed, CI no longer checks the
 chunk hash-table rules against any real file.
+
+## F18 + W1 + W2: full conformance. Every Windows-side signal green.
+
+**Run `31335727200`, `head_sha` `f23f2910ba8ed7d5ab397a62c3d052a58c47a161`**,
+selected by `head_sha` and equal to the commit measured. `Format Verify`:
+success.
+
+### Result: row 23 — the writer now matches what Windows writes
+
+```
+STAGE2 READ: ok, 403 records
+PROP ToXml ok
+GETWINEVENT default: ok, 403 records
+GETWINEVENT -Oldest: ok, 403 records
+OK: 403 records, ObjectName round-trips (variant: default)
+OK: 403 records, all chunk checksums verify
+```
+
+### The three changes, and why they only work together
+
+**F18.** A value that may be absent is referenced by an `OptionalSubstitution`
+whose token declares the field's real type, and its substitution-array entry
+is `NULL` when nothing was supplied. `ProviderName`, `Provider/@Guid`,
+`Channel`, `Computer` and the twelve `<Data>` values moved; `<Data>`'s `Name`
+attribute did not, since it comes from `dataFieldNames` and is never empty.
+
+**W1 and W2.** Every record now ends with a fragment EOF token and is padded
+so the on-disk record is a multiple of 8.
+
+Measured basis, all from the derivation corpus:
+
+| shape | occurrences |
+|---|---|
+| zero-length descriptor declaring `0x00` | 1 686 434 |
+| zero-length descriptor declaring `String` | **0** |
+| `NormalSubstitution` + `Null` array entry | **0** |
+| `OptionalSubstitution` + `Null` array entry | 1 152 729 |
+| records 8-aligned in size and offset | 37 364 of 37 364 |
+| records with 1–8 trailing bytes after the substitution array | 37 364 of 37 364 |
+
+W1 and W2 had been implemented and reverted twice, each time because Windows
+rejected the result. F18 is why. While a zero-length value was written as
+`{size 0, type String}`, Windows refused any record that also carried trailing
+bytes — so the two conformance fixes could not land until the third did.
+Measured separately: F18 alone fails, padding alone fails, all three pass.
+
+### How it was found, after seven wrong answers
+
+The failure was reproducible only on `gen-fixture`'s own output, and the
+hypothesis space was cut by measurement rather than argument. Eliminated, each
+on the VM: record count (2 through 403), chunk count (1 through 19), a
+near-maximum record, a record filling a chunk exactly, reserving the 8-byte
+tail real Windows always leaves, and **the per-record template redeclaration**
+— which was the leading suspect and is now cleared, so #45 is a file-size
+improvement and nothing more.
+
+What isolated it was bisecting the failing input rather than guessing at it:
+two 400-record files differing only in whether `ProviderName`, `Computer` and
+`Channel` were supplied. With them, 400 records read; without them, failure on
+record 0.
+
+An intermediate attempt (F17) changed the substitution array alone and
+regressed CI run `31334777636` from 403 records to zero. It was reverted the
+same evening. The census explains it: `NULL` in the array is legal only for a
+value the template also marks optional.
+
+### The fixture changed, and this row is where that is recorded
+
+`cmd/gen-fixture` is frozen behind a repository hook, and stays byte-for-byte
+as it was — every earlier row still reproduces. But it supplies no
+`ProviderName`, `Computer` or `Channel`, and since F18 an unsupplied value is
+`NULL`, which per libyal makes its element "ignored and not created". Its
+events therefore lose `<Provider Name>`, `<Computer>` and `<Channel>`: a valid
+file that `EventLogReader` reads in full, and that `Get-WinEvent`'s formatter
+throws a `NullReferenceException` on. Real Windows never writes such an event.
+
+`Format Verify`'s `generate` job therefore moves to a new
+`cmd/gen-fixture-system`, which supplies them. **Rows from here on compare
+against that generator's output, not `gen-fixture`'s.**
+
+### What this row does not settle
+
+`#45` — one template definition per chunk instead of one per record — is still
+open, now as a file-size matter: a go-evtx file carries a full inline template
+copy in every record where Windows carries one per chunk. And the template
+hash-table bucket rule for format 3.2 remains unknown (`#46`); the 3.1 rule
+scores at or below chance on every 3.2 file measured.
