@@ -84,18 +84,55 @@ jobs:
           }
 
           # Stage 2: read records one at a time, so a decode failure names
-          # its record.
+          # its record. Also capture the first record returned: Get-WinEvent
+          # can fail before it ever hands back an EventRecord, so this is
+          # the only EventRecord instance the rest of this script can probe
+          # on a run where both Get-WinEvent orderings fail.
           $n = 0
+          $firstNative = $null
           try {
               while ($true) {
                   $rec = $reader.ReadEvent()
                   if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
                   $n++
               }
               Write-Host "STAGE2 READ: ok, $n records"
           } catch {
               Write-Host "STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
               throw
+          }
+
+          # Probe A: does Get-WinEvent's failure come from log-level metadata
+          # -- NextRecordIdentifier, LastChunkNumber, the dirty/full flags,
+          # the record count -- that EventLogReader's open+ReadEvent() path
+          # above never touches? EventLogSession.GetLogInformation() reads
+          # exactly that metadata on its own, independent of enumerating any
+          # record. Non-fatal: reported, not thrown, so later probes still run.
+          try {
+              $sess = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+              $info = $sess.GetLogInformation('artifacts/generated.evtx',
+                        [System.Diagnostics.Eventing.Reader.PathType]::FilePath)
+              Write-Host "LOGINFO: ok - records=$($info.RecordCount) oldest=$($info.OldestRecordNumber) full=$($info.IsLogFull)"
+          } catch {
+              Write-Host "LOGINFO: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          # Probe B: does the failure come from touching a record's
+          # properties rather than from parsing it? Stage 2 above reads
+          # records but never reads a field off one. EventRecord's
+          # properties are lazily resolved, so probe each individually
+          # against the record the raw reader already returned -- one
+          # failure per property, not a single all-or-nothing exception.
+          if ($null -ne $firstNative) {
+              foreach ($p in 'Id','Level','ProviderName','TimeCreated','RecordId','MachineName') {
+                  try   { $v = $firstNative.$p; Write-Host "PROP $p ok: $v" }
+                  catch { Write-Host "PROP $p FAILED - $($_.Exception.Message)" }
+              }
+              try   { $null = $firstNative.ToXml(); Write-Host "PROP ToXml ok" }
+              catch { Write-Host "PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "PROP: skipped - no record captured from the raw reader"
           }
 
           $expected = (Get-Content artifacts/expected.json | ConvertFrom-Json)
