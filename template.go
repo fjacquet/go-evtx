@@ -61,6 +61,14 @@ func parseTemplateDef(chunk []byte, off int) (*templateDef, error) {
 type templateCache struct {
 	chunk []byte
 	defs  map[int]*templateDef
+
+	// onShape, when non-nil, receives one shapeEvent per structural token the
+	// decoder walks — see shapeEvent in binxml_decode.go. It lives here rather
+	// than on binxmlParser because the parser is rebuilt for every nested
+	// fragment and the cache is the one thing threaded through all of them, so
+	// a hook set once reaches the whole record without touching a signature.
+	// Nil in every production path; set only by the corpus profiler.
+	onShape func(shapeEvent)
 }
 
 func newTemplateCache(chunk []byte) *templateCache {

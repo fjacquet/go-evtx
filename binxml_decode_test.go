@@ -730,3 +730,53 @@ func TestParseSubstitutionRef_ArrayTypeGoverns(t *testing.T) {
 		})
 	}
 }
+
+// TestShapeHook_FiresOverOneRealRecord checks the profiler hook itself — that
+// it is reached from every parse method and reports the token forms actually
+// present. It asserts nothing about the format: system.evtx is excluded as
+// evidence (see the plan's "Why system.evtx is out"), and is used here only
+// because it is the one file CI has.
+func TestShapeHook_FiresOverOneRealRecord(t *testing.T) {
+	r, err := Open("testdata/system.evtx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	var got []shapeEvent
+	r.templates.onShape = func(e shapeEvent) { got = append(got, e) }
+	if _, err := r.ReadEvent(); err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("the hook never fired")
+	}
+
+	kinds := map[string]int{}
+	tokens := map[uint8]int{}
+	for _, e := range got {
+		kinds[e.Kind]++
+		tokens[e.Token]++
+	}
+	for _, k := range []string{
+		shapeKindBodyFragment, shapeKindElement, shapeKindAttribute, shapeKindSubstitution,
+	} {
+		if kinds[k] == 0 {
+			t.Errorf("no %s events: that parse method is not wired to the hook", k)
+		}
+	}
+	t.Logf("record 0: %d events, kinds %v, tokens %v", len(got), kinds, tokens)
+}
+
+// TestShapeHook_NilByDefault pins the production contract: a Reader nobody
+// attached a profiler to carries no hook, so emit is a predictable nil branch.
+func TestShapeHook_NilByDefault(t *testing.T) {
+	r, err := Open("testdata/system.evtx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	if r.templates.onShape != nil {
+		t.Error("a freshly opened Reader must not carry a profiler hook")
+	}
+}

@@ -147,6 +147,92 @@ type binxmlParser struct {
 	pos   int     // cursor within buf
 	subs  []Value // substitution values for this record
 	cache *templateCache
+
+	// attrIndex is the position of the attribute currently being parsed within
+	// its element's list. Only the shape hook reads it; the parse itself is
+	// driven by each attribute token's own "more follow" bit.
+	attrIndex int
+}
+
+// Shape event kinds. A shape is what the encoder chose, never what it encoded:
+// which token form, which flags, which declared types. No names and no values
+// ever enter a shapeEvent — the corpus these are censused over is full of
+// account names, SIDs, machine names and IP addresses.
+const (
+	shapeKindBodyFragment = "body-fragment"
+	shapeKindElement      = "element"
+	shapeKindAttribute    = "attribute"
+	shapeKindSubstitution = "substitution"
+	shapeKindLiteral      = "literal"
+)
+
+// Attribute positions within a list, as reported by shapeEvent.AttrPos.
+const (
+	attrPosOnly   = "only"
+	attrPosFirst  = "first"
+	attrPosMiddle = "middle"
+	attrPosLast   = "last"
+)
+
+// shapeEvent is one structural observation from a BinXML walk. It is
+// deliberately comparable, so a census can use it directly as a map key.
+type shapeEvent struct {
+	Kind  string // one of the shapeKind* constants
+	Token uint8  // the token byte: 0x41 vs 0x01, 0x46 vs 0x06, 0x0e vs 0x0d
+
+	// Element.
+	DepSet      bool // dependency_id is a real index, not the 0xffff sentinel
+	DataSizeNil bool // declared data_size is zero
+	EmptyClose  bool // closed by CloseEmptyElementTag, not EndElementTag
+	HasValue    bool // carries a value token of its own
+	HasChildren bool // carries child elements
+
+	// Attribute.
+	AttrPos string // one of the attrPos* constants
+
+	// Substitution and literal.
+	Declared ValueType // the type the template's token declares
+	Actual   ValueType // the type the substitution array declares
+}
+
+// emit hands one observation to the profiler, if one is attached. Nil in every
+// production path, so this is a predictable branch and nothing else.
+func (p *binxmlParser) emit(e shapeEvent) {
+	if p.cache != nil && p.cache.onShape != nil {
+		p.cache.onShape(e)
+	}
+}
+
+// attrPosition names where an attribute sits in its list, from its index and
+// its own "more follow" bit. A lone attribute is "only" rather than "last":
+// whether real encoders use token 0x06 for a single attribute is one of the
+// questions the census exists to answer (see the F13b note in
+// docs/evtx-format-notes.md).
+// emitElement reports one element's shape once its terminator is known —
+// emptyClose and the presence of a value or children are only settled there.
+func (p *binxmlParser) emitElement(tok byte, depID uint16, dataSize uint32, emptyClose bool, node *Node) {
+	p.emit(shapeEvent{
+		Kind:        shapeKindElement,
+		Token:       tok,
+		DepSet:      depID != depIDNotSet,
+		DataSizeNil: dataSize == 0,
+		EmptyClose:  emptyClose,
+		HasValue:    node.Value != nil,
+		HasChildren: len(node.Children) > 0,
+	})
+}
+
+func attrPosition(index int, more bool) string {
+	switch {
+	case index == 0 && !more:
+		return attrPosOnly
+	case index == 0:
+		return attrPosFirst
+	case !more:
+		return attrPosLast
+	default:
+		return attrPosMiddle
+	}
 }
 
 // decodeRecordBinXML decodes one record's BinXML payload into an element
@@ -320,6 +406,7 @@ func (p *binxmlParser) parseFragment() (*Node, error) {
 	if p.pos+4 > len(p.buf) || p.buf[p.pos] != tokFragmentHeader {
 		return nil, fmt.Errorf("go_evtx: expected a fragment header at body offset %d", p.pos)
 	}
+	p.emit(shapeEvent{Kind: shapeKindBodyFragment, Token: tokFragmentHeader})
 	p.pos += 4
 	node, err := p.parseElement()
 	if err != nil {
@@ -372,6 +459,7 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 		declaredAttrListSize := int(le32(p.buf[p.pos:]))
 		p.pos += 4 // attr_list_size; back-checked below once the list is known
 		attrRegionStart := p.pos
+		p.attrIndex = 0
 		for {
 			attr, more, err := p.parseAttribute()
 			if err != nil {
@@ -381,6 +469,7 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 			if !more {
 				break
 			}
+			p.attrIndex++
 		}
 		// attr_list_size counts only the attribute list itself (measured,
 		// binxml.go's closeAttrList doc comment) — cross-check it for free,
@@ -398,6 +487,7 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 	switch p.buf[p.pos] {
 	case tokCloseEmptyElement:
 		p.pos++
+		p.emitElement(tok, depID, declaredDataSize, true, node)
 		return p.finishElement(node, name, start, declaredDataSize)
 	case tokCloseStartElement:
 		p.pos++
@@ -414,6 +504,7 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 		switch t := p.buf[p.pos]; t {
 		case tokEndElement:
 			p.pos++
+			p.emitElement(tok, depID, declaredDataSize, false, node)
 			return p.finishElement(node, name, start, declaredDataSize)
 		case tokOpenElement, tokOpenElementAttrs:
 			child, err := p.parseElement()
@@ -530,7 +621,14 @@ func (p *binxmlParser) parseAttribute() (attr *Attr, more bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	return &Attr{Name: name, Value: *v}, tok == tokAttributeMore, nil
+	more = tok == tokAttributeMore
+	p.emit(shapeEvent{
+		Kind:    shapeKindAttribute,
+		Token:   tok,
+		AttrPos: attrPosition(p.attrIndex, more),
+		Actual:  v.Type,
+	})
+	return &Attr{Name: name, Value: *v}, more, nil
 }
 
 // parseSubstitutionRef reads token(1) index(2) type(1) and resolves it.
@@ -538,10 +636,11 @@ func (p *binxmlParser) parseSubstitutionRef() (*Value, error) {
 	if p.pos+4 > len(p.buf) {
 		return nil, fmt.Errorf("go_evtx: substitution token truncated at body offset %d", p.pos)
 	}
+	tok := p.buf[p.pos]
 	idx := int(le16(p.buf[p.pos+1:]))
-	// p.buf[p.pos+3] is the type the template's substitution token declares.
-	// It is deliberately not read here: where it disagrees with the type the
-	// substitution array declares, the ARRAY governs, because the array
+	// declared is the type the template's substitution token states. It does
+	// not drive the decode: where it disagrees with the type the substitution
+	// array declares, the ARRAY governs, because the array
 	// describes the bytes that are actually present and those are the bytes
 	// being decoded.
 	//
@@ -558,12 +657,22 @@ func (p *binxmlParser) parseSubstitutionRef() (*Value, error) {
 	// documents that pairing; it is measured only. The general rule covers it
 	// for the same reason: a 2-byte value read as a 1-byte type is wrong
 	// whichever declaration one prefers.
+	//
+	// It is still read, because the disagreement itself is a shape worth
+	// censusing.
+	declared := ValueType(p.buf[p.pos+3])
 	p.pos += 4
 	if idx >= len(p.subs) {
 		return nil, fmt.Errorf("go_evtx: substitution index %d out of range: the array declares %d entries",
 			idx, len(p.subs))
 	}
 	v := p.subs[idx]
+	p.emit(shapeEvent{
+		Kind:     shapeKindSubstitution,
+		Token:    tok,
+		Declared: declared,
+		Actual:   v.Type,
+	})
 	return &v, nil
 }
 
@@ -573,6 +682,7 @@ func (p *binxmlParser) parseLiteralValue() (*Value, error) {
 	if p.pos+2 > len(p.buf) {
 		return nil, fmt.Errorf("go_evtx: value token truncated at body offset %d", p.pos)
 	}
+	tokenPos := p.pos
 	typ := ValueType(p.buf[p.pos+1])
 	if typ != ValString {
 		return nil, fmt.Errorf(
@@ -594,6 +704,12 @@ func (p *binxmlParser) parseLiteralValue() (*Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.emit(shapeEvent{
+		Kind:     shapeKindLiteral,
+		Token:    p.buf[tokenPos],
+		Declared: typ,
+		Actual:   v.Type,
+	})
 	return &v, nil
 }
 
