@@ -20,13 +20,34 @@ through it (phase 1–2), then profile go-evtx's own output the same way and dif
   `GOOS=windows go build ./...` clean; `golangci-lint run` clean.
 - No string values are ever written to a corpus output file. Names, types,
   sizes, offsets, counts only.
-- Invariant **derivation** never reads `testdata/system.evtx`. It is the
-  held-out validation set and the only CI-assertable file. (Counting the
-  decoder's own failures on it is not derivation — the floor is defined on it.)
-- `decodedFloor` in `corpus_scan_test.go` is a minimum, never an equality, and
-  rises in the same commit as any fix that changes it.
+- **`testdata/system.evtx` is excluded from everything except crash
+  regression.** Not merely held out of derivation — excluded as evidence. See
+  "Why system.evtx is out" below.
+- `decodedFloor` in `corpus_scan_test.go` stays as a smoke gate: it proves the
+  decoder does not regress into crashing or refusing records it used to read.
+  It is **not** a conformance target and no task is judged by moving it.
 - `AnsiString` stays unimplemented: the format carries no codepage.
 - Every task ends with a commit.
+
+## Why system.evtx is out
+
+Every format rule this project mined, it mined from `testdata/system.evtx` —
+1601 records. The `<System>` block's fourteen children, `OptionalSubstitution`
+against `NormalSubstitution` per element, the `dependency_id` rule,
+`EventID/@Qualifiers`'s `UNSIGNED_WORD` declared type, the `0x46`/`0x06`
+attribute-token rule: tasks 8b and 8c took all of them from that one file. The
+encoder was built to imitate it. `ToXml` rejects what the encoder produces.
+
+Measured 2026-08-09: **55 of its records carry a `Null`-typed substitution with
+data. That construct appears zero times in the other 320 398 records of the
+local corpus.** One file does something nothing else does.
+
+Against that: Task 9a's splice showed `system.evtx`'s own record 0 renders
+completely on the VM. So it is not uniformly atypical — which sharpens the
+hypothesis rather than weakening it. We may have copied the atypical parts.
+
+Phase 1–2 answers this without changing method: censusing shapes across 320 k
+records re-derives every rule previously taken from 1601.
 
 ## Measured baseline (2026-08-09)
 
@@ -36,11 +57,12 @@ Local corpus, 322 k records, **73.8 % decoded**.
 |---|---|---|
 | type disagreement, `SizeT`→`HexInt64` / `HexInt32` / `UInt8`→`UInt16` | 61 843 | `security.evtx` is 100 % this |
 | array type `0x81` (array of UTF-16 strings) | 22 036 | all four `testdata` files, 11 samples |
-| `Null`-typed substitution carrying data | 55 | `system.evtx` |
+| `Null`-typed substitution carrying data | 55 | `system.evtx` **only** — excluded, see above |
 | `AnsiString` | 16 | out of scope |
 | `SysTime` | 8 | samples |
 
-`testdata/system.evtx`: 1496 / 1601 today; 1546 after Task 1; **1601 after Task 3**.
+Derivation corpus — everything above **except** `system.evtx` — is 320 398
+records. Phase 0 targets ≥ 99.99 % of those: everything but `AnsiString`'s 16.
 
 ## File structure
 
@@ -71,10 +93,11 @@ Local corpus, 322 k records, **73.8 % decoded**.
       rejecting every other array type, with the message corrected — the
       current "measured zero occurrences" is false.
 - [ ] Green. Then re-scan the corpus and record the delta.
-- [ ] Raise `decodedFloor` to the measured `system.evtx` count (expected 1546).
+- [ ] Update `decodedFloor` to whatever `system.evtx` now reads — to keep the
+      smoke gate accurate, not because reaching a number is the goal.
 - [ ] Commit.
 
-**Exit criterion:** `app.evtx` goes from 43.85 % to ~100 %; `system.evtx` 1546.
+**Exit criterion:** `app.evtx` goes from 43.85 % to ~100 %.
 
 ---
 
@@ -89,27 +112,25 @@ Local corpus, 322 k records, **73.8 % decoded**.
       mechanism: `SizeT` is a pointer width and the array is what says which.
 - [ ] Sanity-check the values, not just the count: the 61 344 `security.evtx`
       records must decode to plausible `HexInt64` values, not garbage.
-- [ ] Re-scan; raise `decodedFloor` if it moves.
+- [ ] Re-scan; update `decodedFloor` only to keep the smoke gate accurate.
 - [ ] Commit.
 
 **Exit criterion:** `security.evtx` from 66.65 % to ~100 %.
 
 ---
 
-### Task 3: `Null`-typed substitution carrying data
+### Task 3: `Null`-typed substitution carrying data — **DROPPED**
 
-**Files:** `value.go`, `value_test.go`, `corpus_scan_test.go`
+Kept in the plan as a record of the decision, not as work.
 
-- [ ] Measure first: what is in those 55 payloads — length distribution, and
-      whether the bytes look like a value of some other type.
-- [ ] Decide the rule from that evidence and write it in the comment. Default
-      if the bytes carry no signal: `Null` with data is absent, data ignored.
-- [ ] Test, implement, green.
-- [ ] Raise `decodedFloor` to 1601 and change the comment: the floor is no
-      longer below the record count.
-- [ ] Commit.
+The construct occurs in 55 records of `testdata/system.evtx` and in **zero** of
+the other 320 398. Implementing it would teach the decoder a rule sourced from
+the one file this plan has excluded as evidence — the exact mistake the
+exclusion exists to prevent. The decoder keeps rejecting it, and the rejection
+is itself a measurement: it is how the census will flag the construct when
+Task 8 profiles that file's idiosyncrasies.
 
-**Exit criterion:** `testdata/system.evtx` decodes 1601 / 1601.
+Revisit only if the construct turns up outside `system.evtx`.
 
 ---
 
@@ -155,13 +176,13 @@ Local corpus, 322 k records, **73.8 % decoded**.
 - [ ] Walk the derivation corpus — the 278 samples plus untracked
       `security.evtx`, `system2.evtx`, `app.evtx`. **Never `system.evtx`.**
 - [ ] Aggregate shape → count; write `testdata/shape-census.json`.
-- [ ] Held-out check: every shape the census records as unseen must also be
-      unseen in `system.evtx`. A hit invalidates the rule and gets reported.
-- [ ] Frozen-counter test on `system.evtx` — asserts the instrument works, not
-      what it learned.
+- [ ] Frozen-counter test on `system.evtx` — the only tracked file, so the only
+      one CI can run the profiler against. It asserts the *instrument* works;
+      it asserts nothing about the format.
 - [ ] Commit the census.
 
-**Exit criterion:** census written; held-out check clean or its misses named.
+**Exit criterion:** census written over 320 398 records, `system.evtx`
+contributing none of them.
 
 ---
 
@@ -176,6 +197,26 @@ Local corpus, 322 k records, **73.8 % decoded**.
       the analysis to `docs/evtx-format-notes.md`.
 - [ ] Commit.
 
-**Exit criterion:** the candidate list exists. Phase 3 — fix, reprofile, and
-the single VM run when the list is empty — is driven inline and is not part of
-this plan.
+**Exit criterion:** the candidate list exists.
+
+---
+
+### Task 8: what we copied from system.evtx that nobody else does
+
+The encoder was built to imitate one file. This task measures how far that went.
+
+- [ ] Profile `testdata/system.evtx` through the same hook and diff it against
+      the census: every shape it emits that the other 320 398 records never do.
+- [ ] Cross-reference each hit against `binxml.go`: does the encoder reproduce
+      it? The `Null`-with-data construct (55 records) is the known member of
+      this set; tasks 8b and 8c's `<System>` decisions are the ones to check.
+- [ ] Anything the encoder copied and the corpus contradicts joins Task 7's
+      candidate list, ranked above the rest — it is a rule we adopted from a
+      sample of one.
+- [ ] Write the finding to `docs/evtx-format-notes.md`. Commit.
+
+**Exit criterion:** every encoder choice traceable to `system.evtx` is either
+confirmed by 320 398 records or on the candidate list.
+
+Phase 3 — fix, reprofile, and the single VM run when the list is empty — is
+driven inline and is not part of this plan.

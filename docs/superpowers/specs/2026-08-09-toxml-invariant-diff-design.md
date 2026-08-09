@@ -67,13 +67,22 @@ Three roles, and a file may hold only one.
 
 | Role | Files | Use |
 |---|---|---|
-| **Derivation** | the 278 `EVTX-ATTACK-SAMPLES` files, plus local untracked `security.evtx` (1985 chunks, 3.2), `system2.evtx`, `app.evtx` | mine invariants; never asserted on |
-| **Held-out validation** | `testdata/system.evtx` | a shape absent from the derivation corpus must also be absent here; if it appears, the rule is false |
-| **CI** | `testdata/system.evtx` | the only tracked file, so the only assertable one |
+| **Derivation** | the 278 `EVTX-ATTACK-SAMPLES` files, plus local untracked `security.evtx` (1985 chunks, 3.2), `system2.evtx`, `app.evtx` — 320 398 records | mine invariants; never asserted on |
+| **Suspect** | `testdata/system.evtx` | excluded as evidence; profiled separately to find what the encoder copied from it |
+| **CI** | `testdata/system.evtx` | the only tracked file; a crash-regression smoke gate, not a conformance target |
 
-Deriving from the same file CI asserts on makes the assertion circular — it
-could no longer detect that the derivation was wrong. Holding `system.evtx`
-out costs nothing and buys an independent check.
+**Amended 2026-08-09, after the plan's baseline scan.** `system.evtx` began as
+the held-out validation set. It is now excluded as evidence altogether.
+Measured: 55 of its records carry a `Null`-typed substitution with data, a
+construct appearing zero times in the other 320 398 records. Every format rule
+this project mined it mined from that one file — the `<System>` block's
+fourteen children, the per-element `OptionalSubstitution` choice, the
+`dependency_id` rule, `EventID/@Qualifiers`'s declared type, the `0x46`/`0x06`
+attribute-token rule — so the encoder was built to imitate it, and `ToXml`
+rejects what the encoder produces. Task 9a's splice showed its record 0 renders
+fine, so it is not uniformly atypical; the working hypothesis is that we copied
+the atypical parts. Censusing 320 398 records re-derives every rule previously
+taken from 1601.
 
 No string values leave the corpus. Real logs carry account names, SIDs,
 machine names and IP addresses, and this output is quoted in `docs/`.
