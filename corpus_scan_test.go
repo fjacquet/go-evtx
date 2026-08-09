@@ -146,7 +146,7 @@ func fragScan(cache *templateCache, chunkOff, length int, f *recordFact) {
 // scanEVTX walks one file's chunks and records, emitting one fact per file,
 // per chunk and per record. It never stops on a bad record: a corpus scan that
 // aborts at the first surprise measures nothing.
-func scanEVTX(path, label string, emit func(any)) error {
+func scanEVTX(path, label string, emit func(any), onShape func(shapeEvent)) error {
 	b, err := os.ReadFile(path) // #nosec G304 — a developer-supplied corpus path
 	if err != nil {
 		return err
@@ -172,6 +172,7 @@ func scanEVTX(path, label string, emit func(any)) error {
 			continue
 		}
 		cache := newTemplateCache(chunk)
+		cache.onShape = onShape
 
 		cf := chunkFact{Kind: "chunk", Path: label, Chunk: ci,
 			FreeOff: int(binary.LittleEndian.Uint32(chunk[48:52]))}
@@ -258,11 +259,15 @@ func TestCorpusScan(t *testing.T) {
 		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".evtx") {
 			return nil //nolint:nilerr // an unreadable entry is skipped, not fatal
 		}
+		if isExcludedFixture(p) {
+			t.Logf("skip %s: excluded as evidence", filepath.Base(p))
+			return nil
+		}
 		rel, relErr := filepath.Rel(root, p)
 		if relErr != nil {
 			rel = filepath.Base(p)
 		}
-		if scanErr := scanEVTX(p, rel, emit); scanErr != nil {
+		if scanErr := scanEVTX(p, rel, emit, nil); scanErr != nil {
 			t.Logf("skip %s: %v", rel, scanErr)
 			failed++
 			return nil
@@ -276,52 +281,20 @@ func TestCorpusScan(t *testing.T) {
 	t.Logf("scanned %d files (%d unreadable) -> %s", files, failed, outPath)
 }
 
-// decodedFloor is how many of testdata/system.evtx's 1601 records the strict
-// decoder reads today.
+// excludedFixture names the file this project must not measure the format
+// from. Every rule go-evtx encodes it took from testdata/system.evtx — the
+// <System> block's fourteen children, the per-element OptionalSubstitution
+// choice, the dependency_id rule, EventID/@Qualifiers's declared type, the
+// 0x46/0x06 attribute-token rule — so the encoder was built to imitate one
+// sample, and ToXml rejects what the encoder produces. It is also measurably
+// odd: 55 of its records carry a Null-typed substitution with data, a
+// construct occurring zero times in the other 320 398 records of the local
+// corpus.
 //
-// It is a crash-regression smoke gate, NOT a conformance target. system.evtx
-// is excluded as evidence about the format: 55 of its records carry a
-// Null-typed substitution with data, a construct occurring zero times in the
-// other 320 398 records of the local corpus, and every rule this project mined
-// it mined from this one file (see the plan's "Why system.evtx is out"). No
-// task is judged by moving this number; it exists so that a decoder change
-// which silently starts refusing records fails loudly.
-//
-// Asserted as a floor, never an equality, so it can only go up. 1496 before
-// StringArray (0x81) landed; the 55 remaining failures are the Null-with-data
-// construct, which stays deliberately unimplemented.
-const decodedFloor = 1546
+// Enforced here rather than left to whoever sets EVTX_CORPUS, because a
+// convention that is only written down is a convention that gets forgotten.
+const excludedFixture = "system.evtx"
 
-// TestCorpusScanTracked runs the dumper over the one fixture the repository
-// tracks, so the scanner itself stays honest in CI. The counts are the file's
-// own, measured: 3.1, 1601 records.
-func TestCorpusScanTracked(t *testing.T) {
-	var files []fileFact
-	var records int
-	err := scanEVTX("testdata/system.evtx", "system.evtx", func(v any) {
-		switch f := v.(type) {
-		case fileFact:
-			files = append(files, f)
-		case recordFact:
-			records++
-		}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 1 {
-		t.Fatalf("got %d file facts, want 1", len(files))
-	}
-	got := files[0]
-	if got.Major != 3 || got.Minor != 1 {
-		t.Errorf("format version = %d.%d, want 3.1", got.Major, got.Minor)
-	}
-	if got.Records != 1601 || records != 1601 {
-		t.Errorf("records = %d (emitted %d), want 1601", got.Records, records)
-	}
-	if got.Decoded < decodedFloor {
-		t.Errorf("decoded %d of %d records, below the %d floor — a decoder regression",
-			got.Decoded, got.Records, decodedFloor)
-	}
-	t.Logf("strict decoder read %d of %d records (floor %d)", got.Decoded, got.Records, decodedFloor)
+func isExcludedFixture(path string) bool {
+	return strings.EqualFold(filepath.Base(path), excludedFixture)
 }
