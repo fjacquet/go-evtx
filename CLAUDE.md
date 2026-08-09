@@ -121,14 +121,14 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 | 31 | Opcode | UINT8 (always 0, no caller-supplied source) |
 | 32 | Keywords | HEXINT64 (always 0, no caller-supplied source) |
 | 33 | EventRecordID | UINT64 (the writer's own record ID) |
-| 34 | Correlation/@ActivityID | NULL, declared type GUID (no caller-supplied source) |
-| 35 | Correlation/@RelatedActivityID | NULL, declared type GUID (no caller-supplied source) |
-| 36 | Execution/@ProcessID | NULL, declared type UINT32 (no caller-supplied source) |
-| 37 | Execution/@ThreadID | NULL, declared type UINT32 (no caller-supplied source) |
+| 34 | Correlation/@ActivityID | NULL (no caller-supplied source) |
+| 35 | Correlation/@RelatedActivityID | NULL (no caller-supplied source) |
+| 36 | Execution/@ProcessID | NULL (no caller-supplied source) |
+| 37 | Execution/@ThreadID | NULL (no caller-supplied source) |
 | 38 | Channel | STRING (from `fields["Channel"]`) |
-| 39 | Security/@UserID | NULL, declared type SID (no caller-supplied source) |
+| 39 | Security/@UserID | NULL (no caller-supplied source) |
 | 40 | Provider/@Guid | STRING (from `fields["ProviderGuid"]`) |
-| 41 | EventID/@Qualifiers | NULL, declared type UINT16 (no caller-supplied source) |
+| 41 | EventID/@Qualifiers | NULL (no caller-supplied source; F14 reverted this from a UINT16 declared type — see below) |
 
 The 12 data fields (indices 5–28) are hardcoded in `dataFieldNames` in `binxml.go`; they kept their original indices and semantics across v0.7.0/Task 8b/8c — nothing calling `WriteRecord` needs to change.
 
@@ -140,4 +140,4 @@ The seven scalar children whose sole content is one substitution value (`Version
 
 `EventID/@Qualifiers` (F13c) is go-evtx's first NULL-valued `OptionalSubstitution` whose declared type is not a generic "null type" marker: `testdata/system.evtx` encodes this exact attribute as `[size 0, type UNSIGNED_WORD (0x06)]` — its own real declared type — and MS-EVEN6's own worked example shows the same shape.
 
-**F14 (v0.7.0, post-Task-8d): the note above was acted on.** F12b's five NULL fields at 34–37/39 all declared `binXMLTypeNull` (`0x00`) — a claim task-8b-report.md's own prose asserted was "reproducing exactly how the real file itself encodes these fields," directly contradicted by that same report's own Step 1 table two paragraphs above it, which shows `Correlation/@ActivityID`/`@RelatedActivityID` typed GUID (`0x0f`) and `Security/@UserID` typed SID (`0x13`), both at size 0 — never `0x00`. No real record sampled anywhere in this release ever emits `binXMLTypeNull`; it has been removed from the codebase. All five fields now declare their own real type at size 0 (`Execution/@ProcessID`/`@ThreadID` → UINT32, by extension from the one real sample found, which happens to populate both non-null) — the same convention `EventID/@Qualifiers` already used. This did not change any byte's *width* (every affected entry stays size 0); only the declared type byte moved, in both the substitution array's value-spec and the `OptionalSubstitution` token's own type byte in the template body.
+**F14 (v0.7.0, Task 8e): a false start, corrected in the same task.** The note above led directly to code: an initial version of Task 8e reclassified F12b's five NULL fields (34/35/36/37/39) from `binXMLTypeNull` (`0x00`) to their field's own real type (GUID, SID, UINT32), trusting task-8b-report.md's Step 1 table's claim that the real file encodes them that way. That build broke `python-evtx`'s own regression guard (`Evtx.Nodes.RootNode.substitutions()` computes a fixed-width type's length independent of the declared size and rejects a mismatch bigger than 4 bytes — `GUID`'s fixed 16 against a declared `0` fails outright). Re-verifying the Step 1 table three independent ways — a byte-for-byte raw re-parse of the exact real record it cites, `python-evtx==0.8.1`'s own successful parse of that same real record, and `UnsignedWordTypeNode`'s fixed-2-byte tolerance explaining why `EventID/@Qualifiers`'s wrong type never broke anything — found the table wrong at exactly four positions: substitution indices 4/7/12/18 in the real file's own numbering (`EventID/@Qualifiers`, `Correlation/@ActivityID`, `Security/@UserID`, `Correlation/@RelatedActivityID`) are all declared type `0x00` there, not `UNSIGNED_WORD`/`GUID`/`SID`. Every other row in the same table checked out exactly as stated. **The fix was reverted**: all six NULL-valued fields (F12b's original five, plus `EventID/@Qualifiers`, F13c's one) now declare `binXMLTypeNull` (`0x00`) — F12b's original choice was correct all along. task-8b-report.md and task-8c-report.md each carry their own correction note.

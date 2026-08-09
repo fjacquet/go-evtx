@@ -38,33 +38,58 @@ const (
 	binXMLOptionalSubstitution = 0x0E // Optional substitution token (F12c)
 	binXMLValueText            = 0x05 // Value token: literal (non-substituted) value
 
+	binXMLTypeNull     = 0x00 // Value type: NULL — no data (F12c)
 	binXMLTypeString   = 0x01 // Value type: UTF-16LE string (WSTRING)
 	binXMLTypeUint8    = 0x04 // Value type: uint8 (UNSIGNED_BYTE) (F12a/F12b)
 	binXMLTypeUint16   = 0x06 // Value type: uint16 (UNSIGNED_WORD)
-	binXMLTypeUint32   = 0x08 // Value type: uint32 (UNSIGNED_DWORD) (F14)
 	binXMLTypeUint64   = 0x0A // Value type: uint64 (UNSIGNED_QWORD) (F12b)
-	binXMLTypeGUID     = 0x0F // Value type: GUID (F14)
 	binXMLTypeFiletime = 0x11 // Value type: FILETIME (uint64)
-	binXMLTypeSID      = 0x13 // Value type: SID (F14)
 	binXMLTypeHexInt64 = 0x15 // Value type: HexInt64 (uint64, hex-rendered) (F12b)
 )
 
-// F14: testdata/system.evtx's own NULL-valued OptionalSubstitution entries —
-// Correlation/@ActivityID and @RelatedActivityID (GUID, size 0),
-// Security/@UserID (SID, size 0), and EventID/@Qualifiers (UNSIGNED_WORD,
-// size 0, already fixed in F13c) — all declare the attribute's OWN real
-// type with zero-length data. None of them declare a generic "null type"
-// marker. Measured directly (task-8b-report.md's Step 1 table): substitution
-// indices 7/18 (Correlation's two attributes) are typed GUID (0x0f) at size
-// 0, and index 12 (Security's UserID) is typed SID (0x13) at size 0 — not
-// 0x00. F12b's implementation read the table correctly for Qualifiers (F13c
-// later) but not for these five, whose own prose (in the same task's report)
-// asserted "NULL (value-spec size 0, type 0x00) — reproducing exactly how
-// the real file itself encodes these fields," a claim the very table above
-// it contradicts. go-evtx previously had a binXMLTypeNull (0x00) constant
-// for this; it is removed here because — once every NULL-valued field uses
-// its own real type instead — nothing in this codebase has a legitimate
-// reason to emit 0x00, and no real Windows record sampled ever does either.
+// F14 (v0.7.0, Task 8e): a same-task false start and its correction, kept
+// here rather than silently squashed, per this release's own "record null
+// results" discipline.
+//
+// task-8b-report.md's Step 1 table claims Correlation/@ActivityID and
+// @RelatedActivityID are typed GUID (0x0f), Security/@UserID is typed SID
+// (0x13), and EventID/@Qualifiers is typed UNSIGNED_WORD (0x06) — all at
+// size 0 — and F13c (Task 8c) built Qualifiers to match. An initial version
+// of this task believed that table and reclassified the other five NULL
+// fields (which F12b had left as a generic binXMLTypeNull) to match it too.
+// That build broke python-evtx's own regression guard immediately, on
+// record 0: `Evtx.Nodes.RootNode.substitutions()` computes each fixed-width
+// type's length independent of the declared size (`GuidTypeNode.tag_length()
+// == 16`, unconditionally) and raises `ParseException("Invalid substitution
+// value size")` when `abs(declared_size - type_length) > 4` — 16 vs. a
+// declared 0 fails that check outright.
+//
+// Independent re-verification — three separate methods, not one — settled
+// it the other way: (1) a byte-for-byte raw parse of testdata/system.evtx's
+// own record 0 (the exact record the Step 1 table cites, EventRecordID
+// 12049), reading the substitution array's spec bytes directly with no
+// decoding library involved, found substitution indices 4, 7, 12, and 18 —
+// Qualifiers, ActivityID, UserID, RelatedActivityID — are ALL declared type
+// 0x00 (size 0) in the real file, not GUID/SID/UNSIGNED_WORD; every other
+// row in the same table (Level, Task, EventID content, Keywords,
+// TimeCreated, EventRecordID, Version, Execution's two non-null attributes)
+// checks out exactly as the table states. (2) `python-evtx==0.8.1` parses
+// testdata/system.evtx's own record 0 without error — via its own official
+// library, not this project's decoder — which would be impossible if that
+// record's ActivityID really were GUID-typed at size 0, per the same
+// tolerance check that broke go-evtx's build. (3)
+// `UnsignedWordTypeNode.tag_length()` is a fixed 2, so a declared size of 0
+// against it is within the library's abs()<=4 tolerance — which is why
+// Qualifiers/UInt16/size-0 (F13c) never broke python-evtx even though it
+// was, per (1) above, also wrong. The Step 1 table's error was localized to
+// exactly these four NULL-valued positions; nothing else in it was wrong.
+//
+// So: every NULL-valued OptionalSubstitution attribute go-evtx writes
+// declares the generic binXMLTypeNull (0x00) marker — F12b's original
+// choice, and (per the above) EventID/@Qualifiers now matches it too,
+// reverting F13c's own value-type choice for that one field. See
+// task-8b-report.md's own correction note (added by this task) for the
+// Step 1 table's row-level detail.
 
 // depIDNotSet is the "not set" sentinel for an OpenStartElementTag's
 // dependency_id field (libyal EVTX docs: "-1 (0xffff) => not set"). An
@@ -306,14 +331,14 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 //	31: Opcode                     (UINT8)    — F12b, no source: always 0
 //	32: Keywords                   (HEXINT64) — F12b, no source: always 0
 //	33: EventRecordID              (UINT64)   — F12b, the writer's record ID
-//	34: Correlation/@ActivityID        (NULL, type GUID)   — F12b, no source; F14: real type, not 0x00
-//	35: Correlation/@RelatedActivityID (NULL, type GUID)   — F12b, no source; F14: real type, not 0x00
-//	36: Execution/@ProcessID           (NULL, type UINT32) — F12b, no source; F14: real type, not 0x00
-//	37: Execution/@ThreadID            (NULL, type UINT32) — F12b, no source; F14: real type, not 0x00
+//	34: Correlation/@ActivityID        (NULL) — F12b, no source
+//	35: Correlation/@RelatedActivityID (NULL) — F12b, no source
+//	36: Execution/@ProcessID           (NULL) — F12b, no source
+//	37: Execution/@ThreadID            (NULL) — F12b, no source
 //	38: Channel                    (STRING)   — F12b, from fields["Channel"]
-//	39: Security/@UserID               (NULL, type SID)    — F12b, no source; F14: real type, not 0x00
+//	39: Security/@UserID               (NULL) — F12b, no source
 //	40: Provider/@Guid             (STRING)   — F13b, from fields["ProviderGuid"]
-//	41: EventID/@Qualifiers            (NULL, type UNSIGNED_WORD) — F13c, no source
+//	41: EventID/@Qualifiers            (NULL) — F13c, no source; F14: reverted from a UINT16 declared type — see the F14 doc comment by the type constants
 //
 // Total: 29 + 13 = 42 substitutions.
 //
@@ -387,19 +412,20 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c)
+	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c; F14: NULL-type, not UINT16)
 	//
-	// F13c: Qualifiers is go-evtx's first NULL-valued OptionalSubstitution
-	// attribute whose declared type is its own real type rather than a
-	// generic null-type marker — testdata/system.evtx encodes this exact
-	// attribute as [size 0, type UNSIGNED_WORD (0x06)] (task-8b-report.md's
-	// Step 1 table, extended by task-8c-report.md). F14 later found and
-	// applied this same convention to the five NULL fields F12b had left
-	// declaring a generic 0x00 type (now removed). F13a: the element's own
+	// F13c originally declared Qualifiers UNSIGNED_WORD (0x06) at size 0,
+	// believing task-8b-report.md's Step 1 table, which described this exact
+	// attribute that way. F14 (Task 8e) found that table wrong here — a
+	// byte-for-byte re-parse of the real record it cites shows this
+	// attribute's value-spec type is actually 0x00 (generic NULL), like
+	// every other NULL-valued attribute go-evtx writes. See the F14 doc
+	// comment by the type constants for the full correction and how it was
+	// verified (three independent methods, not one). F13a: the element's own
 	// dependency_id becomes subEventID (its own content index), and the
 	// content substitution switches to OptionalSubstitution.
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", subEventID, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "Qualifiers", subEventIDQualifiers, binXMLTypeUint16, false, baseOffset, names)
+	writeAttributeOptional(b, "Qualifiers", subEventIDQualifiers, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	writeOptionalSubstitution(b, subEventID, binXMLTypeUint16)
@@ -448,18 +474,18 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	writeOptionalSubstitution(b, subEventRecordID, binXMLTypeUint64)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <Correlation ActivityID="%34" RelatedActivityID="%35"/>       (F12b/F12c; F14: GUID, not NULL-type)
+	//     <Correlation ActivityID="%34" RelatedActivityID="%35"/>       (F12b/F12c)
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Correlation", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "ActivityID", subActivityID, binXMLTypeGUID, true, baseOffset, names)
-	writeAttributeOptional(b, "RelatedActivityID", subRelatedActivityID, binXMLTypeGUID, false, baseOffset, names)
+	writeAttributeOptional(b, "ActivityID", subActivityID, binXMLTypeNull, true, baseOffset, names)
+	writeAttributeOptional(b, "RelatedActivityID", subRelatedActivityID, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <Execution ProcessID="%36" ThreadID="%37"/>                   (F12b/F12c; F14: UINT32, not NULL-type)
+	//     <Execution ProcessID="%36" ThreadID="%37"/>                   (F12b/F12c)
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Execution", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "ProcessID", subProcessID, binXMLTypeUint32, true, baseOffset, names)
-	writeAttributeOptional(b, "ThreadID", subThreadID, binXMLTypeUint32, false, baseOffset, names)
+	writeAttributeOptional(b, "ProcessID", subProcessID, binXMLTypeNull, true, baseOffset, names)
+	writeAttributeOptional(b, "ThreadID", subThreadID, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
@@ -476,9 +502,9 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	writeSubstitution(b, 4, binXMLTypeString)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <Security UserID="%39"/>                                      (F12b/F12c; F14: SID, not NULL-type)
+	//     <Security UserID="%39"/>                                      (F12b/F12c)
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Security", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "UserID", subSecurityUserID, binXMLTypeSID, false, baseOffset, names)
+	writeAttributeOptional(b, "UserID", subSecurityUserID, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
@@ -662,29 +688,26 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// rather than invented data — matching Version's own real value (0) in
 	// the sampled testdata/system.evtx record. EventRecordID uses the
 	// writer's real record ID. Correlation/Execution/Security's attributes
-	// have no source either; each is NULL (size 0), matching what the real
-	// file itself stores for these exact fields when an event doesn't
-	// populate them — but F14 corrects the declared TYPE those NULL entries
-	// carry: testdata/system.evtx's own value-spec table (task-8b-report.md's
-	// Step 1) shows ActivityID/RelatedActivityID typed GUID and UserID typed
-	// SID, at size 0 — the field's own real type, never a generic NULL-type
-	// marker (0x00), which no sampled real record ever uses. ProcessID/
-	// ThreadID have no directly-sampled NULL example (the one real record
-	// measured happens to populate both, typed UNSIGNED_DWORD), but the same
-	// convention is applied by extension: their own real type, UINT32,
-	// rather than the previous, now-removed NULL-type constant. Channel
-	// follows Computer's existing pattern.
+	// have no source either; each is NULL (value-spec size 0, type
+	// binXMLTypeNull/0x00) — reproducing exactly how the real file itself
+	// encodes these fields for an event that doesn't populate them (F14/Task
+	// 8e re-confirmed this directly, byte-for-byte, against the exact real
+	// record task-8b-report.md's own Step 1 table cites, after an initial
+	// attempt at this task briefly believed that table's claim of GUID/SID
+	// types instead — see the F14 doc comment by the type constants for the
+	// full story and how the correction was verified three independent
+	// ways). Channel follows Computer's existing pattern.
 	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{0}})                           // 29 Version
 	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(0)})                   // 30 Task
 	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{0}})                           // 31 Opcode
 	subs = append(subs, substitutionEntry{binXMLTypeHexInt64, uint64LEBytes(0)})                 // 32 Keywords
 	subs = append(subs, substitutionEntry{binXMLTypeUint64, uint64LEBytes(recordID)})            // 33 EventRecordID
-	subs = append(subs, substitutionEntry{binXMLTypeGUID, nil})                                  // 34 Correlation/@ActivityID (F14)
-	subs = append(subs, substitutionEntry{binXMLTypeGUID, nil})                                  // 35 Correlation/@RelatedActivityID (F14)
-	subs = append(subs, substitutionEntry{binXMLTypeUint32, nil})                                // 36 Execution/@ProcessID (F14)
-	subs = append(subs, substitutionEntry{binXMLTypeUint32, nil})                                // 37 Execution/@ThreadID (F14)
+	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 34 Correlation/@ActivityID
+	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 35 Correlation/@RelatedActivityID
+	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 36 Execution/@ProcessID
+	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 37 Execution/@ThreadID
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["Channel"])}) // 38 Channel
-	subs = append(subs, substitutionEntry{binXMLTypeSID, nil})                                   // 39 Security/@UserID (F14)
+	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 39 Security/@UserID
 
 	// Sub 40..41 (F13b/F13c): the two remaining named divergences.
 	//
@@ -693,16 +716,13 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// defaulting to "" when the caller doesn't supply one.
 	//
 	// EventID/@Qualifiers has no caller-supplied source (go-evtx's WriteRecord
-	// API has no concept of an event qualifier code), so it is NULL —
-	// declaring its own real type, UNSIGNED_WORD, with zero-length data: that
-	// is what testdata/system.evtx itself does for this exact attribute (Step
-	// 1 table), and MS-EVEN6's own worked example shows the same shape — a
-	// NULL OptionalSubstitution whose declared type is the attribute's real
-	// type, not a generic null-type marker. F14 later applied this same
-	// convention to Correlation/Execution/Security's five NULL fields above,
-	// which originally (F12b) all declared a generic 0x00 type instead.
+	// API has no concept of an event qualifier code), so it is NULL,
+	// binXMLTypeNull-typed like every other NULL field above. F13c originally
+	// declared it UNSIGNED_WORD, believing task-8b-report.md's Step 1 table;
+	// F14 (Task 8e) found that table wrong for this exact attribute (and
+	// three others) — see the F14 doc comment by the type constants.
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 40 Provider/@Guid
-	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 41 EventID/@Qualifiers
+	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                       // 41 EventID/@Qualifiers
 
 	return subs
 }
@@ -835,14 +855,15 @@ func writeAttributeSub(b *bytes.Buffer, name string, subIndex uint16, subType by
 // writeAttributeOptional is writeAttributeSub for an attribute value go-evtx
 // has no source for (Correlation's ActivityID/RelatedActivityID, Execution's
 // ProcessID/ThreadID, Security's UserID — F12b/F12c; EventID's Qualifiers —
-// F13c): the value token is OptionalSubstitution (0x0E) rather than
-// NormalSubstitution (0x0D), and subType is the attribute's own real type
-// (e.g. binXMLTypeGUID for ActivityID) with a zero-length value, matching how
-// testdata/system.evtx itself encodes these exact fields when an event
-// doesn't populate them (value_spec size 0, declared type unchanged) —
-// reproducing the real file's own answer to "we don't have this," not
-// inventing one. F14 corrected the four call sites that used to pass a
-// generic NULL-type marker instead of the field's real type.
+// F13c, reverted to this by F14): the value token is OptionalSubstitution
+// (0x0E) rather than NormalSubstitution (0x0D), and subType is
+// binXMLTypeNull in every call site, matching how testdata/system.evtx
+// itself encodes these exact fields when an event doesn't populate them
+// (value_spec size 0, type 0x00) — reproducing the real file's own answer
+// to "we don't have this," not inventing one. See the F14 doc comment by
+// the type constants: an earlier version of this function's callers briefly
+// used each field's own real type instead (GUID, SID, UINT32, UINT16),
+// believing a since-corrected reading of the real file.
 //
 // Layout: [token: 1B] [name_offset: 4B] [NameNode] [0x0E subIdx subType]
 func writeAttributeOptional(b *bytes.Buffer, name string, subIndex uint16, subType byte, moreAttrs bool, binXMLBase uint32, refs *[]chunkRef) {

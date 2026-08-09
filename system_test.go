@@ -14,11 +14,21 @@
 // use OptionalSubstitution (0x0E) with a real dependency_id, Provider must
 // carry a second attribute (Guid) using the 0x46/0x06 "more attributes
 // follow" pattern, and EventID must carry a Qualifiers attribute whose value
-// is NULL (UNSIGNED_WORD-typed, zero-length). All three were confirmed
-// failing against the pre-F13 encoder before implementation: EventID/Level's
-// OpenStartElementTag carried depIDNotSet (0xffff) and their content used
-// binXMLNormalSubstitution (0x0D); Provider had one attribute; "Guid" and
-// "Qualifiers" appeared nowhere in the payload.
+// is NULL. All three were confirmed failing against the pre-F13 encoder
+// before implementation: EventID/Level's OpenStartElementTag carried
+// depIDNotSet (0xffff) and their content used binXMLNormalSubstitution
+// (0x0D); Provider had one attribute; "Guid" and "Qualifiers" appeared
+// nowhere in the payload.
+//
+// F14 (Task 8e) corrects Qualifiers' declared type. task-8b-report.md's Step
+// 1 table (which F13c built from) claimed this attribute's real-file value
+// spec is UNSIGNED_WORD (0x06) at size 0; a byte-for-byte re-parse of the
+// exact real record that table cites found it is actually declared type
+// 0x00 (generic NULL) — the table was wrong on this specific point (and
+// three others; see the F14 doc comment in binxml.go, by the type
+// constants, for the full correction and how it was verified). The
+// TestBuildTemplateBody_EventIDQualifiersIsNullOptional test below was
+// updated accordingly, not deleted, so this history stays visible.
 package evtx
 
 import (
@@ -230,13 +240,17 @@ func TestCollectSubstitutions_ProviderGuidIsString(t *testing.T) {
 	}
 }
 
-// TestBuildTemplateBody_EventIDQualifiersIsNullOptional (F13c): EventID must
-// carry a Qualifiers attribute, and — since go-evtx has no caller-supplied
-// source for it — its substitution entry must be NULL exactly the way
-// testdata/system.evtx itself encodes NULL: value-spec type UNSIGNED_WORD
-// (0x06, Qualifiers' own declared type, per task-8b-report.md's Step 1
-// table), size 0. Not binXMLTypeNull (0x00) — the real file does not use a
-// generic "null type" marker; it uses the field's real type with size 0.
+// TestBuildTemplateBody_EventIDQualifiersIsNullOptional (F13c; type corrected
+// by F14): EventID must carry a Qualifiers attribute, and — since go-evtx
+// has no caller-supplied source for it — its substitution entry must be
+// NULL exactly the way testdata/system.evtx itself encodes NULL: value-spec
+// type binXMLTypeNull (0x00), size 0. F13c originally asserted UNSIGNED_WORD
+// (0x06) here, believing task-8b-report.md's Step 1 table's claim that this
+// exact attribute uses its own real declared type rather than a generic
+// "null type" marker; a byte-for-byte re-parse of the real record that
+// table cites found the table wrong on this specific point (F14, Task 8e —
+// see the doc comment in binxml.go by the type constants for the full
+// correction and its three-way independent verification).
 func TestBuildTemplateBody_EventIDQualifiersIsNullOptional(t *testing.T) {
 	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
 
@@ -250,8 +264,8 @@ func TestBuildTemplateBody_EventIDQualifiersIsNullOptional(t *testing.T) {
 		t.Fatalf("collectSubstitutionsFromFields returned %d entries, want > %d", len(subs), subEventIDQualifiers)
 	}
 	got := subs[subEventIDQualifiers]
-	if got.typ != binXMLTypeUint16 {
-		t.Errorf("EventID/@Qualifiers (substitution %d) value type = 0x%02x, want 0x%02x (UNSIGNED_WORD, matching the real file's NULL encoding)", subEventIDQualifiers, got.typ, binXMLTypeUint16)
+	if got.typ != binXMLTypeNull {
+		t.Errorf("EventID/@Qualifiers (substitution %d) value type = 0x%02x, want 0x%02x (NULL, matching the real file's actual encoding)", subEventIDQualifiers, got.typ, binXMLTypeNull)
 	}
 	if len(got.data) != 0 {
 		t.Errorf("EventID/@Qualifiers (substitution %d) value data length = %d, want 0 (NULL)", subEventIDQualifiers, len(got.data))
