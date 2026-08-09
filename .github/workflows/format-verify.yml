@@ -1269,3 +1269,226 @@ jobs:
               if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
               throw "Get-WinEvent ordering(s) failed on secondary rung B (no-xmlns) fixture: $($failures -join '; ')"
           }
+
+  # ---------------------------------------------------------------------
+  # Task 9e: task 9d's own ladder found no size boundary (task 9c) and could
+  # not build its decisive all-literal experiment at all -- MS-EVEN6's own
+  # grammar has no ValueText production for a non-string type, so every
+  # typed scalar MUST be a substitution (verified against
+  # testdata/system.evtx: 35/35 real substitutions there are typed, 15/15
+  # real literals are all StringType, zero exceptions -- task-9d-report.md).
+  # What has never been isolated, across every measurement this release has
+  # made, is the declared VALUE TYPE of each substitution.
+  #
+  # Decisive (all-string): every one of the control's 42 substitutions
+  # (System's 18 plus EventData's 12 Data pairs) declared StringType (0x01)
+  # -- both the template body's own substitution tokens and the
+  # substitution array's value-spec descriptors, kept consistent by
+  # construction (evtx.VariantAllString, binxml_variants.go) -- each value
+  # reformatted as it would render in XML (decimal digits for an integer,
+  # hex for Keywords, ISO-8601 for the FILETIME, empty string for a field
+  # with no source). If this renders, the defect is a type mismatch on one
+  # specific substitution -- a small target for a follow-up bisect. If it
+  # still fails, value types are exonerated as a category and what remains
+  # is the template body's own element/token encoding.
+  #
+  # Secondary rung (four-string), batched into the same run: production's
+  # own declared types unchanged EXCEPT for the four substitutions whose
+  # types were never independently verified as strings --
+  # Security/@UserID, Execution/@ProcessID, Execution/@ThreadID, Keywords
+  # -- the four positions task-8b-report.md's own Step 1 type table was
+  # later shown wrong about (F14, task 8e's correction note), so they carry
+  # the least evidence of any declared type in the template
+  # (evtx.VariantFourFieldsString).
+  #
+  # Both are control-scale (System + EventData, 12 substituted-name Data
+  # pairs, xmlns present, production's own OptionalSubstitution/
+  # dependency_id convention unchanged -- that axis was already isolated as
+  # a null result by task 9d's VariantAllNormalSubstitution) so each rung
+  # differs from the existing control (rung 3, generate-minimal/
+  # get-winevent-minimal) in exactly the variable it is named for. xmlns
+  # stays present in both, so python-evtx is expected to behave like the
+  # control (unlike rung B/no-xmlns) -- no dedicated python-evtx job is
+  # added here, matching rung A (all-normal-sub)'s own precedent.
+  # ---------------------------------------------------------------------
+  generate-ladder-all-string:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate decisive experiment (every substitution declared StringType)
+        run: |
+          mkdir -p artifacts-ladder-all-string
+          go run ./cmd/gen-ladder-all-string -out artifacts-ladder-all-string
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-all-string-evtx
+          path: artifacts-ladder-all-string/
+          retention-days: 7
+
+  get-winevent-ladder-all-string:
+    needs: generate-ladder-all-string
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-all-string-evtx
+          path: artifacts-ladder-all-string
+      - name: Parse decisive experiment (all-string) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-all-string/ladder-all-string.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "ALLSTRING STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "ALLSTRING STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "ALLSTRING STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "ALLSTRING STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "ALLSTRING PROP ToXml ok" }
+              catch { Write-Host "ALLSTRING PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "ALLSTRING PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "ALLSTRING GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "ALLSTRING GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "ALLSTRING GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "ALLSTRING GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on decisive experiment (all-string) fixture: $($failures -join '; ')"
+          }
+
+  generate-ladder-four-string:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate secondary rung (UserID/ProcessID/ThreadID/Keywords declared StringType)
+        run: |
+          mkdir -p artifacts-ladder-four-string
+          go run ./cmd/gen-ladder-four-string -out artifacts-ladder-four-string
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-four-string-evtx
+          path: artifacts-ladder-four-string/
+          retention-days: 7
+
+  get-winevent-ladder-four-string:
+    needs: generate-ladder-four-string
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-four-string-evtx
+          path: artifacts-ladder-four-string
+      - name: Parse secondary rung (four-string) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-four-string/ladder-four-string.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "FOURSTRING STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "FOURSTRING STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "FOURSTRING STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "FOURSTRING STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "FOURSTRING PROP ToXml ok" }
+              catch { Write-Host "FOURSTRING PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "FOURSTRING PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "FOURSTRING GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "FOURSTRING GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "FOURSTRING GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "FOURSTRING GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on secondary rung (four-string) fixture: $($failures -join '; ')"
+          }

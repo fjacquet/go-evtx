@@ -35,11 +35,37 @@
 // boundary) can build these payloads and hand them to the existing, public
 // Writer.WriteRaw. Not part of the writer's stable API, and not referenced
 // by any exported Writer/Reader method.
+//
+// Task 9e (task-9e-report.md) adds VariantAllString and
+// VariantFourFieldsString. Task 9d's own ladder found no size boundary
+// (task 9c) and could not build its decisive all-literal experiment at all
+// — MS-EVEN6's own grammar has no ValueText production for a non-string
+// type, so every typed scalar MUST be a substitution (verified against
+// testdata/system.evtx: 35/35 real substitutions there are typed, 15/15
+// real literals are all StringType). What was never isolated, across every
+// measurement this release has made, is the declared VALUE TYPE of each
+// substitution — UINT16 for EventID, HEXINT64 for Keywords, and so on.
+// VariantAllString reverts every one of the 42 control-scale substitutions
+// (the whole <System> block plus <EventData>'s 12 Data pairs) to StringType
+// (0x01), formatting each value the way it would render in XML (decimal
+// digits for an integer, hex for Keywords, ISO-8601 for the FILETIME, an
+// empty string for a field with no source) — the most permissive type,
+// already proven renderable by task 9a's splice experiment. It reuses
+// production's own OptionalSubstitution/dependency_id convention exactly
+// (VariantAllNormalSubstitution already isolated that axis as a null
+// result in task 9d) and changes ONLY the type byte, in both the template
+// body's substitution tokens and the substitution array's value-spec
+// descriptors, so the two always agree. VariantFourFieldsString is the
+// same mechanism applied to only the four values a prior task's own type
+// table was later shown wrong about (task-8b/8e's F14 correction):
+// Security/@UserID, Execution/@ProcessID, Execution/@ThreadID, Keywords —
+// everything else stays at production's own declared type.
 package evtx
 
 import (
 	"bytes"
 	"encoding/binary"
+	"strconv"
 )
 
 // Variant selects one rung of the task 9c ladder.
@@ -92,6 +118,43 @@ const (
 	// its own fixture/jobs specifically so that expected Linux failure does
 	// not gate or obscure its independent Windows result.
 	VariantNoXmlns
+
+	// VariantAllString (task 9e, decisive experiment) is the control's own
+	// shape (System + EventData, all 12 substituted-name Data pairs,
+	// xmlns present, production's own OptionalSubstitution/dependency_id
+	// convention unchanged) with every one of the 42 substitutions' declared
+	// VALUE TYPE forced to StringType (0x01) — both in the template body's
+	// own substitution tokens (writeSubstitution/writeOptionalSubstitution's
+	// valueType argument) and in the substitution array's value-spec
+	// descriptors (substitutionEntry.typ), so the two never disagree. Each
+	// value's DATA is reformatted to match: decimal digits for an integer
+	// (EventID, Level, Version, Task, Opcode, EventRecordID), a hex string
+	// for Keywords (Windows' own rendering convention for that field), an
+	// ISO-8601 string for SystemTime, and an empty string for a field
+	// go-evtx has no source for (ActivityID, RelatedActivityID, ProcessID,
+	// ThreadID, UserID, EventID/@Qualifiers) — every field that is already
+	// StringType in production (ProviderName, Computer, Channel,
+	// Provider/@Guid, every Data name/value) is unaffected by construction.
+	// If this renders, the defect is a type mismatch on one specific
+	// substitution and the next step is a per-element bisect; if it still
+	// fails, value types are exonerated as a category and what remains is
+	// the template body's own element/token encoding.
+	VariantAllString
+
+	// VariantFourFieldsString (task 9e, secondary rung, batched into the
+	// same CI run as VariantAllString) applies VariantAllString's exact
+	// mechanism to ONLY the four substitutions whose types were never
+	// independently verified as strings — Security/@UserID,
+	// Execution/@ProcessID, Execution/@ThreadID, Keywords — the four
+	// positions task-8b-report.md's own Step 1 type table was later shown
+	// wrong about (F14, task 8e), so they carry the least evidence of any
+	// declared type in the whole template. Every other substitution keeps
+	// its production declared type unchanged. If VariantAllString renders
+	// and this narrower variant does too, the search narrows further for
+	// free in the same run; if VariantAllString fails and this one passes,
+	// the defect is isolated to one of these four fields without a further
+	// bisect task.
+	VariantFourFieldsString
 )
 
 // Substitution indices <System> alone needs, when it is not sharing index
@@ -214,13 +277,25 @@ func buildVariantTemplateBody(baseOffset uint32, names *[]chunkRef, variant Vari
 		b.WriteByte(binXMLCloseElement)
 	}
 
-	// useOptional selects production's own OptionalSubstitution (0x0E) +
-	// real dependency_id convention (F12c/F13a) for every variant except
+	// System block. VariantAllString/VariantFourFieldsString (task 9e) keep
+	// production's own OptionalSubstitution/dependency_id convention exactly
+	// (that axis was already isolated and found null by task 9d's
+	// VariantAllNormalSubstitution) and instead vary only the declared VALUE
+	// TYPE of each substitution — routed through writeVariantSystemBlockTyped
+	// instead of writeVariantSystemBlock. useOptional still selects
+	// production's own convention for every other variant except
 	// VariantAllNormalSubstitution, which reverts <System> to the
 	// pre-F12c/F13a shape (NormalSubstitution + depIDNotSet everywhere) as
 	// its own single variable under test.
-	useOptional := variant != VariantAllNormalSubstitution
-	dataSizeStack, patches = writeVariantSystemBlock(b, baseOffset, names, dataSizeStack, patches, useOptional)
+	switch variant {
+	case VariantAllString:
+		dataSizeStack, patches = writeVariantSystemBlockTyped(b, baseOffset, names, dataSizeStack, patches, stringizeAll)
+	case VariantFourFieldsString:
+		dataSizeStack, patches = writeVariantSystemBlockTyped(b, baseOffset, names, dataSizeStack, patches, stringizeFour)
+	default:
+		useOptional := variant != VariantAllNormalSubstitution
+		dataSizeStack, patches = writeVariantSystemBlock(b, baseOffset, names, dataSizeStack, patches, useOptional)
+	}
 
 	switch variant {
 	case VariantSystemOnly:
@@ -229,9 +304,12 @@ func buildVariantTemplateBody(baseOffset uint32, names *[]chunkRef, variant Vari
 		dataSizeStack, patches = writeVariantEventData(b, baseOffset, names, dataSizeStack, patches, 1, true)
 	case VariantEventDataLiteralNames:
 		dataSizeStack, patches = writeVariantEventData(b, baseOffset, names, dataSizeStack, patches, 12, false)
-	case VariantAllNormalSubstitution, VariantNoXmlns:
-		// Both are control-scale: System + EventData, all 12 Data pairs,
-		// substituted names — production's own convention.
+	case VariantAllNormalSubstitution, VariantNoXmlns, VariantAllString, VariantFourFieldsString:
+		// All four are control-scale: System + EventData, all 12 Data
+		// pairs, substituted names — production's own convention. Data
+		// pairs are already StringType in every variant, so task 9e's type
+		// change is a no-op here; only <System>'s own 18 substitutions
+		// above are affected.
 		dataSizeStack, patches = writeVariantEventData(b, baseOffset, names, dataSizeStack, patches, 12, true)
 	}
 
@@ -395,6 +473,160 @@ func writeVariantSystemBlock(b *bytes.Buffer, baseOffset uint32, names *[]chunkR
 	return dataSizeStack, patches
 }
 
+// writeVariantSystemBlockTyped is writeVariantSystemBlock's own <System>
+// shape (same 14 children, same order, same elements/attributes) always
+// held at production's own OptionalSubstitution/dependency_id convention
+// (equivalent to writeVariantSystemBlock's useOptional=true path) — task
+// 9e (VariantAllString/VariantFourFieldsString) does not touch that axis,
+// which task 9d's VariantAllNormalSubstitution already isolated as a null
+// result. The one thing this function varies is the declared VALUE TYPE
+// each substitution token carries: stringize(idx) reports, for each of the
+// 18 v* indices <System> uses, whether that substitution's type should be
+// forced to StringType (0x01) instead of its production type. Every call
+// site routes its normal type argument through typeFor so the choice is
+// made in exactly one place per field.
+func writeVariantSystemBlockTyped(b *bytes.Buffer, baseOffset uint32, names *[]chunkRef, dataSizeStack []uint32, patches []fieldPatch, stringize func(uint16) bool) ([]uint32, []fieldPatch) {
+	var attrListPos uint32
+
+	typeFor := func(idx uint16, production byte) byte {
+		if stringize(idx) {
+			return binXMLTypeString
+		}
+		return production
+	}
+
+	//   <System>
+	dataSizeStack = pushOpenElement(b, "System", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+
+	//     <Provider Name="%0" Guid="%16"/>
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Provider", depIDNotSet, baseOffset, names, dataSizeStack)
+	writeAttributeSub(b, "Name", vProviderName, typeFor(vProviderName, binXMLTypeString), true, baseOffset, names)
+	writeAttributeSub(b, "Guid", vProviderGuid, typeFor(vProviderGuid, binXMLTypeString), false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <EventID Qualifiers="%17">%1</EventID>
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", vEventID, baseOffset, names, dataSizeStack)
+	writeAttributeOptional(b, "Qualifiers", vEventIDQualifiers, typeFor(vEventIDQualifiers, binXMLTypeUint16), false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vEventID, typeFor(vEventID, binXMLTypeUint16))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Version>%5</Version>
+	dataSizeStack = pushOpenElement(b, "Version", false, vVersion, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vVersion, typeFor(vVersion, binXMLTypeUint8))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Level>%2</Level>
+	dataSizeStack = pushOpenElement(b, "Level", false, vLevel, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vLevel, typeFor(vLevel, binXMLTypeUint8))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Task>%6</Task>
+	dataSizeStack = pushOpenElement(b, "Task", false, vTask, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vTask, typeFor(vTask, binXMLTypeUint16))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Opcode>%7</Opcode>
+	dataSizeStack = pushOpenElement(b, "Opcode", false, vOpcode, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vOpcode, typeFor(vOpcode, binXMLTypeUint8))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Keywords>%8</Keywords>
+	dataSizeStack = pushOpenElement(b, "Keywords", false, vKeywords, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vKeywords, typeFor(vKeywords, binXMLTypeHexInt64))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <TimeCreated SystemTime="%3"/>
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "TimeCreated", depIDNotSet, baseOffset, names, dataSizeStack)
+	writeAttributeSub(b, "SystemTime", vSystemTime, typeFor(vSystemTime, binXMLTypeFiletime), false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <EventRecordID>%9</EventRecordID>
+	dataSizeStack = pushOpenElement(b, "EventRecordID", false, vEventRecordID, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, vEventRecordID, typeFor(vEventRecordID, binXMLTypeUint64))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Correlation ActivityID="%10" RelatedActivityID="%11"/>
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Correlation", depIDNotSet, baseOffset, names, dataSizeStack)
+	writeAttributeOptional(b, "ActivityID", vActivityID, typeFor(vActivityID, binXMLTypeNull), true, baseOffset, names)
+	writeAttributeOptional(b, "RelatedActivityID", vRelatedActivityID, typeFor(vRelatedActivityID, binXMLTypeNull), false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Execution ProcessID="%12" ThreadID="%13"/>
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Execution", depIDNotSet, baseOffset, names, dataSizeStack)
+	writeAttributeOptional(b, "ProcessID", vProcessID, typeFor(vProcessID, binXMLTypeNull), true, baseOffset, names)
+	writeAttributeOptional(b, "ThreadID", vThreadID, typeFor(vThreadID, binXMLTypeNull), false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Channel>%14</Channel>
+	dataSizeStack = pushOpenElement(b, "Channel", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeSubstitution(b, vChannel, typeFor(vChannel, binXMLTypeString))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Computer>%4</Computer>
+	dataSizeStack = pushOpenElement(b, "Computer", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	b.WriteByte(binXMLCloseElement)
+	writeSubstitution(b, vComputer, typeFor(vComputer, binXMLTypeString))
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//     <Security UserID="%15"/>
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Security", depIDNotSet, baseOffset, names, dataSizeStack)
+	writeAttributeOptional(b, "UserID", vSecurityUserID, typeFor(vSecurityUserID, binXMLTypeNull), false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	//   </System>
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
+
+	return dataSizeStack, patches
+}
+
+// fourFieldStringSet names the exactly four v* substitution indices
+// VariantFourFieldsString (task 9e secondary rung) forces to StringType —
+// Security/@UserID, Execution/@ProcessID, Execution/@ThreadID, Keywords —
+// the four fields task-8b-report.md's own Step 1 type table was later shown
+// wrong about (F14, task 8e's correction note), so they carry the least
+// evidence of any declared type in the template.
+var fourFieldStringSet = map[uint16]bool{
+	vSecurityUserID: true,
+	vProcessID:      true,
+	vThreadID:       true,
+	vKeywords:       true,
+}
+
+// stringizeAll is the stringize predicate for VariantAllString: every
+// substitution, no exceptions.
+func stringizeAll(uint16) bool { return true }
+
+// stringizeFour is the stringize predicate for VariantFourFieldsString: only
+// the four indices in fourFieldStringSet.
+func stringizeFour(idx uint16) bool { return fourFieldStringSet[idx] }
+
+// isoFiletimeLayout formats a time.Time the way Windows renders a FILETIME
+// substitution in XML: an ISO-8601 timestamp with 7 fractional-second
+// digits (FILETIME's own 100ns tick resolution), always in UTC (hence the
+// literal, not numeric-zone, "Z"). Used only by systemSubstitutionsTyped's
+// SystemTime entry when stringize(vSystemTime) is true.
+const isoFiletimeLayout = "2006-01-02T15:04:05.0000000Z"
+
 // writeVariantEventData writes <EventData> with n Data pairs. When
 // substitutedNames is true, each pair's Name AND Value are
 // NormalSubstitution — the same convention production's own Data loop
@@ -435,7 +667,15 @@ func writeVariantEventData(b *bytes.Buffer, baseOffset uint32, names *[]chunkRef
 // <System>'s own 18 entries (v* indices, always present) plus whatever
 // <EventData> needs.
 func variantSubstitutions(variant Variant, eventID int, recordID uint64, fields map[string]string) []substitutionEntry {
-	subs := systemSubstitutions(eventID, recordID, fields)
+	var subs []substitutionEntry
+	switch variant {
+	case VariantAllString:
+		subs = systemSubstitutionsTyped(eventID, recordID, fields, stringizeAll)
+	case VariantFourFieldsString:
+		subs = systemSubstitutionsTyped(eventID, recordID, fields, stringizeFour)
+	default:
+		subs = systemSubstitutions(eventID, recordID, fields)
+	}
 
 	switch variant {
 	case VariantSystemOnly:
@@ -444,11 +684,12 @@ func variantSubstitutions(variant Variant, eventID int, recordID uint64, fields 
 		subs = append(subs, dataPairSubstitutions(fields, 1, true)...)
 	case VariantEventDataLiteralNames:
 		subs = append(subs, dataPairSubstitutions(fields, 12, false)...)
-	case VariantAllNormalSubstitution, VariantNoXmlns:
+	case VariantAllNormalSubstitution, VariantNoXmlns, VariantAllString, VariantFourFieldsString:
 		// Control-scale: all 12 Data pairs, substituted names — production's
 		// own convention. The substitution array's own VALUES are unaffected
 		// by 0x0D-vs-0x0E (that distinction lives only in the template
-		// body's token stream) or by xmlns's presence, so this is identical
+		// body's token stream), by xmlns's presence, or by task 9e's type
+		// change (Data pairs are already StringType), so this is identical
 		// to VariantEventDataLiteralNames's sibling with names substituted.
 		subs = append(subs, dataPairSubstitutions(fields, 12, true)...)
 	}
@@ -482,6 +723,53 @@ func systemSubstitutions(eventID int, recordID uint64, fields map[string]string)
 	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                       // 15 Security/@UserID
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 16 Provider/@Guid
 	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 17 EventID/@Qualifiers
+	return subs
+}
+
+// systemSubstitutionsTyped is systemSubstitutions with each of the 18
+// entries routed through stringize (task 9e): when stringize(idx) is true,
+// the entry becomes {binXMLTypeString, encodeSubString(text)} instead of
+// its production {type, data} pair, where text is that value formatted the
+// way it would appear in rendered XML — decimal digits for an integer
+// (EventID/Level/Version/Task/Opcode/EventRecordID), a hex string for
+// Keywords (Windows' own convention for that field; go-evtx's Keywords is
+// always 0, so this is "0x0"), an ISO-8601 string for SystemTime
+// (isoFiletimeLayout), and an empty string for a field go-evtx has no
+// source for at all (ActivityID, RelatedActivityID, ProcessID, ThreadID,
+// UserID, EventID/@Qualifiers — each already NULL-typed/zero-length in
+// production, so "no value" is the only faithful text). Fields already
+// StringType in production (ProviderName, Computer, Channel,
+// Provider/@Guid) pass their own field value through unchanged either way,
+// so stringize's outcome for those four is a no-op by construction.
+func systemSubstitutionsTyped(eventID int, recordID uint64, fields map[string]string, stringize func(uint16) bool) []substitutionEntry {
+	systemTime := parseTimeCreated(fields)
+
+	entry := func(idx uint16, production byte, data []byte, text string) substitutionEntry {
+		if stringize(idx) {
+			return substitutionEntry{binXMLTypeString, encodeSubString(text)}
+		}
+		return substitutionEntry{production, data}
+	}
+
+	subs := make([]substitutionEntry, 0, vSystemSubCount)
+	subs = append(subs, entry(vProviderName, binXMLTypeString, encodeSubString(fields["ProviderName"]), fields["ProviderName"]))
+	subs = append(subs, entry(vEventID, binXMLTypeUint16, uint16LEBytes(uint16(eventID)), strconv.Itoa(eventID)))
+	subs = append(subs, entry(vLevel, binXMLTypeUint8, []byte{0}, "0"))
+	subs = append(subs, entry(vSystemTime, binXMLTypeFiletime, uint64LEBytes(toFILETIME(systemTime)), systemTime.UTC().Format(isoFiletimeLayout)))
+	subs = append(subs, entry(vComputer, binXMLTypeString, encodeSubString(fields["Computer"]), fields["Computer"]))
+	subs = append(subs, entry(vVersion, binXMLTypeUint8, []byte{0}, "0"))
+	subs = append(subs, entry(vTask, binXMLTypeUint16, uint16LEBytes(0), "0"))
+	subs = append(subs, entry(vOpcode, binXMLTypeUint8, []byte{0}, "0"))
+	subs = append(subs, entry(vKeywords, binXMLTypeHexInt64, uint64LEBytes(0), "0x0"))
+	subs = append(subs, entry(vEventRecordID, binXMLTypeUint64, uint64LEBytes(recordID), strconv.FormatUint(recordID, 10)))
+	subs = append(subs, entry(vActivityID, binXMLTypeNull, nil, ""))
+	subs = append(subs, entry(vRelatedActivityID, binXMLTypeNull, nil, ""))
+	subs = append(subs, entry(vProcessID, binXMLTypeNull, nil, ""))
+	subs = append(subs, entry(vThreadID, binXMLTypeNull, nil, ""))
+	subs = append(subs, entry(vChannel, binXMLTypeString, encodeSubString(fields["Channel"]), fields["Channel"]))
+	subs = append(subs, entry(vSecurityUserID, binXMLTypeNull, nil, ""))
+	subs = append(subs, entry(vProviderGuid, binXMLTypeString, encodeSubString(fields["ProviderGuid"]), fields["ProviderGuid"]))
+	subs = append(subs, entry(vEventIDQualifiers, binXMLTypeUint16, nil, ""))
 	return subs
 }
 

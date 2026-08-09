@@ -65,6 +65,8 @@ func TestBuildVariantBinXML_RoundTripsThroughContainer(t *testing.T) {
 		{"EventDataLiteralNames", VariantEventDataLiteralNames},
 		{"AllNormalSubstitution", VariantAllNormalSubstitution},
 		{"NoXmlns", VariantNoXmlns},
+		{"AllString", VariantAllString},
+		{"FourFieldsString", VariantFourFieldsString},
 	}
 
 	for _, tc := range variants {
@@ -124,6 +126,8 @@ func TestBuildVariantBinXML_StructuralConsistency(t *testing.T) {
 		{"EventDataLiteralNames", VariantEventDataLiteralNames, vSystemSubCount + 12, vSystemSubCount + 11},
 		{"AllNormalSubstitution", VariantAllNormalSubstitution, vSystemSubCount + 24, vSystemSubCount + 23},
 		{"NoXmlns", VariantNoXmlns, vSystemSubCount + 24, vSystemSubCount + 23},
+		{"AllString", VariantAllString, vSystemSubCount + 24, vSystemSubCount + 23},
+		{"FourFieldsString", VariantFourFieldsString, vSystemSubCount + 24, vSystemSubCount + 23},
 	}
 
 	for _, tc := range cases {
@@ -359,7 +363,18 @@ func TestBuildVariantBinXML_AllNormalSubstitutionUsesNoOptionalToken(t *testing.
 type variantWalkResult struct {
 	normalSubs    int
 	optionalSubs  int
-	elementDepIDs []uint16 // dependency_id of every OpenStartElement(Attrs) token, in document order
+	elementDepIDs []uint16      // dependency_id of every OpenStartElement(Attrs) token, in document order
+	subRefs       []subRefEntry // (index, declared type) of every Normal/OptionalSubstitution token, in document order — task 9e
+}
+
+// subRefEntry is one substitution reference found in a template body: the
+// index it points at, and the value type the token itself declares for it
+// (task 9e's own "the two stay consistent" requirement — this is the
+// template-body half of that pair; parseSubstitutionSpecs below reads the
+// substitution array's own half).
+type subRefEntry struct {
+	idx uint16
+	typ byte
 }
 
 // walkVariantBody is an exact (not heuristic) recursive-descent decoder for
@@ -437,6 +452,7 @@ func walkVariantBody(t *testing.T, payload []byte, binXMLChunkOffset uint32) var
 					} else {
 						res.optionalSubs++
 					}
+					res.subRefs = append(res.subRefs, subRefEntry{idx: u16(p + 1), typ: payload[p+3]})
 					p += 4 // token(1) + index(2) + type(1)
 				default:
 					t.Fatalf("walkVariantBody: unexpected attribute-value token 0x%02x at %d", vtok, p)
@@ -470,6 +486,7 @@ func walkVariantBody(t *testing.T, payload []byte, binXMLChunkOffset uint32) var
 				} else {
 					res.optionalSubs++
 				}
+				res.subRefs = append(res.subRefs, subRefEntry{idx: u16(p + 1), typ: payload[p+3]})
 				p += 4
 			default:
 				t.Fatalf("walkVariantBody: unexpected content token 0x%02x at %d", t2, p)
@@ -507,6 +524,146 @@ func TestBuildVariantBinXML_NoXmlnsHasNoXmlnsAttribute(t *testing.T) {
 	if payload[eventTokenPos] != binXMLOpenElement {
 		t.Errorf("<Event> token = 0x%02x, want 0x%02x (OpenStartElementToken, no attrs)", payload[eventTokenPos], binXMLOpenElement)
 	}
+}
+
+// subSpec is one substitution array value-spec: [size u16][type u8][pad u8].
+type subSpec struct {
+	size int
+	typ  byte
+}
+
+// parseSubstitutionSpecs reads a payload's substitution array value-specs
+// directly (count, then count*4 spec bytes) — the array half of task 9e's
+// "declare all of them as strings in both the template's substitution
+// tokens and the value-spec descriptors, so the two stay consistent"
+// requirement; walkVariantBody's subRefs is the template-body half.
+func parseSubstitutionSpecs(t *testing.T, payload []byte, bodyEnd int) []subSpec {
+	t.Helper()
+	count := int(binary.LittleEndian.Uint32(payload[bodyEnd:]))
+	specs := make([]subSpec, count)
+	for i := 0; i < count; i++ {
+		off := bodyEnd + 4 + i*4
+		specs[i] = subSpec{
+			size: int(binary.LittleEndian.Uint16(payload[off:])),
+			typ:  payload[off+2],
+		}
+	}
+	return specs
+}
+
+// TestBuildVariantBinXML_AllStringEveryTypeIsStringAndConsistent confirms
+// VariantAllString (task 9e's decisive experiment) really declares
+// StringType (0x01) for all 42 control-scale substitutions, in BOTH the
+// substitution array's own value-specs AND every substitution token in the
+// template body that references them — the brief's own "the two stay
+// consistent" requirement, checked directly rather than assumed from the
+// encoder's own construction.
+func TestBuildVariantBinXML_AllStringEveryTypeIsStringAndConsistent(t *testing.T) {
+	const binXMLChunkOffset = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+	const wantTotalSubs = vSystemSubCount + 24 // 18 System + 12 Data pairs * 2
+
+	payload := BuildVariantBinXML(VariantAllString, 4663, 1, variantTestFields(), binXMLChunkOffset)
+	dataLength := int(binary.LittleEndian.Uint32(payload[34:38]))
+	bodyEnd := preambleSize + dataLength
+
+	specs := parseSubstitutionSpecs(t, payload, bodyEnd)
+	if len(specs) != wantTotalSubs {
+		t.Fatalf("got %d substitution array entries, want %d", len(specs), wantTotalSubs)
+	}
+	for i, s := range specs {
+		if s.typ != binXMLTypeString {
+			t.Errorf("array spec %d: type = 0x%02x, want 0x%02x (StringType)", i, s.typ, binXMLTypeString)
+		}
+	}
+
+	w := walkVariantBody(t, payload, binXMLChunkOffset)
+	if len(w.subRefs) != wantTotalSubs {
+		t.Fatalf("template body references %d substitutions, array declares %d", len(w.subRefs), wantTotalSubs)
+	}
+	for _, ref := range w.subRefs {
+		if ref.typ != binXMLTypeString {
+			t.Errorf("body token for substitution %d declares type 0x%02x, want StringType", ref.idx, ref.typ)
+		}
+		if int(ref.idx) >= len(specs) {
+			t.Errorf("body token references out-of-range substitution %d (array has %d entries)", ref.idx, len(specs))
+			continue
+		}
+		if specs[ref.idx].typ != binXMLTypeString {
+			t.Errorf("substitution %d: body token declares StringType but array spec declares 0x%02x", ref.idx, specs[ref.idx].typ)
+		}
+	}
+
+	t.Logf("VariantAllString: %d substitutions, all StringType in both array and body tokens", wantTotalSubs)
+}
+
+// TestBuildVariantBinXML_FourFieldsStringOnlyFourChanged confirms
+// VariantFourFieldsString (task 9e's secondary rung) changes the declared
+// type of EXACTLY the four named substitutions — Security/@UserID,
+// Execution/@ProcessID, Execution/@ThreadID, Keywords — to StringType,
+// leaving every other one of the 42 control-scale substitutions at its
+// production type unchanged. Compares position-by-position against
+// VariantNoXmlns, which keeps production's own type convention completely
+// unchanged at the identical control scale (same as
+// TestBuildVariantBinXML_AllNormalSubstitutionUsesNoOptionalToken's own
+// baseline choice, for the same reason: it isolates only the one axis this
+// variant is testing).
+func TestBuildVariantBinXML_FourFieldsStringOnlyFourChanged(t *testing.T) {
+	const binXMLChunkOffset = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+
+	payload := BuildVariantBinXML(VariantFourFieldsString, 4663, 1, variantTestFields(), binXMLChunkOffset)
+	baseline := BuildVariantBinXML(VariantNoXmlns, 4663, 1, variantTestFields(), binXMLChunkOffset)
+
+	dataLength := int(binary.LittleEndian.Uint32(payload[34:38]))
+	bodyEnd := preambleSize + dataLength
+	specs := parseSubstitutionSpecs(t, payload, bodyEnd)
+
+	baseDataLength := int(binary.LittleEndian.Uint32(baseline[34:38]))
+	baseBodyEnd := preambleSize + baseDataLength
+	baseSpecs := parseSubstitutionSpecs(t, baseline, baseBodyEnd)
+
+	if len(specs) != len(baseSpecs) {
+		t.Fatalf("substitution count = %d, want %d (same as the production-convention control)", len(specs), len(baseSpecs))
+	}
+
+	wantChanged := map[int]bool{
+		int(vSecurityUserID): true,
+		int(vProcessID):      true,
+		int(vThreadID):       true,
+		int(vKeywords):       true,
+	}
+
+	changed := 0
+	for i := range specs {
+		if specs[i].typ == baseSpecs[i].typ {
+			if wantChanged[i] {
+				t.Errorf("substitution %d: expected to change to StringType, but stayed 0x%02x", i, specs[i].typ)
+			}
+			continue
+		}
+		changed++
+		if !wantChanged[i] {
+			t.Errorf("substitution %d: type changed from 0x%02x to 0x%02x, but this index is not one of the four named fields", i, baseSpecs[i].typ, specs[i].typ)
+		}
+		if specs[i].typ != binXMLTypeString {
+			t.Errorf("substitution %d: changed type is 0x%02x, want StringType", i, specs[i].typ)
+		}
+	}
+	if changed != 4 {
+		t.Errorf("%d substitution types changed relative to the production-convention control, want exactly 4", changed)
+	}
+
+	// Body tokens must agree with the array at every changed index too.
+	w := walkVariantBody(t, payload, binXMLChunkOffset)
+	for _, ref := range w.subRefs {
+		if int(ref.idx) >= len(specs) {
+			continue
+		}
+		if ref.typ != specs[ref.idx].typ {
+			t.Errorf("substitution %d: body token declares 0x%02x but array spec declares 0x%02x", ref.idx, ref.typ, specs[ref.idx].typ)
+		}
+	}
+
+	t.Logf("VariantFourFieldsString: %d of %d substitutions changed to StringType (want 4)", changed, len(specs))
 }
 
 func utf16leBytes(s string) []byte {
