@@ -88,3 +88,6 @@ func parseSubstitutions(data []byte) ([]Value, int, error) {
 	}
 	return vals, pos, nil
 }
+
+func le16(b []byte) uint16 { return binary.LittleEndian.Uint16(b) }
+func le32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
