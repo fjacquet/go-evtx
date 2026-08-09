@@ -135,6 +135,75 @@ func le32put(b []byte, v uint32) {
 	b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
 }
 
+// buildRecordWithBinXMLSub is buildSimpleRecord's shape simplified to one
+// element, <Event>{sub 0}</Event>, whose substitution is BinXml-typed with
+// value bytes subValue — so a test can control exactly what
+// decodeBinXMLFragment recurses into for C1's nested path.
+func buildRecordWithBinXMLSub(t *testing.T, subValue []byte) (chunk []byte, payload []byte, payloadOff int) {
+	t.Helper()
+	chunk = make([]byte, evtxChunkSize)
+	copy(chunk[0:8], evtxChunkMagic)
+	payloadOff = 512
+
+	element := func(name string, base int, inner []byte) []byte {
+		nn := testNameNode(name)
+		b := []byte{tokOpenElement, 0xff, 0xff, 0, 0, 0, 0}
+		b = append(b, 0, 0, 0, 0)
+		le32put(b[7:], uint32(base+11))
+		b = append(b, nn...)
+		b = append(b, tokCloseStartElement)
+		b = append(b, inner...)
+		b = append(b, tokEndElement)
+		le32put(b[3:], uint32(len(b)-7))
+		return b
+	}
+
+	defOff := payloadOff + 4 + 10
+	bodyBase := defOff + 24
+	inner := []byte{tokNormalSub, 0x00, 0x00, byte(ValBinXML)}
+	body := []byte{tokFragmentHeader, 0x01, 0x01, 0x00}
+	body = append(body, element("Event", bodyBase+4, inner)...)
+	body = append(body, tokEOF)
+
+	p := []byte{tokFragmentHeader, 0x01, 0x01, 0x00,
+		tokTemplateInstance, 0x01, 0, 0, 0, 0, 0, 0, 0, 0}
+	le32put(p[10:], uint32(defOff))
+	def := make([]byte, 24)
+	le32put(def[20:], uint32(len(body)))
+	p = append(p, def...)
+	p = append(p, body...)
+	// Substitution array: count=1, one descriptor (size, type, pad), then the
+	// value bytes verbatim.
+	p = append(p, 0x01, 0, 0, 0)
+	p = append(p, byte(len(subValue)), byte(len(subValue)>>8), byte(ValBinXML), 0x00)
+	p = append(p, subValue...)
+	p = append(p, tokEOF)
+	for (28+len(p))%8 != 0 {
+		p = append(p, 0xee)
+	}
+	if (28+len(p))%8 != 0 {
+		t.Fatalf("test bug: (28+%d) %% 8 = %d, want 0", len(p), (28+len(p))%8)
+	}
+
+	copy(chunk[payloadOff:], p)
+	return chunk, chunk[payloadOff : payloadOff+len(p)], payloadOff
+}
+
+// TestDecodeRecordBinXML_NestedBareFragmentHeaderIsError is the nested
+// variant of the round-2 regression above: a BinXml-typed substitution whose
+// value is exactly a 4-byte fragment header and nothing else. This is what
+// makes the round-1 panic attacker-reachable rather than merely a top-level
+// truncation concern — the nested fragment's length is controlled entirely
+// by the substitution array's own declared size, corruptible independently
+// of the outer record's own length.
+func TestDecodeRecordBinXML_NestedBareFragmentHeaderIsError(t *testing.T) {
+	chunk, payload, off := buildRecordWithBinXMLSub(t, []byte{tokFragmentHeader, 0x01, 0x01, 0x00})
+	cache := newTemplateCache(chunk)
+	if _, err := decodeRecordBinXML(cache, off, len(payload)); err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+}
+
 func TestDecodeRecordBinXML_ResolvesSubstitution(t *testing.T) {
 	chunk, payload, off := buildSimpleRecord(t)
 	cache := newTemplateCache(chunk)
@@ -241,6 +310,26 @@ func TestDecodeRecordBinXML_NegativeCases(t *testing.T) {
 			},
 		},
 		{
+			// Fix round 2, regression for the panic the round-1 re-review found:
+			// a fragment that is exactly a 4-byte fragment header and nothing
+			// else. decodeBinXMLFragment advances pos to 4 after reading the
+			// header, finds pos >= len(payload), and must report that as an
+			// error rather than index payload[pos] to build the error message.
+			// This table only threads mutate's returned LENGTH through to
+			// decodeRecordBinXML (see the loop below) — every other chunk byte
+			// stays whatever buildSimpleRecord wrote — so truncate via a real
+			// subslice of payload, not a fresh literal, to actually land on
+			// buildSimpleRecord's own fragment-header bytes rather than
+			// coincidentally matching them.
+			name: "bare 4-byte fragment header with nothing after it",
+			mutate: func(t *testing.T, payload []byte) []byte {
+				if payload[0] != tokFragmentHeader {
+					t.Fatalf("test bug: payload[0] = %#02x, want tokFragmentHeader %#02x", payload[0], tokFragmentHeader)
+				}
+				return payload[:4]
+			},
+		},
+		{
 			name: "NameNode hash corrupted",
 			mutate: func(t *testing.T, payload []byte) []byte {
 				// The Event element's inline NameNode starts at payload offset
@@ -258,6 +347,12 @@ func TestDecodeRecordBinXML_NegativeCases(t *testing.T) {
 			chunk, payload, off := buildSimpleRecord(t)
 			mutated := tc.mutate(t, payload)
 			cache := newTemplateCache(chunk)
+			// Only mutated's length is threaded through here; decodeRecordBinXML
+			// reads bytes from cache.chunk[off:off+len(mutated)], not from
+			// mutated itself. Every mutate above therefore corrupts payload (or a
+			// subslice/append of it) in place — payload aliases chunk — rather
+			// than returning an unrelated byte slice, so the corruption actually
+			// lands in the bytes this call reads.
 			if _, err := decodeRecordBinXML(cache, off, len(mutated)); err == nil {
 				t.Fatal("expected an error, got nil")
 			}

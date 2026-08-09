@@ -209,7 +209,10 @@ func decodeBinXMLFragment(cache *templateCache, chunkOff, length int, top bool, 
 		pos = 4
 	}
 
-	if pos >= len(payload) || payload[pos] != tokTemplateInstance {
+	if pos >= len(payload) {
+		return nil, fmt.Errorf("go_evtx: fragment at chunk offset %d ends before its template instance", chunkOff)
+	}
+	if payload[pos] != tokTemplateInstance {
 		return nil, fmt.Errorf("go_evtx: expected a template instance at chunk offset %d, found %#02x",
 			chunkOff+pos, payload[pos])
 	}
