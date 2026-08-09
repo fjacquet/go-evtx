@@ -28,14 +28,8 @@
 // regress from reading all 403 records to failing on record 0 — reverted
 // back to UNSIGNED_WORD on that stronger, directly measured signal. See the
 // F14 doc comment in binxml.go, by the type constants, for the full,
-// unresolved story.
-//
-// F16 (v0.7.0, Task 9f) later found Qualifiers' value data was zero-length
-// despite its declared type (UNSIGNED_WORD) requiring 2 bytes — the only
-// width/type disagreement across all 42 of go-evtx's substitutions — and
-// widened it to a real 2-byte zero without touching the type.
-// TestBuildTemplateBody_EventIDQualifiersIsUint16Zero below asserts
-// UNSIGNED_WORD at width 2.
+// unresolved story. TestBuildTemplateBody_EventIDQualifiersIsNullOptional
+// below asserts UNSIGNED_WORD again, matching F13c's original.
 package evtx
 
 import (
@@ -247,25 +241,19 @@ func TestCollectSubstitutions_ProviderGuidIsString(t *testing.T) {
 	}
 }
 
-// TestBuildTemplateBody_EventIDQualifiersIsUint16Zero (F13c; F14
-// re-confirmed the type after a false start; F16 corrected the width):
-// EventID must carry a Qualifiers attribute, and — since go-evtx has no
-// caller-supplied source for it — its substitution entry carries a typed
-// zero: value-spec type UNSIGNED_WORD (0x06, Qualifiers' own declared type
-// per task-8b-report.md's Step 1 table), size 2 (a real UINT16 zero, not a
-// zero-length value). F14 (Task 8e) tried asserting binXMLTypeNull (0x00)
-// here instead, following a byte-for-byte re-parse of testdata/system.evtx's
-// own record that contradicted this table — but that change made
-// Get-WinEvent's STAGE2 READ regress from all 403 records to failing on
-// record 0, an unambiguous signal stronger than the byte-level re-parse.
-// Reverted back to UNSIGNED_WORD on that evidence. F16 (Task 9f) then found
-// this was go-evtx's only substitution (of 42) whose declared type's
-// required width (2 bytes, UNSIGNED_WORD) disagreed with its actual written
-// width (0) — corrected the width, leaving the type question exactly where
-// F14 left it. See the doc comment in binxml.go by the type constants, and
-// F16's doc comment above collectSubstitutionsFromFields's sub 41 line, for
-// the full story.
-func TestBuildTemplateBody_EventIDQualifiersIsUint16Zero(t *testing.T) {
+// TestBuildTemplateBody_EventIDQualifiersIsNullOptional (F13c; F14
+// re-confirmed this after a false start): EventID must carry a Qualifiers
+// attribute, and — since go-evtx has no caller-supplied source for it — its
+// substitution entry must be NULL: value-spec type UNSIGNED_WORD (0x06,
+// Qualifiers' own declared type per task-8b-report.md's Step 1 table), size
+// 0. F14 (Task 8e) tried asserting binXMLTypeNull (0x00) here instead,
+// following a byte-for-byte re-parse of testdata/system.evtx's own record
+// that contradicted this table — but that change made Get-WinEvent's
+// STAGE2 READ regress from all 403 records to failing on record 0, an
+// unambiguous signal stronger than the byte-level re-parse. Reverted back
+// to UNSIGNED_WORD on that evidence; see the doc comment in binxml.go by
+// the type constants for the full, unresolved story.
+func TestBuildTemplateBody_EventIDQualifiersIsNullOptional(t *testing.T) {
 	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
 
 	encoded := utf16Bytes("Qualifiers")
@@ -279,9 +267,9 @@ func TestBuildTemplateBody_EventIDQualifiersIsUint16Zero(t *testing.T) {
 	}
 	got := subs[subEventIDQualifiers]
 	if got.typ != binXMLTypeUint16 {
-		t.Errorf("EventID/@Qualifiers (substitution %d) value type = 0x%02x, want 0x%02x (UNSIGNED_WORD)", subEventIDQualifiers, got.typ, binXMLTypeUint16)
+		t.Errorf("EventID/@Qualifiers (substitution %d) value type = 0x%02x, want 0x%02x (UNSIGNED_WORD, matching the real file's NULL encoding)", subEventIDQualifiers, got.typ, binXMLTypeUint16)
 	}
-	if len(got.data) != 2 {
-		t.Errorf("EventID/@Qualifiers (substitution %d) value data length = %d, want 2 (F16: a real UINT16 zero, matching UNSIGNED_WORD's required width)", subEventIDQualifiers, len(got.data))
+	if len(got.data) != 0 {
+		t.Errorf("EventID/@Qualifiers (substitution %d) value data length = %d, want 0 (NULL)", subEventIDQualifiers, len(got.data))
 	}
 }
