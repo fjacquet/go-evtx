@@ -4,12 +4,21 @@
 // which assumed go-evtx's own 42-slot template and therefore produced
 // confident nonsense on any real Windows file.
 //
-// Strictness is the point. Three rules, all enforced here:
+// Strictness is the point. Rules enforced here:
 //  1. an unrecognised token or value type, or a length past the payload, is
 //     an error;
-//  2. the decode accounts for every byte — stopping early or running past the
-//     fragment's EOF is an error even when a plausible tree was built;
-//  3. the substitutions consumed must equal the count the array declares.
+//  2. the decode accounts for every byte — stopping early or running past a
+//     fragment's EOF token is an error even when a plausible tree was built;
+//  3. a BinXml-typed substitution is a nested TemplateInstance-shaped
+//     fragment (measured: every one of 100 683 real substitutions across
+//     three files), decoded by recursing through the same logic as the
+//     record's own top-level payload, bounded by maxBinXMLDepth against a
+//     corrupt or adversarial chunk driving unbounded recursion;
+//  4. data_size, attr_list_size and a NameNode's stored hash are all
+//     cross-checked against what the walker independently computes — this
+//     decoder exists to be the writer's oracle, so it cannot ignore fields a
+//     permissive parser would skip (see docs/evtx-format-notes.md's account
+//     of the data_size defect this project already shipped once).
 package evtx
 
 import (
@@ -45,21 +54,32 @@ const (
 	tokFragmentHeader    byte = 0x0f
 )
 
+// maxBinXMLDepth bounds recursion into nested BinXml-typed substitutions.
+// Real records nest exactly one level (the UserData/EventData fragment); this
+// is headroom for legitimate deeper nesting, not an expected depth — it
+// exists so a corrupt or adversarial chunk cannot drive unbounded recursion,
+// since a BinXml substitution's own substitution array can itself carry
+// further BinXml-typed values.
+const maxBinXMLDepth = 32
+
 // parseSubstitutions reads a substitution array:
 //
 //	[count u32][count × (size u16, type u8, pad u8)][values...]
 //
-// It returns the decoded values and the total bytes consumed, so a caller can
-// verify the payload was fully accounted for.
-func parseSubstitutions(data []byte) ([]Value, int, error) {
+// It returns the decoded values, each value's byte offset relative to
+// data[0] (a caller resolving a chunk-relative substitution — recursing into
+// a BinXml-typed one — needs this to locate the value's own bytes in the
+// chunk), and the total bytes consumed so a caller can verify the payload was
+// fully accounted for.
+func parseSubstitutions(data []byte) (vals []Value, offsets []int, consumed int, err error) {
 	if len(data) < 4 {
-		return nil, 0, fmt.Errorf("go_evtx: substitution array truncated: %d bytes, need at least 4", len(data))
+		return nil, nil, 0, fmt.Errorf("go_evtx: substitution array truncated: %d bytes, need at least 4", len(data))
 	}
 	count64 := uint64(binary.LittleEndian.Uint32(data[0:4]))
 	// Each entry needs a 4-byte descriptor; anything larger cannot fit and is
 	// a misparse rather than a real array.
 	if count64 > uint64((len(data)-4)/4) {
-		return nil, 0, fmt.Errorf("go_evtx: substitution count %d cannot fit in %d bytes", count64, len(data))
+		return nil, nil, 0, fmt.Errorf("go_evtx: substitution count %d cannot fit in %d bytes", count64, len(data))
 	}
 	count := int(count64)
 
@@ -72,22 +92,24 @@ func parseSubstitutions(data []byte) ([]Value, int, error) {
 	}
 
 	pos := 4 + count*4
-	vals := make([]Value, count)
+	vals = make([]Value, count)
+	offsets = make([]int, count)
 	for i := 0; i < count; i++ {
 		end := pos + sizes[i]
 		if end > len(data) {
-			return nil, 0, fmt.Errorf(
+			return nil, nil, 0, fmt.Errorf(
 				"go_evtx: substitution %d (%s) declares %d bytes at offset %d, past the %d-byte array",
 				i, types[i], sizes[i], pos, len(data))
 		}
 		v, err := decodeValue(types[i], data[pos:end])
 		if err != nil {
-			return nil, 0, fmt.Errorf("go_evtx: substitution %d: %w", i, err)
+			return nil, nil, 0, fmt.Errorf("go_evtx: substitution %d: %w", i, err)
 		}
 		vals[i] = v
+		offsets[i] = pos
 		pos = end
 	}
-	return vals, pos, nil
+	return vals, offsets, pos, nil
 }
 
 func le16(b []byte) uint16 { return binary.LittleEndian.Uint16(b) }
@@ -101,11 +123,20 @@ type Attr struct {
 
 // Node is a decoded element. Attributes and Children keep file order, which
 // carries meaning for the positional <Data> elements real events emit.
+//
+// DependencyID is the OpenStartElementTag's own dependency_id field, verbatim
+// — depIDNotSet (0xffff) for an unconditional element, otherwise the
+// substitution index whose content this element's presence depends on. Real
+// go-evtx-written files tie this to the element's own content substitution
+// for seven elements (see CLAUDE.md's BinXML substitution index map); nothing
+// downstream of this decoder consumes it yet, but a decoder meant to be that
+// writer's oracle cannot drop a field the writer sets deliberately.
 type Node struct {
-	Name       string `json:"name"`
-	Attributes []Attr `json:"attributes,omitempty"`
-	Children   []Node `json:"children,omitempty"`
-	Value      *Value `json:"value,omitempty"`
+	Name         string `json:"name"`
+	DependencyID uint16 `json:"dependencyId"`
+	Attributes   []Attr `json:"attributes,omitempty"`
+	Children     []Node `json:"children,omitempty"`
+	Value        *Value `json:"value,omitempty"`
 }
 
 // binxmlParser walks one template body, resolving substitutions against subs.
@@ -118,65 +149,140 @@ type binxmlParser struct {
 	cache *templateCache
 }
 
-// decodeRecordBinXML decodes one record payload into an element tree.
+// decodeRecordBinXML decodes one record's BinXML payload into an element
+// tree. cache owns the chunk the payload lives in (newTemplateCache(chunk));
+// payloadOff/payloadLen locate the payload within cache.chunk. Deriving both
+// the chunk and the payload from cache, rather than accepting a separate
+// chunk argument, makes "cache built for a different chunk than payload
+// lives in" unrepresentable — the same invariant Task 4 gave templateCache
+// itself.
+func decodeRecordBinXML(cache *templateCache, payloadOff, payloadLen int) (*Node, error) {
+	if cache == nil {
+		return nil, fmt.Errorf("go_evtx: decodeRecordBinXML: nil cache")
+	}
+	if payloadOff < 0 || payloadLen < 0 || payloadOff+payloadLen > len(cache.chunk) {
+		return nil, fmt.Errorf("go_evtx: payload [%d:%d) outside the %d-byte chunk",
+			payloadOff, payloadOff+payloadLen, len(cache.chunk))
+	}
+	return decodeBinXMLFragment(cache, payloadOff, payloadLen, true, 0)
+}
+
+// decodeBinXMLFragment decodes one TemplateInstance-shaped BinXML fragment: an
+// optional fragment header, a required TemplateInstance, its (inline or
+// chunk-shared) definition, and its substitution array — recursing into any
+// BinXml-typed substitution the array holds. It is the record's own top-level
+// payload the first time it runs (top==true, depth==0) and a nested
+// substitution's raw bytes every time after (top==false).
 //
-// payloadChunkOffset is the chunk-relative offset of payload[0]; template and
-// name offsets in the stream are chunk-relative, so resolving them needs it.
-// cache must have been constructed over the same chunk (newTemplateCache(chunk)) —
-// its own chunk-ownership invariant is what this call relies on.
-func decodeRecordBinXML(chunk, payload []byte, payloadChunkOffset int, cache *templateCache) (*Node, error) {
-	if len(payload) < 4 {
-		return nil, fmt.Errorf("go_evtx: payload is %d bytes, too short for a fragment header", len(payload))
+// Measured (100 683 real records, three files): every nested BinXml
+// substitution has this exact shape — a TemplateInstance, sometimes preceded
+// by a fragment header (100 628 of them) and sometimes not (55 of them) — not
+// a bare element tree. That is why this is the same function as the
+// top-level decode rather than a second, simpler one.
+//
+// top controls the trailing-byte rule (see the rem check below): only the
+// record's own top-level payload allows 0–7 bytes of padding after the
+// fragment's EOF token, because only it is wrapped in an on-disk record that
+// must 8-align. A nested fragment's value data ends exactly one EOF byte
+// after its own substitution array, with no padding allowance.
+func decodeBinXMLFragment(cache *templateCache, chunkOff, length int, top bool, depth int) (*Node, error) {
+	if depth > maxBinXMLDepth {
+		return nil, fmt.Errorf("go_evtx: nested BinXml recursion exceeded %d levels at chunk offset %d",
+			maxBinXMLDepth, chunkOff)
 	}
-	if payload[0] != tokFragmentHeader {
-		return nil, fmt.Errorf("go_evtx: payload starts with %#02x, want the fragment header token %#02x",
-			payload[0], tokFragmentHeader)
+	chunk := cache.chunk
+	if chunkOff < 0 || length < 0 || chunkOff+length > len(chunk) {
+		return nil, fmt.Errorf("go_evtx: fragment [%d:%d) outside the %d-byte chunk", chunkOff, chunkOff+length, len(chunk))
 	}
-	pos := 4
+	payload := chunk[chunkOff : chunkOff+length]
+	if len(payload) < 1 {
+		return nil, fmt.Errorf("go_evtx: fragment at chunk offset %d is empty", chunkOff)
+	}
+
+	// The fragment header is optional here (unlike a template body's own,
+	// which parseFragment still requires unconditionally) — measured above.
+	pos := 0
+	if payload[0] == tokFragmentHeader {
+		if len(payload) < 4 {
+			return nil, fmt.Errorf("go_evtx: fragment header truncated at chunk offset %d", chunkOff)
+		}
+		pos = 4
+	}
 
 	if pos >= len(payload) || payload[pos] != tokTemplateInstance {
-		return nil, fmt.Errorf("go_evtx: expected a template instance at offset %d", pos)
+		return nil, fmt.Errorf("go_evtx: expected a template instance at chunk offset %d, found %#02x",
+			chunkOff+pos, payload[pos])
 	}
 	if pos+10 > len(payload) {
-		return nil, fmt.Errorf("go_evtx: template instance truncated at offset %d", pos)
+		return nil, fmt.Errorf("go_evtx: template instance truncated at chunk offset %d", chunkOff+pos)
 	}
 	defOffset := int(le32(payload[pos+6:]))
 	pos += 10
 
 	// The definition is inline when its offset names this very position;
-	// otherwise it lives elsewhere in the chunk and is shared.
-	if defOffset == payloadChunkOffset+pos {
-		def, err := parseTemplateDef(chunk, defOffset)
-		if err != nil {
-			return nil, err
-		}
-		cache.defs[defOffset] = def
-		pos += templateDefHeaderSize + len(def.Body)
-	}
+	// otherwise it lives elsewhere in the chunk and is shared. Either way,
+	// resolve through cache.get so there is exactly one path that ever
+	// touches cache.defs (Task 4's invariant) — the inline case only adds the
+	// extra step of skipping the body bytes that follow here in the stream.
+	inline := defOffset == chunkOff+pos
 	def, err := cache.get(defOffset)
 	if err != nil {
 		return nil, err
 	}
+	if inline {
+		pos += templateDefHeaderSize + len(def.Body)
+		// An inline definition's body length is validated against the whole
+		// chunk (parseTemplateDef), not against this fragment: a corrupt or
+		// truncated fragment can still fit legally inside the chunk. Guard
+		// before slicing payload[pos:] below — this is what a fuzzed or
+		// truncated record needs to fail on cleanly instead of panicking.
+		if pos > len(payload) {
+			return nil, fmt.Errorf(
+				"go_evtx: inline template definition at chunk offset %d (%d-byte body) runs past this %d-byte fragment",
+				defOffset, len(def.Body), len(payload))
+		}
+	}
 
-	subs, consumed, err := parseSubstitutions(payload[pos:])
+	subs, offsets, consumed, err := parseSubstitutions(payload[pos:])
 	if err != nil {
 		return nil, err
 	}
-	// Rule 2: account for every byte. Trailing bytes mean we misread something.
-	if pos+consumed != len(payload) {
+
+	// Every byte is accounted for: the fragment's own EOF token, plus — the
+	// record's top-level payload only — 0–7 bytes of padding that 8-aligns
+	// the on-disk record (24-byte header + payload + 4-byte size copy).
+	// Measured against 100 683 real records (all of them) and every record of
+	// testdata/system.evtx: the byte right after the substitution array is
+	// always the EOF token; the padding after it is never zeroed, so only its
+	// length is checked, never its content.
+	rem := len(payload) - (pos + consumed)
+	if rem < 1 || payload[pos+consumed] != tokEOF {
 		return nil, fmt.Errorf(
-			"go_evtx: decode consumed %d of %d payload bytes; %d unaccounted for",
-			pos+consumed, len(payload), len(payload)-(pos+consumed))
+			"go_evtx: fragment at chunk offset %d: expected the EOF token at chunk offset %d, found %d trailing byte(s)",
+			chunkOff, chunkOff+pos+consumed, rem)
+	}
+	if top {
+		if rem-1 > 7 || (28+pos+consumed+rem)%8 != 0 {
+			return nil, fmt.Errorf(
+				"go_evtx: record payload at chunk offset %d: %d padding byte(s) after the EOF token do not "+
+					"8-align the on-disk record (24-byte header + payload + 4-byte size copy)",
+				chunkOff, rem-1)
+		}
+	} else if rem != 1 {
+		return nil, fmt.Errorf(
+			"go_evtx: nested fragment at chunk offset %d: %d byte(s) after the EOF token; "+
+				"nested fragments carry no padding", chunkOff, rem-1)
 	}
 
-	// A BinXml-typed substitution is a nested fragment. It occurs in every real
-	// record, so this is the nominal path, not an edge case.
+	// A BinXml-typed substitution is a nested fragment, recursed through this
+	// same function. Measured to occur in every real record (rule 3 above).
 	for i := range subs {
 		if subs[i].Type == ValBinXML && !subs[i].IsAbsent() {
-			p := &binxmlParser{chunk: chunk, buf: subs[i].raw, base: 0, subs: nil, cache: cache}
-			node, err := p.parseFragment()
+			childOff := chunkOff + pos + offsets[i]
+			childLen := len(subs[i].raw)
+			node, err := decodeBinXMLFragment(cache, childOff, childLen, false, depth+1)
 			if err != nil {
-				return nil, fmt.Errorf("go_evtx: nested BinXml in substitution %d: %w", i, err)
+				return nil, fmt.Errorf("go_evtx: nested BinXml in substitution %d at chunk offset %d: %w", i, childOff, err)
 			}
 			subs[i].node = node
 		}
@@ -192,7 +298,9 @@ func decodeRecordBinXML(chunk, payload []byte, payloadChunkOffset int, cache *te
 	return p.parseFragment()
 }
 
-// parseFragment reads a fragment header then exactly one root element.
+// parseFragment reads a fragment header then exactly one root element. Unlike
+// decodeBinXMLFragment's own optional header, a template body's fragment
+// header is unconditional — every measured one has it.
 func (p *binxmlParser) parseFragment() (*Node, error) {
 	if p.pos+4 > len(p.buf) || p.buf[p.pos] != tokFragmentHeader {
 		return nil, fmt.Errorf("go_evtx: expected a fragment header at body offset %d", p.pos)
@@ -215,7 +323,9 @@ func (p *binxmlParser) parseFragment() (*Node, error) {
 	return node, nil
 }
 
-// parseElement reads one OpenStartElement through its matching EndElement.
+// parseElement reads one OpenStartElement through its matching terminator —
+// either an EndElementTag (content follows CloseStartElement) or a
+// CloseEmptyElementTag (the element is empty, no separate EndElementTag).
 func (p *binxmlParser) parseElement() (*Node, error) {
 	if p.pos >= len(p.buf) {
 		return nil, fmt.Errorf("go_evtx: element expected at body offset %d, buffer exhausted", p.pos)
@@ -228,6 +338,8 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 	if p.pos+11 > len(p.buf) {
 		return nil, fmt.Errorf("go_evtx: element header truncated at body offset %d", p.pos)
 	}
+	depID := le16(p.buf[p.pos+1:])
+	declaredDataSize := le32(p.buf[p.pos+3:])
 	nameOffset := int(le32(p.buf[p.pos+7:]))
 	p.pos += 11
 
@@ -235,26 +347,33 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	node := &Node{Name: name}
+	node := &Node{Name: name, DependencyID: depID}
 
 	if tok == tokOpenElementAttrs {
 		if p.pos+4 > len(p.buf) {
 			return nil, fmt.Errorf("go_evtx: attribute list size truncated at body offset %d", p.pos)
 		}
-		p.pos += 4 // attr_list_size; the attribute tokens that follow are self-delimiting
+		attrListSizePos := p.pos
+		declaredAttrListSize := int(le32(p.buf[p.pos:]))
+		p.pos += 4 // attr_list_size; back-checked below once the list is known
+		attrRegionStart := p.pos
 		for {
-			if p.pos >= len(p.buf) {
-				return nil, fmt.Errorf("go_evtx: attribute list ran off the end of the body")
-			}
-			at := p.buf[p.pos]
-			if at != tokAttribute && at != tokAttributeMore {
-				break
-			}
-			attr, err := p.parseAttribute()
+			attr, more, err := p.parseAttribute()
 			if err != nil {
 				return nil, err
 			}
 			node.Attributes = append(node.Attributes, *attr)
+			if !more {
+				break
+			}
+		}
+		// attr_list_size counts only the attribute list itself (measured,
+		// binxml.go's closeAttrList doc comment) — cross-check it for free,
+		// the same discipline data_size gets below.
+		if actual := p.pos - attrRegionStart; actual != declaredAttrListSize {
+			return nil, fmt.Errorf(
+				"go_evtx: element %q: attr_list_size at body offset %d declares %d bytes, attributes actually span %d",
+				name, attrListSizePos, declaredAttrListSize, actual)
 		}
 	}
 
@@ -264,7 +383,7 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 	switch p.buf[p.pos] {
 	case tokCloseEmptyElement:
 		p.pos++
-		return node, nil
+		return p.finishElement(node, name, start, declaredDataSize)
 	case tokCloseStartElement:
 		p.pos++
 	default:
@@ -276,10 +395,11 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 		if p.pos >= len(p.buf) {
 			return nil, fmt.Errorf("go_evtx: element %q is not terminated", name)
 		}
+		tokPos := p.pos
 		switch t := p.buf[p.pos]; t {
 		case tokEndElement:
 			p.pos++
-			return node, nil
+			return p.finishElement(node, name, start, declaredDataSize)
 		case tokOpenElement, tokOpenElementAttrs:
 			child, err := p.parseElement()
 			if err != nil {
@@ -291,13 +411,17 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 			if err != nil {
 				return nil, err
 			}
-			node.Value = v
+			if err := setElementValue(node, name, v, tokPos, p.base); err != nil {
+				return nil, err
+			}
 		case tokValue, tokValueMore:
 			v, err := p.parseLiteralValue()
 			if err != nil {
 				return nil, err
 			}
-			node.Value = v
+			if err := setElementValue(node, name, v, tokPos, p.base); err != nil {
+				return nil, err
+			}
 		case tokCDATA, tokCDATAMore, tokCharRef, tokCharRefMore,
 			tokEntityRef, tokEntityRefMore, tokPITarget, tokPIData:
 			return nil, fmt.Errorf(
@@ -310,21 +434,74 @@ func (p *binxmlParser) parseElement() (*Node, error) {
 	}
 }
 
-// parseAttribute reads one attribute token: token(1) name_offset(4) [NameNode]
-// followed by exactly one value token.
-func (p *binxmlParser) parseAttribute() (*Attr, error) {
+// setElementValue assigns v to node.Value, rejecting only a second value
+// token — measured to never occur — where naively overwriting would silently
+// drop the first one. A value token on an element that already has child
+// elements is NOT rejected: measured against real data (testdata/system.evtx
+// and others), this is the normal shape for a conditional EventData/UserData
+// subtree — <Event>'s content is the fixed <System> element followed by a
+// bare substitution reference (often BinXml-typed) with no wrapping element
+// of its own, present only for event types that carry it. Rejecting that
+// combination, tried first, made all but a handful of 1 601 real records in
+// testdata/system.evtx fail to decode. tokPos/base are body/chunk offsets of
+// the value token, for the error message only.
+func setElementValue(node *Node, name string, v *Value, tokPos, base int) error {
+	if node.Value != nil {
+		return fmt.Errorf(
+			"go_evtx: element %q already has a value; a second value token is not supported (at body offset %d, chunk offset %d)",
+			name, tokPos, base+tokPos)
+	}
+	node.Value = v
+	return nil
+}
+
+// finishElement cross-checks data_size against the element's own measured
+// span and returns node. data_size = (offset immediately after this
+// element's terminator) − (element_start + 7); "+7" is token(1) +
+// dependency_id(2) + data_size(4), the fixed bytes common to both
+// OpenStartElementTag forms, after which data_size's own count begins.
+// Measured directly against testdata/system.evtx (binxml.go's writeEndElement
+// doc comment) for the EndElementTag case; the same formula applies whether
+// the element closed via CloseEmptyElementTag or EndElementTag, since both
+// are simply "the terminator this walk actually found".
+func (p *binxmlParser) finishElement(node *Node, name string, start int, declared uint32) (*Node, error) {
+	actual := uint32(p.pos - (start + 7))
+	if actual != declared {
+		return nil, fmt.Errorf(
+			"go_evtx: element %q: data_size at body offset %d declares %d bytes, element actually spans %d",
+			name, start+3, declared, actual)
+	}
+	return node, nil
+}
+
+// parseAttribute reads one attribute: token(1) name_offset(4) [NameNode] then
+// exactly one value token. more reports whether the token was
+// tokAttributeMore (0x46, "more follow") as opposed to tokAttribute (0x06,
+// "last") — the caller must drive its loop from this, not by peeking at the
+// next byte, since a 0x46 not actually followed by another attribute is
+// itself the error a peek-based loop would silently swallow.
+func (p *binxmlParser) parseAttribute() (attr *Attr, more bool, err error) {
+	if p.pos >= len(p.buf) {
+		return nil, false, fmt.Errorf("go_evtx: attribute expected at body offset %d, buffer exhausted", p.pos)
+	}
+	tok := p.buf[p.pos]
+	if tok != tokAttribute && tok != tokAttributeMore {
+		return nil, false, fmt.Errorf(
+			"go_evtx: expected an attribute token (%#02x or %#02x) at body offset %d, found %#02x",
+			tokAttribute, tokAttributeMore, p.pos, tok)
+	}
 	start := p.pos
 	if p.pos+5 > len(p.buf) {
-		return nil, fmt.Errorf("go_evtx: attribute header truncated at body offset %d", p.pos)
+		return nil, false, fmt.Errorf("go_evtx: attribute header truncated at body offset %d", p.pos)
 	}
 	nameOffset := int(le32(p.buf[p.pos+1:]))
 	p.pos += 5
 	name, err := p.readName(nameOffset, start+5)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if p.pos >= len(p.buf) {
-		return nil, fmt.Errorf("go_evtx: attribute %q has no value", name)
+		return nil, false, fmt.Errorf("go_evtx: attribute %q has no value", name)
 	}
 	var v *Value
 	switch p.buf[p.pos] {
@@ -333,12 +510,12 @@ func (p *binxmlParser) parseAttribute() (*Attr, error) {
 	case tokValue, tokValueMore:
 		v, err = p.parseLiteralValue()
 	default:
-		return nil, fmt.Errorf("go_evtx: attribute %q: unexpected value token %#02x", name, p.buf[p.pos])
+		return nil, false, fmt.Errorf("go_evtx: attribute %q: unexpected value token %#02x", name, p.buf[p.pos])
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return &Attr{Name: name, Value: *v}, nil
+	return &Attr{Name: name, Value: *v}, tok == tokAttributeMore, nil
 }
 
 // parseSubstitutionRef reads token(1) index(2) type(1) and resolves it.
@@ -395,47 +572,69 @@ func (p *binxmlParser) parseLiteralValue() (*Value, error) {
 	return &v, nil
 }
 
-// readName resolves a NameNode. The offset is chunk-relative; when it names
-// the position immediately after the current token header the node is inline
-// and the cursor advances past it.
+// readName resolves a NameNode and verifies its stored hash against
+// sdbmHash(name) (chunkhash.go — measured 386/386 against real files). The
+// offset is chunk-relative; when it names the position immediately after the
+// current token header the node is inline and the cursor advances past it.
 //
 // NameNode: next_offset(4) hash(2) length(2) UTF-16 × length, null(2)
 func (p *binxmlParser) readName(nameOffset, inlineAt int) (string, error) {
-	if p.base != 0 && nameOffset == p.base+inlineAt {
-		name, size, err := readNameAt(p.buf, inlineAt)
+	if nameOffset == p.base+inlineAt {
+		name, hash, size, err := readNameAt(p.buf, inlineAt)
 		if err != nil {
+			return "", err
+		}
+		if err := verifyNameHash(name, hash); err != nil {
 			return "", err
 		}
 		p.pos = inlineAt + size
 		return name, nil
 	}
-	// Shared NameNode elsewhere in the chunk.
-	rel := nameOffset - p.base
-	if p.base != 0 && rel >= 0 && rel < len(p.buf) {
-		name, _, err := readNameAt(p.buf, rel)
-		return name, err
+	// Shared NameNode elsewhere in the current buffer.
+	if rel := nameOffset - p.base; rel >= 0 && rel < len(p.buf) {
+		name, hash, _, err := readNameAt(p.buf, rel)
+		if err != nil {
+			return "", err
+		}
+		return name, verifyNameHash(name, hash)
 	}
+	// Shared NameNode elsewhere in the chunk.
 	if nameOffset < 0 || nameOffset >= len(p.chunk) {
 		return "", fmt.Errorf("go_evtx: name offset %d outside the chunk", nameOffset)
 	}
-	name, _, err := readNameAt(p.chunk, nameOffset)
-	return name, err
+	name, hash, _, err := readNameAt(p.chunk, nameOffset)
+	if err != nil {
+		return "", err
+	}
+	return name, verifyNameHash(name, hash)
 }
 
-// readNameAt decodes a NameNode at off, returning the name and its total size.
-func readNameAt(b []byte, off int) (string, int, error) {
-	if off < 0 || off+8 > len(b) {
-		return "", 0, fmt.Errorf("go_evtx: name node at %d is truncated", off)
+// verifyNameHash reports a mismatch between a NameNode's stored hash and
+// sdbmHash(name) — the signature of a name_offset that landed mid-structure
+// and decoded a plausible-looking but wrong string.
+func verifyNameHash(name string, stored uint16) error {
+	if got := uint16(sdbmHash(name)); got != stored {
+		return fmt.Errorf("go_evtx: name %q hashes to %#04x, NameNode declares %#04x", name, got, stored)
 	}
+	return nil
+}
+
+// readNameAt decodes a NameNode at off, returning the name, its stored hash,
+// and its total size.
+func readNameAt(b []byte, off int) (name string, hash uint16, size int, err error) {
+	if off < 0 || off+8 > len(b) {
+		return "", 0, 0, fmt.Errorf("go_evtx: name node at %d is truncated", off)
+	}
+	hash = le16(b[off+4:])
 	units := int(le16(b[off+6:]))
 	start := off + 8
 	end := start + units*2
 	if end+2 > len(b) {
-		return "", 0, fmt.Errorf("go_evtx: name node at %d declares %d units, past the buffer", off, units)
+		return "", 0, 0, fmt.Errorf("go_evtx: name node at %d declares %d units, past the buffer", off, units)
 	}
 	u16 := make([]uint16, units)
 	for i := range u16 {
 		u16[i] = le16(b[start+i*2:])
 	}
-	return string(utf16.Decode(u16)), 8 + units*2 + 2, nil
+	return string(utf16.Decode(u16)), hash, 8 + units*2 + 2, nil
 }
