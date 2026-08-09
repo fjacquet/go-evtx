@@ -14,7 +14,9 @@ package evtx
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
+	"math"
 	"time"
 	"unicode/utf16"
 )
@@ -31,6 +33,16 @@ const (
 	filetimeEpochDelta = int64(116444736000000000)
 )
 
+// File header flags, written at buf[120:124].
+const (
+	// evtxFlagDirty marks a log that has been written to but not cleanly
+	// closed. A forensic consumer reads it to tell a clean shutdown from a
+	// crash-truncated file.
+	evtxFlagDirty uint32 = 0x0001
+	// evtxFlagFull marks a log that reached its configured size limit.
+	evtxFlagFull uint32 = 0x0002
+)
+
 // toFILETIME converts a Go time.Time to a Windows FILETIME value.
 // FILETIME is expressed as 100-nanosecond intervals since 1601-01-01 00:00:00 UTC.
 func toFILETIME(t time.Time) uint64 {
@@ -38,9 +50,23 @@ func toFILETIME(t time.Time) uint64 {
 }
 
 // fromFILETIME converts a Windows FILETIME value to a Go time.Time.
-func fromFILETIME(ft uint64) time.Time {
-	ns := (int64(ft) - filetimeEpochDelta) * 100
-	return time.Unix(0, ns).UTC()
+//
+// An out-of-range ft is reported as an error rather than silently wrapping:
+// (int64(ft)-filetimeEpochDelta)*100 overflows int64 for any FILETIME far
+// below the Unix epoch — ft == 0 included, which is exactly what a corrupt
+// or absent timestamp field yields. Realistic post-1970 timestamps are well
+// inside the safe range.
+func fromFILETIME(ft uint64) (time.Time, error) {
+	if ft > math.MaxInt64 {
+		return time.Time{}, fmt.Errorf("go_evtx: FILETIME %d exceeds int64 range", ft)
+	}
+	delta := int64(ft) - filetimeEpochDelta
+	const maxDelta = math.MaxInt64 / 100
+	const minDelta = math.MinInt64 / 100
+	if delta > maxDelta || delta < minDelta {
+		return time.Time{}, fmt.Errorf("go_evtx: FILETIME %d is out of range for a 100ns Unix offset", ft)
+	}
+	return time.Unix(0, delta*100).UTC(), nil
 }
 
 // encodeUTF16LE encodes a Go string as a length-prefixed, null-terminated UTF-16LE byte slice.
@@ -68,7 +94,7 @@ func encodeUTF16LE(s string) []byte {
 //
 //	[0:8]    Signature "ElfFile\x00"
 //	[8:16]   FirstChunkNumber = 0
-//	[16:24]  LastChunkNumber  = chunkCount - 1
+//	[16:24]  LastChunkNumber  = chunkCount - 1 (0 when chunkCount == 0)
 //	[24:32]  NextRecordIdentifier = nextRecordID
 //	[32:36]  HeaderSize = 128
 //	[36:38]  MinorVersion = 1
@@ -76,23 +102,30 @@ func encodeUTF16LE(s string) []byte {
 //	[40:42]  BlockSize = 4096
 //	[42:44]  ChunkCount = chunkCount
 //	[44:120] reserved zeros
-//	[120:124] Flags = 0
+//	[120:124] Flags = flags
 //	[124:128] CRC32 of buf[0:120]
 //	[128:4096] padding zeros
-func buildFileHeader(chunkCount uint16, nextRecordID uint64) []byte {
+//
+// The CRC covers buf[0:120] only, so flags sits outside its range — writing
+// it does not invalidate the checksum.
+func buildFileHeader(chunkCount uint16, nextRecordID uint64, flags uint32) []byte {
 	buf := make([]byte, evtxFileHeaderSize)
 
 	copy(buf[0:8], evtxFileMagic)
-	binary.LittleEndian.PutUint64(buf[8:], 0)                     // FirstChunkNumber
-	binary.LittleEndian.PutUint64(buf[16:], uint64(chunkCount-1)) // LastChunkNumber
-	binary.LittleEndian.PutUint64(buf[24:], nextRecordID)         // NextRecordIdentifier
-	binary.LittleEndian.PutUint32(buf[32:], 128)                  // HeaderSize
-	binary.LittleEndian.PutUint16(buf[36:], 1)                    // MinorVersion
-	binary.LittleEndian.PutUint16(buf[38:], 3)                    // MajorVersion
-	binary.LittleEndian.PutUint16(buf[40:], 4096)                 // BlockSize
-	binary.LittleEndian.PutUint16(buf[42:], chunkCount)           // ChunkCount
+	binary.LittleEndian.PutUint64(buf[8:], 0) // FirstChunkNumber
+	lastChunk := uint64(0)
+	if chunkCount > 0 {
+		lastChunk = uint64(chunkCount - 1)
+	}
+	binary.LittleEndian.PutUint64(buf[16:], lastChunk)    // LastChunkNumber
+	binary.LittleEndian.PutUint64(buf[24:], nextRecordID) // NextRecordIdentifier
+	binary.LittleEndian.PutUint32(buf[32:], 128)          // HeaderSize
+	binary.LittleEndian.PutUint16(buf[36:], 1)            // MinorVersion
+	binary.LittleEndian.PutUint16(buf[38:], 3)            // MajorVersion
+	binary.LittleEndian.PutUint16(buf[40:], 4096)         // BlockSize
+	binary.LittleEndian.PutUint16(buf[42:], chunkCount)   // ChunkCount
 	// buf[44:120] — reserved zeros (already zero from make())
-	// buf[120:124] — Flags = 0 (already zero)
+	binary.LittleEndian.PutUint32(buf[120:], flags) // Flags
 	// buf[124:128] — CRC32 placeholder (must be zero during calculation)
 
 	crc := crc32.Checksum(buf[0:120], crc32.IEEETable)
@@ -102,17 +135,28 @@ func buildFileHeader(chunkCount uint16, nextRecordID uint64) []byte {
 	return buf
 }
 
-// patchChunkCRC computes and writes the chunk header CRC32.
+// evtxChunkUnknownField120 (B3) is a constant observed at chunk header
+// [120:124] in every one of the nine chunks in testdata/system.evtx
+// (0x00000001), which go-evtx never wrote. libyal's spec labels the field
+// "Unknown", so this is a lower-confidence, parity-only fix: included because
+// the real file both carries it and has a verifying header CRC, but a null
+// result here would not be surprising the way B1/B2 would be.
+const evtxChunkUnknownField120 = uint32(1)
+
+// patchChunkCRC computes and writes the chunk header CRC32, and the
+// evtxChunkUnknownField120 constant alongside it.
 //
-// Per EVTX spec the HeaderCRC32 covers bytes [0:120] and [128:512],
-// skipping the Flags+CRC32 region [120:128].
+// Per EVTX spec the HeaderCRC32 covers bytes [0:120] and [128:512], skipping
+// [120:128] — so [120:124] can be set to any value here without affecting
+// the checksum. It must be set HERE, not by an earlier caller: this function
+// used to zero the whole [120:128] region before computing, which would
+// destroy a value written before the call. Ordering it here instead of at
+// each flush call site keeps that trap from being reintroduced.
 //
 // chunk must be at least 512 bytes.
 func patchChunkCRC(chunk []byte) {
-	// Zero out the flags and CRC field before computing.
-	for i := 120; i < 128; i++ {
-		chunk[i] = 0
-	}
+	binary.LittleEndian.PutUint32(chunk[120:], evtxChunkUnknownField120) // [120:124]: B3
+	binary.LittleEndian.PutUint32(chunk[124:], 0)                        // [124:128]: CRC32 placeholder, zero during calculation
 	h := crc32.New(crc32.IEEETable)
 	h.Write(chunk[0:120])
 	h.Write(chunk[128:512])
@@ -134,11 +178,11 @@ func wrapEventRecord(recordID uint64, timestamp uint64, binXMLPayload []byte) []
 	buf := make([]byte, size)
 
 	binary.LittleEndian.PutUint32(buf[0:], evtxRecordSignature) // Signature
-	binary.LittleEndian.PutUint32(buf[4:], size)                 // Size
-	binary.LittleEndian.PutUint64(buf[8:], recordID)             // EventRecordID
-	binary.LittleEndian.PutUint64(buf[16:], timestamp)           // TimeCreated (FILETIME)
-	copy(buf[24:], binXMLPayload)                                 // BinXML payload
-	binary.LittleEndian.PutUint32(buf[size-4:], size)            // Size copy at end
+	binary.LittleEndian.PutUint32(buf[4:], size)                // Size
+	binary.LittleEndian.PutUint64(buf[8:], recordID)            // EventRecordID
+	binary.LittleEndian.PutUint64(buf[16:], timestamp)          // TimeCreated (FILETIME)
+	copy(buf[24:], binXMLPayload)                               // BinXML payload
+	binary.LittleEndian.PutUint32(buf[size-4:], size)           // Size copy at end
 
 	return buf
 }

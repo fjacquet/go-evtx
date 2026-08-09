@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Generic strict BinXML decoding: any Windows-generated `.evtx` file can be
+  read, with values carrying their declared type and JSON encoding that
+  preserves it.
+
+### Changed
+
+- **BREAKING:** `Reader.ReadRecord()` and the `Record` struct are removed. Use
+  `Reader.ReadEvent()`, which returns a typed `Event`. The previous decoder
+  assumed go-evtx's own template and returned empty fields with fabricated
+  names on any real Windows file, without reporting an error.
+
 ## [0.6.0] - 2026-08-08
 
 ### Fixed

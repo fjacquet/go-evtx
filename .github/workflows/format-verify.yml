@@ -1,0 +1,1597 @@
+name: Format Verify
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate fixture
+        run: |
+          mkdir -p artifacts
+          go run ./cmd/gen-fixture -out artifacts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generated-evtx
+          path: artifacts/
+          retention-days: 7
+
+  python-evtx-differential:
+    needs: generate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: generated-evtx
+          path: artifacts
+      - name: Parse with python-evtx
+        run: |
+          uv venv
+          # Pinned: every row in docs/format-baseline.md's measurement table was
+          # produced by this exact version. An unpinned `install` resolves
+          # whatever is latest at workflow runtime, so two measurement rows
+          # could differ for a reason that has nothing to do with go-evtx --
+          # silently invalidating the whole comparison chain the release relies
+          # on. Bump deliberately, and only alongside a note in
+          # docs/format-baseline.md that a later row's parser version changed.
+          uv pip install python-evtx==0.8.1
+          uv run python scripts/verify_python_evtx.py artifacts/generated.evtx artifacts/expected.json
+
+  get-winevent:
+    needs: generate
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: generated-evtx
+          path: artifacts
+      - name: Parse with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # --- EvtGetExtendedStatus probe (task-probe-extstatus) ---------------
+          # winevt.h's EvtGetExtendedStatus (Wevtapi.dll) returns descriptive text
+          # for the last Evt* call that failed ON THE CALLING THREAD. Never called
+          # anywhere in this project before now. Microsoft documents it primarily
+          # for EvtQuery/EvtSubscribe XPath errors, so it may return nothing useful
+          # for a ToXml()/Get-WinEvent render failure -- that is an acceptable,
+          # informative outcome, not a wasted call.
+          #
+          # Microsoft's own docs (nf-winevt-evtgetextendedstatus): "You must call
+          # this function on the thread that generated the error and before
+          # calling another Windows Event Log function." This script is plain
+          # sequential PowerShell -- no jobs, no runspaces, no async -- so it never
+          # leaves the thread that throws. The ordering half is met by calling
+          # Get-EvtExtendedStatus as the FIRST statement in each catch block below,
+          # before even formatting the exception's own .Message.
+          #
+          # Declared and primed here, before Stage 1 runs, so wevtapi.dll is
+          # already loaded and the P/Invoke stub already bound by the time a real
+          # failure needs it: the first call made from inside a real catch block
+          # should do nothing but ask the question, not also resolve a DLL import.
+          # (a single-line string, not a here-string: a here-string's closing
+          # '@ must sit at column 0, which cannot be indented to match this
+          # YAML block scalar's own indentation -- confirmed by feeding this
+          # file through yaml.safe_load, which fails a parse exactly there)
+          Add-Type -Namespace GoEvtxNative -Name EvtStatus -MemberDefinition '[DllImport("wevtapi.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint EvtGetExtendedStatus(uint BufferSize, System.Text.StringBuilder Buffer, out uint BufferUsed);'
+
+          function Get-EvtExtendedStatus {
+              # Two-call pattern per EvtGetExtendedStatus's own docs: first with
+              # BufferSize=0/Buffer=$null to learn the required size (BufferUsed,
+              # in WCHARs) via ERROR_INSUFFICIENT_BUFFER, then again with a buffer
+              # of that size. Buffer is marshaled Unicode (LPWSTR) via CharSet.Unicode.
+              $used = [uint32]0
+              [GoEvtxNative.EvtStatus]::EvtGetExtendedStatus([uint32]0, $null, [ref]$used) | Out-Null
+              if ($used -eq 0) { return '' }
+              $sb = New-Object System.Text.StringBuilder([int]$used)
+              $rc = [GoEvtxNative.EvtStatus]::EvtGetExtendedStatus($used, $sb, [ref]$used)
+              if ($rc -ne 0) { return "<EvtGetExtendedStatus call itself failed, rc=$rc>" }
+              return $sb.ToString()
+          }
+
+          function Get-Win32ErrorInfo {
+              # Raw Win32 error code alongside the message, so "The data is
+              # invalid." (ERROR_INVALID_DATA = 13) can be told apart from a far
+              # more specific ERROR_EVT_* code (15000-15999) if one is actually
+              # underneath. .NET's EventLogException has no public ErrorCode
+              # property (confirmed against the dotnet/runtime source): its
+              # int-errorCode constructor sets HResult = HRESULT_FROM_WIN32(errorCode),
+              # and .Message builds a throwaway Win32Exception purely for text --
+              # that instance is not exposed as InnerException. HRESULT_FROM_WIN32
+              # packs the original code into HResult's low 16 bits whenever the
+              # code is <= 0xFFFF, true for both 13 and the whole ERROR_EVT_*
+              # range, so "HResult -band 0xFFFF" recovers it directly. Still walk
+              # InnerException first for a literal Win32Exception, in case some
+              # other layer (not EventLogException) is what actually threw.
+              param($ErrorRecord)
+              $ex = $ErrorRecord.Exception
+              $code = $null
+              $source = $null
+              $cur = $ex
+              while ($null -ne $cur) {
+                  if ($cur -is [System.ComponentModel.Win32Exception]) {
+                      $code = $cur.NativeErrorCode
+                      $source = 'Win32Exception.NativeErrorCode'
+                      break
+                  }
+                  $cur = $cur.InnerException
+              }
+              if ($null -eq $code) {
+                  $code = $ex.HResult -band 0xFFFF
+                  $source = "$($ex.GetType().FullName).HResult low16 (full HResult 0x$('{0:X8}' -f $ex.HResult))"
+              }
+              "code=$code (0x$('{0:X}' -f $code)) source=$source exceptionType=$($ex.GetType().FullName)"
+          }
+
+          # Prime the P/Invoke binding (see comment above) before any Evt* call
+          # runs. No error exists yet, so an empty/harmless result is expected --
+          # this is not "another Windows Event Log function" relative to a later
+          # failure, it is the same function, deliberately called early.
+          $primeStatus = Get-EvtExtendedStatus
+          Write-Host "EXTSTATUS PRIME (before any Event Log call, expect empty): '$primeStatus'"
+          # --- end EvtGetExtendedStatus probe setup -----------------------------
+
+          # Stage 1: can the log be opened at all? A FileNotFound/InvalidData
+          # here is an open-time rejection -- the parser never reached a
+          # record. This is diagnostic scaffolding in front of the
+          # Get-WinEvent assertions below, not a replacement for them: the
+          # single $events = @(Get-WinEvent ...) call the assertions use
+          # enumerates eagerly, so it cannot tell an open-time throw from a
+          # record-1 decode throw apart on its own.
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      'artifacts/generated.evtx',
+                      [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # Stage 2: read records one at a time, so a decode failure names
+          # its record. Also capture the first record returned: Get-WinEvent
+          # can fail before it ever hands back an EventRecord, so this is
+          # the only EventRecord instance the rest of this script can probe
+          # on a run where both Get-WinEvent orderings fail.
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # Probe A: does Get-WinEvent's failure come from log-level metadata
+          # -- NextRecordIdentifier, LastChunkNumber, the dirty/full flags,
+          # the record count -- that EventLogReader's open+ReadEvent() path
+          # above never touches? EventLogSession.GetLogInformation() reads
+          # exactly that metadata on its own, independent of enumerating any
+          # record. Non-fatal: reported, not thrown, so later probes still run.
+          try {
+              $sess = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+              $info = $sess.GetLogInformation('artifacts/generated.evtx',
+                        [System.Diagnostics.Eventing.Reader.PathType]::FilePath)
+              Write-Host "LOGINFO: ok - records=$($info.RecordCount) oldest=$($info.OldestRecordNumber) full=$($info.IsLogFull)"
+          } catch {
+              Write-Host "LOGINFO: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          # Probe B: does the failure come from touching a record's
+          # properties rather than from parsing it? Stage 2 above reads
+          # records but never reads a field off one. EventRecord's
+          # properties are lazily resolved, so probe each individually
+          # against the record the raw reader already returned -- one
+          # failure per property, not a single all-or-nothing exception.
+          if ($null -ne $firstNative) {
+              foreach ($p in 'Id','Level','ProviderName','TimeCreated','RecordId','MachineName') {
+                  try   { $v = $firstNative.$p; Write-Host "PROP $p ok: $v" }
+                  catch { Write-Host "PROP $p FAILED - $($_.Exception.Message)" }
+              }
+              try   { $null = $firstNative.ToXml(); Write-Host "PROP ToXml ok" }
+              catch {
+                  # Capture EvtGetExtendedStatus and the raw Win32/HResult code
+                  # FIRST, before anything else in this catch runs -- see the
+                  # probe setup's own comment for why order matters here.
+                  $toXmlExtStatus = Get-EvtExtendedStatus
+                  $toXmlErrInfo = Get-Win32ErrorInfo -ErrorRecord $_
+                  Write-Host "PROP ToXml FAILED - $($_.Exception.Message)"
+                  Write-Host "PROP ToXml EXTSTATUS: '$toXmlExtStatus'"
+                  Write-Host "PROP ToXml WIN32ERROR: $toXmlErrInfo"
+              }
+          } else {
+              Write-Host "PROP: skipped - no record captured from the raw reader"
+          }
+
+          $expected = (Get-Content artifacts/expected.json | ConvertFrom-Json)
+
+          # Get-WinEvent enumerates newest-first by default. Stage 2 above
+          # reads forward and (as of this task) succeeds; reverse iteration
+          # depends on metadata forward reading never touches --
+          # LastEventRecordNumber/LastEventRecordDataOffset in the chunk
+          # header, LastChunkNumber/NextRecordIdentifier in the file header.
+          # Run both orderings independently and report each on its own line
+          # -- do not replace one with the other, since the difference
+          # between them is itself the finding.
+
+          # Default order (newest-first) — the historical assertion.
+          $events = $null
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction Stop)
+              Write-Host "GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              # Same probe, reached for again here: Get-WinEvent is a different
+              # call path than EventRecord.ToXml() above, and per the task brief
+              # might populate extended status differently. Captured first, same
+              # as the ToXml catch.
+              $defaultExtStatus = Get-EvtExtendedStatus
+              $defaultErrInfo = Get-Win32ErrorInfo -ErrorRecord $_
+              $errDefault = $_
+              Write-Host "GETWINEVENT default: FAILED - $($_.Exception.Message)"
+              Write-Host "GETWINEVENT default EXTSTATUS: '$defaultExtStatus'"
+              Write-Host "GETWINEVENT default WIN32ERROR: $defaultErrInfo"
+          }
+
+          # Forward order.
+          $oldest = $null
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path artifacts/generated.evtx -Oldest -ErrorAction Stop)
+              Write-Host "GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $oldestExtStatus = Get-EvtExtendedStatus
+              $oldestErrInfo = Get-Win32ErrorInfo -ErrorRecord $_
+              $errOldest = $_
+              Write-Host "GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+              Write-Host "GETWINEVENT -Oldest EXTSTATUS: '$oldestExtStatus'"
+              Write-Host "GETWINEVENT -Oldest WIN32ERROR: $oldestErrInfo"
+          }
+
+          # Run the existing content assertions against whichever variant
+          # succeeded, so a pass still means something. Prefer the default
+          # order (the historical assertion) when both succeed.
+          $verified = if ($null -ne $events) { $events } elseif ($null -ne $oldest) { $oldest } else { $null }
+
+          if ($null -ne $verified) {
+              if ($verified.Count -ne $expected.record_count) {
+                  throw "record count mismatch: got $($verified.Count), want $($expected.record_count)"
+              }
+
+              # Count alone proves nothing — a parser returning the right number of
+              # empty records would pass. Check content survives the round trip.
+              $first = $verified[0]
+              $xml = [xml]$first.ToXml()
+              $objectName = ($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'ObjectName' }).'#text'
+              if ($objectName -ne $expected.object_names[0]) {
+                  throw "ObjectName mismatch: got '$objectName', want '$($expected.object_names[0])'"
+              }
+
+              Write-Host "OK: $($verified.Count) records, ObjectName round-trips (variant: $(if ($null -ne $events) { 'default' } else { '-Oldest' }))"
+          }
+
+          # The job must still fail while either ordering is broken -- do
+          # not weaken this to "at least one succeeded". No continue-on-error,
+          # no softened assertion: report both failures together so a rerun
+          # doesn't need to be re-triaged from scratch.
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Experiment A (task-9a): a second, minimal fixture -- one record, one
+  # chunk, pure ASCII, no boundary cases -- run through the same probe
+  # sequence as the main fixture above. Added beside the existing
+  # generate/get-winevent jobs, which stay untouched: this isolates whether
+  # a render failure needs the big fixture's surface (403 records, 21+
+  # chunks, non-BMP strings, a near-maximum record) or reproduces on the
+  # simplest record this library can produce.
+  # ---------------------------------------------------------------------
+  generate-minimal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate minimal fixture
+        run: |
+          mkdir -p artifacts-minimal
+          go run ./cmd/gen-fixture-minimal -out artifacts-minimal
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: minimal-evtx
+          path: artifacts-minimal/
+          retention-days: 7
+
+  get-winevent-minimal:
+    needs: generate-minimal
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: minimal-evtx
+          path: artifacts-minimal
+      - name: Parse minimal fixture with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-minimal/minimal.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "MINIMAL STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "MINIMAL STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # Unlike the main fixture's job, a STAGE2 READ failure here does NOT
+          # abort the script: with only one record, throwing here would skip
+          # ToXml/Get-WinEvent too and cost a second CI round trip to learn
+          # what those report. Every probe below runs regardless, and the
+          # final assertion still fails the job if Get-WinEvent itself fails
+          # -- that is what keeps this job's red/green status meaningful.
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "MINIMAL STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "MINIMAL STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "MINIMAL PROP ToXml ok" }
+              catch { Write-Host "MINIMAL PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "MINIMAL PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "MINIMAL GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "MINIMAL GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "MINIMAL GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "MINIMAL GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on minimal fixture: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Experiment B (task-9a): splice a REAL record's BinXML (extracted from
+  # testdata/system.evtx chunk 0 record 0, verified self-contained -- see
+  # cmd/gen-splice-fixture/main.go's doc comment) into one of go-evtx's own
+  # chunks via WriteRaw, then run it through the same probes. Separates
+  # "our chunk/file container is wrong" from "our BinXML generation is
+  # wrong" -- nothing measured before this task distinguishes those two.
+  # ---------------------------------------------------------------------
+  generate-splice:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate spliced fixture
+        run: |
+          mkdir -p artifacts-splice
+          go run ./cmd/gen-splice-fixture -out artifacts-splice
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spliced-evtx
+          path: artifacts-splice/
+          retention-days: 7
+
+  get-winevent-splice:
+    needs: generate-splice
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spliced-evtx
+          path: artifacts-splice
+      - name: Parse spliced fixture with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-splice/spliced.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "SPLICE STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "SPLICE STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          # See the minimal-fixture job above for why STAGE2 READ does not
+          # abort the script here.
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "SPLICE STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "SPLICE STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "SPLICE PROP ToXml ok" }
+              catch { Write-Host "SPLICE PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "SPLICE PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "SPLICE GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "SPLICE GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "SPLICE GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "SPLICE GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on spliced fixture: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Task 9b hybrids: task-9a localised the defect to buildBinXML/
+  # buildTemplateBody's own encoding (binxml.go), but not to which byte(s).
+  # These three hybrids bisect by construction -- each is a payload built
+  # from the two CI-proven payloads task-9a already produced (the real
+  # testdata/system.evtx chunk 0 record 0 BinXML that Get-WinEvent accepts,
+  # and go-evtx's own minimal-fixture BinXML that it rejects), with one
+  # structural region swapped between them and every position-dependent
+  # offset explicitly recomputed (see each cmd/gen-hybrid-*/main.go's own
+  # doc comment for the exact offset-safety argument). Added beside the
+  # existing jobs, which are untouched.
+  #
+  # Hybrid 1 (preamble-ours) and Hybrid 2 (preamble-real): cut point 1, the
+  # brief's "fixed preamble" -- swap only the TemplateInstanceNode's
+  # template_id and the TemplateNode header's GUID (pure identity/cache
+  # metadata, referenced by nothing else in either payload, so this needs
+  # no offset rewriting at all -- see gen-hybrid-preamble-ours's doc
+  # comment). Hybrid 1 takes the real, already-passing record and swaps in
+  # go-evtx's own trivial ID values; Hybrid 2 takes go-evtx's own failing
+  # record and swaps in the real file's ID values. Symmetric, both cheap.
+  #
+  # Hybrid 3 (selfclose): cut point 3, "individual <System> children" --
+  # a structural walk of the real record found its <System> block has the
+  # SAME 14 children in the SAME order with the SAME declared substitution
+  # types as go-evtx's own, and exactly one measured divergence: 5
+  # attribute-only, no-content children (Provider, TimeCreated,
+  # Correlation, Execution, Security) close via CloseEmptyElementTag
+  # (0x03, no separate EndElementTag) in the real file, but via
+  # CloseStartElementTag (0x02) plus a separate EndElementTag in go-evtx's
+  # own output -- a fact attrlist_test.go's own comment already named
+  # ("go-evtx never emits the self-closing CloseEmptyElementTag") but never
+  # tested for effect. This hybrid rewrites only those 5 elements' closing
+  # bytes and recomputes every data_size/attr_list_size/name_offset/
+  # data_length field the 5-byte-shorter payload implies, self-validated
+  # by re-parsing before it is ever written to a file (see
+  # cmd/gen-hybrid-selfclose/main.go's doc comment for the full method).
+  # ---------------------------------------------------------------------
+  generate-hybrid-preamble-ours:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate hybrid (real body/subs, our preamble IDs)
+        run: |
+          mkdir -p artifacts-hybrid-preamble-ours
+          go run ./cmd/gen-hybrid-preamble-ours -out artifacts-hybrid-preamble-ours
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hybrid-preamble-ours-evtx
+          path: artifacts-hybrid-preamble-ours/
+          retention-days: 7
+
+  get-winevent-hybrid-preamble-ours:
+    needs: generate-hybrid-preamble-ours
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hybrid-preamble-ours-evtx
+          path: artifacts-hybrid-preamble-ours
+      - name: Parse hybrid (preamble-ours) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-hybrid-preamble-ours/hybrid-preamble-ours.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "H1-PREAMBLE-OURS STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "H1-PREAMBLE-OURS STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "H1-PREAMBLE-OURS STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "H1-PREAMBLE-OURS STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "H1-PREAMBLE-OURS PROP ToXml ok" }
+              catch { Write-Host "H1-PREAMBLE-OURS PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "H1-PREAMBLE-OURS PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on hybrid-preamble-ours fixture: $($failures -join '; ')"
+          }
+
+  generate-hybrid-preamble-real:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate hybrid (our body/subs, real preamble IDs)
+        run: |
+          mkdir -p artifacts-hybrid-preamble-real
+          go run ./cmd/gen-hybrid-preamble-real -out artifacts-hybrid-preamble-real
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hybrid-preamble-real-evtx
+          path: artifacts-hybrid-preamble-real/
+          retention-days: 7
+
+  get-winevent-hybrid-preamble-real:
+    needs: generate-hybrid-preamble-real
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hybrid-preamble-real-evtx
+          path: artifacts-hybrid-preamble-real
+      - name: Parse hybrid (preamble-real) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-hybrid-preamble-real/hybrid-preamble-real.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "H2-PREAMBLE-REAL STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "H2-PREAMBLE-REAL STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "H2-PREAMBLE-REAL STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "H2-PREAMBLE-REAL STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "H2-PREAMBLE-REAL PROP ToXml ok" }
+              catch { Write-Host "H2-PREAMBLE-REAL PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "H2-PREAMBLE-REAL PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on hybrid-preamble-real fixture: $($failures -join '; ')"
+          }
+
+  generate-hybrid-selfclose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate hybrid (5 self-closing elements, 0x03 not 0x02+0x04)
+        run: |
+          mkdir -p artifacts-hybrid-selfclose
+          go run ./cmd/gen-hybrid-selfclose -out artifacts-hybrid-selfclose
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hybrid-selfclose-evtx
+          path: artifacts-hybrid-selfclose/
+          retention-days: 7
+
+  get-winevent-hybrid-selfclose:
+    needs: generate-hybrid-selfclose
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hybrid-selfclose-evtx
+          path: artifacts-hybrid-selfclose
+      - name: Parse hybrid (selfclose) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-hybrid-selfclose/hybrid-selfclose.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "H3-SELFCLOSE STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "H3-SELFCLOSE STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "H3-SELFCLOSE STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "H3-SELFCLOSE STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "H3-SELFCLOSE PROP ToXml ok" }
+              catch { Write-Host "H3-SELFCLOSE PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "H3-SELFCLOSE PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "H3-SELFCLOSE GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "H3-SELFCLOSE GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "H3-SELFCLOSE GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "H3-SELFCLOSE GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on hybrid-selfclose fixture: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Task 9c ladder: task 9b localised the render-failure defect to
+  # buildTemplateBody's own <EventData> structure or the substitution array
+  # (binxml.go), but grafting a real record's <EventData>/<UserData> was not
+  # possible -- testdata/system.evtx record 0 uses a different, 20-
+  # substitution template (<UserData>), so a byte graft against go-evtx's
+  # own 42-substitution scheme fails on an index/count mismatch, not a
+  # format defect (task-9b-report.md's "Not attempted" section).
+  #
+  # These three jobs instead SHRINK go-evtx's own template THROUGH its own
+  # encoder -- no grafting -- via evtx.BuildVariantBinXML
+  # (binxml_variants.go), which calls the exact same low-level token writers
+  # buildTemplateBody itself calls. Rung 3 of the ladder (the control:
+  # <System> plus <EventData> with all 12 Data pairs -- today's real
+  # production output) is NOT a new job here: it is already the existing
+  # generate-minimal / get-winevent-minimal job pair above (task 9a), run in
+  # this same workflow on this same commit, so no duplicate fixture is
+  # needed for an apples-to-apples same-run comparison.
+  #
+  # Rung 1 (system-only) and rung 2 (one Data pair) bracket the control from
+  # below, by size. Rung 4 (literal-dataname) sits at the CONTROL's own
+  # scale (12 pairs) with exactly one variable changed -- Data/@Name as a
+  # literal instead of a substitution -- so it is a controlled comparison
+  # against rung 3, not another size step.
+  #
+  # Added beside the existing jobs, which are untouched; does not touch
+  # cmd/gen-fixture/main.go, its output, or binxml.go's own
+  # buildBinXML/buildTemplateBody -- see binxml_variants.go's own top
+  # comment and binxml_variants_test.go's
+  # TestBuildVariantBinXML_ProductionEncoderUntouched.
+  # ---------------------------------------------------------------------
+  generate-ladder-system-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate ladder rung 1 (System only, no EventData)
+        run: |
+          mkdir -p artifacts-ladder-system-only
+          go run ./cmd/gen-ladder-system-only -out artifacts-ladder-system-only
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-system-only-evtx
+          path: artifacts-ladder-system-only/
+          retention-days: 7
+
+  get-winevent-ladder-system-only:
+    needs: generate-ladder-system-only
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-system-only-evtx
+          path: artifacts-ladder-system-only
+      - name: Parse ladder rung 1 (System only) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-system-only/ladder-system-only.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "LADDER1-SYSTEMONLY STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "LADDER1-SYSTEMONLY STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "LADDER1-SYSTEMONLY STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "LADDER1-SYSTEMONLY STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "LADDER1-SYSTEMONLY PROP ToXml ok" }
+              catch { Write-Host "LADDER1-SYSTEMONLY PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "LADDER1-SYSTEMONLY PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "LADDER1-SYSTEMONLY GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "LADDER1-SYSTEMONLY GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "LADDER1-SYSTEMONLY GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "LADDER1-SYSTEMONLY GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on ladder rung 1 (system-only) fixture: $($failures -join '; ')"
+          }
+
+  generate-ladder-one-data-pair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate ladder rung 2 (System + EventData, 1 Data pair)
+        run: |
+          mkdir -p artifacts-ladder-one-data-pair
+          go run ./cmd/gen-ladder-one-data-pair -out artifacts-ladder-one-data-pair
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-one-data-pair-evtx
+          path: artifacts-ladder-one-data-pair/
+          retention-days: 7
+
+  get-winevent-ladder-one-data-pair:
+    needs: generate-ladder-one-data-pair
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-one-data-pair-evtx
+          path: artifacts-ladder-one-data-pair
+      - name: Parse ladder rung 2 (one Data pair) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-one-data-pair/ladder-one-data-pair.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "LADDER2-ONEDATAPAIR STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "LADDER2-ONEDATAPAIR STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "LADDER2-ONEDATAPAIR STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "LADDER2-ONEDATAPAIR STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "LADDER2-ONEDATAPAIR PROP ToXml ok" }
+              catch { Write-Host "LADDER2-ONEDATAPAIR PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "LADDER2-ONEDATAPAIR PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "LADDER2-ONEDATAPAIR GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "LADDER2-ONEDATAPAIR GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "LADDER2-ONEDATAPAIR GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "LADDER2-ONEDATAPAIR GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on ladder rung 2 (one-data-pair) fixture: $($failures -join '; ')"
+          }
+
+  generate-ladder-literal-dataname:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate ladder rung 4 (12 Data pairs, literal Names)
+        run: |
+          mkdir -p artifacts-ladder-literal-dataname
+          go run ./cmd/gen-ladder-literal-dataname -out artifacts-ladder-literal-dataname
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-literal-dataname-evtx
+          path: artifacts-ladder-literal-dataname/
+          retention-days: 7
+
+  get-winevent-ladder-literal-dataname:
+    needs: generate-ladder-literal-dataname
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-literal-dataname-evtx
+          path: artifacts-ladder-literal-dataname
+      - name: Parse ladder rung 4 (literal Data names) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-literal-dataname/ladder-literal-dataname.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "LADDER4-LITERALNAME STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "LADDER4-LITERALNAME STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "LADDER4-LITERALNAME STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "LADDER4-LITERALNAME STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "LADDER4-LITERALNAME PROP ToXml ok" }
+              catch { Write-Host "LADDER4-LITERALNAME PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "LADDER4-LITERALNAME PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "LADDER4-LITERALNAME GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "LADDER4-LITERALNAME GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "LADDER4-LITERALNAME GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "LADDER4-LITERALNAME GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on ladder rung 4 (literal-dataname) fixture: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Task 9d, secondary rungs. Task 9c's ladder found no size boundary: every
+  # rung from <System> alone up to the full 12-Data-pair control fails
+  # identically. This task's own decisive experiment -- an all-literal,
+  # zero-substitution record -- could not be built (see task-9d-report.md's
+  # "all-literal variant" section: MS-EVEN6's own ABNF grammar defines
+  # ValueText as ValueTextToken StringType LengthPrefixedUnicodeString, with
+  # no alternative production for a non-string literal, confirmed
+  # independently against testdata/system.evtx itself -- 15/15 real
+  # ValueText occurrences across two records and their nested UserData/
+  # EventData sub-templates are StringType, 0 exceptions). These two rungs
+  # are the batched secondary experiments the same task asked for instead,
+  # isolating two mechanisms that have been present in every measurement
+  # since they were adopted but never independently varied:
+  #
+  # Rung A (all-normal-sub): every OptionalSubstitution (0x0E) token
+  # binxml.go's <System> block uses (task 8b/F12c, task 8c/F13a) reverted to
+  # NormalSubstitution (0x0D), with dependency_id reset to the sentinel
+  # (0xffff) wherever it used to name a real index. Isolates whether 0x0E
+  # itself -- adopted from reading the real file, never tested on its own --
+  # is required.
+  #
+  # Rung B (no-xmlns): <Event>'s xmlns attribute (F8, task 8) removed
+  # entirely. Expected to break python-evtx's own namespaced XPath query
+  # (scripts/verify_python_evtx_no_xmlns.py asserts this prediction
+  # directly, rather than merely describing it) -- its own fixture and its
+  # own jobs, with get-winevent-ladder-no-xmlns depending only on
+  # generate-ladder-no-xmlns (never on the python job), so that expected
+  # Linux failure cannot skip or gate the independent Windows measurement --
+  # the same class of wiring defect Task 1's own baseline harness found and
+  # fixed early in this release.
+  #
+  # Both rungs are the control's own scale (System + EventData, 12
+  # substituted-name Data pairs -- production's own convention) so each
+  # differs from the other, and from the existing control (rung 3,
+  # generate-minimal/get-winevent-minimal), in exactly the one variable it
+  # is named for.
+  # ---------------------------------------------------------------------
+  generate-ladder-all-normal-sub:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate secondary rung A (0x0E -> 0x0D, dependency_id -> sentinel)
+        run: |
+          mkdir -p artifacts-ladder-all-normal-sub
+          go run ./cmd/gen-ladder-all-normal-sub -out artifacts-ladder-all-normal-sub
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-all-normal-sub-evtx
+          path: artifacts-ladder-all-normal-sub/
+          retention-days: 7
+
+  get-winevent-ladder-all-normal-sub:
+    needs: generate-ladder-all-normal-sub
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-all-normal-sub-evtx
+          path: artifacts-ladder-all-normal-sub
+      - name: Parse secondary rung A (all-normal-sub) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-all-normal-sub/ladder-all-normal-sub.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "ALLNORMALSUB STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "ALLNORMALSUB STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "ALLNORMALSUB STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "ALLNORMALSUB STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "ALLNORMALSUB PROP ToXml ok" }
+              catch { Write-Host "ALLNORMALSUB PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "ALLNORMALSUB PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "ALLNORMALSUB GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "ALLNORMALSUB GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "ALLNORMALSUB GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "ALLNORMALSUB GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on secondary rung A (all-normal-sub) fixture: $($failures -join '; ')"
+          }
+
+  generate-ladder-no-xmlns:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate secondary rung B (no xmlns attribute on Event)
+        run: |
+          mkdir -p artifacts-ladder-no-xmlns
+          go run ./cmd/gen-ladder-no-xmlns -out artifacts-ladder-no-xmlns
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-no-xmlns-evtx
+          path: artifacts-ladder-no-xmlns/
+          retention-days: 7
+
+  # Independent of get-winevent-ladder-no-xmlns below: this job's own
+  # needs: is generate-ladder-no-xmlns only, exactly like that job's, so
+  # this job's PREDICTED failure (see scripts/verify_python_evtx_no_xmlns.py's
+  # own doc comment) can never skip or gate the Windows measurement -- the
+  # wiring mistake Task 1's own baseline harness made and fixed early in
+  # this release (progress.md: "get-winevent had needs:
+  # python-evtx-differential, so the expected Linux failure skipped the
+  # Windows job").
+  python-evtx-ladder-no-xmlns:
+    needs: generate-ladder-no-xmlns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-no-xmlns-evtx
+          path: artifacts-ladder-no-xmlns
+      - name: Parse secondary rung B (no-xmlns) with python-evtx
+        run: |
+          uv venv
+          # Pinned: see python-evtx-differential's own comment on why this
+          # version is not left floating.
+          uv pip install python-evtx==0.8.1
+          uv run python scripts/verify_python_evtx_no_xmlns.py artifacts-ladder-no-xmlns/ladder-no-xmlns.evtx
+
+  get-winevent-ladder-no-xmlns:
+    needs: generate-ladder-no-xmlns
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-no-xmlns-evtx
+          path: artifacts-ladder-no-xmlns
+      - name: Parse secondary rung B (no-xmlns) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-no-xmlns/ladder-no-xmlns.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "NOXMLNS STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "NOXMLNS STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "NOXMLNS STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "NOXMLNS STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "NOXMLNS PROP ToXml ok" }
+              catch { Write-Host "NOXMLNS PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "NOXMLNS PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "NOXMLNS GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "NOXMLNS GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "NOXMLNS GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "NOXMLNS GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on secondary rung B (no-xmlns) fixture: $($failures -join '; ')"
+          }
+
+  # ---------------------------------------------------------------------
+  # Task 9e: task 9d's own ladder found no size boundary (task 9c) and could
+  # not build its decisive all-literal experiment at all -- MS-EVEN6's own
+  # grammar has no ValueText production for a non-string type, so every
+  # typed scalar MUST be a substitution (verified against
+  # testdata/system.evtx: 35/35 real substitutions there are typed, 15/15
+  # real literals are all StringType, zero exceptions -- task-9d-report.md).
+  # What has never been isolated, across every measurement this release has
+  # made, is the declared VALUE TYPE of each substitution.
+  #
+  # Decisive (all-string): every one of the control's 42 substitutions
+  # (System's 18 plus EventData's 12 Data pairs) declared StringType (0x01)
+  # -- both the template body's own substitution tokens and the
+  # substitution array's value-spec descriptors, kept consistent by
+  # construction (evtx.VariantAllString, binxml_variants.go) -- each value
+  # reformatted as it would render in XML (decimal digits for an integer,
+  # hex for Keywords, ISO-8601 for the FILETIME, empty string for a field
+  # with no source). If this renders, the defect is a type mismatch on one
+  # specific substitution -- a small target for a follow-up bisect. If it
+  # still fails, value types are exonerated as a category and what remains
+  # is the template body's own element/token encoding.
+  #
+  # Secondary rung (four-string), batched into the same run: production's
+  # own declared types unchanged EXCEPT for the four substitutions whose
+  # types were never independently verified as strings --
+  # Security/@UserID, Execution/@ProcessID, Execution/@ThreadID, Keywords
+  # -- the four positions task-8b-report.md's own Step 1 type table was
+  # later shown wrong about (F14, task 8e's correction note), so they carry
+  # the least evidence of any declared type in the template
+  # (evtx.VariantFourFieldsString).
+  #
+  # Both are control-scale (System + EventData, 12 substituted-name Data
+  # pairs, xmlns present, production's own OptionalSubstitution/
+  # dependency_id convention unchanged -- that axis was already isolated as
+  # a null result by task 9d's VariantAllNormalSubstitution) so each rung
+  # differs from the existing control (rung 3, generate-minimal/
+  # get-winevent-minimal) in exactly the variable it is named for. xmlns
+  # stays present in both, so python-evtx is expected to behave like the
+  # control (unlike rung B/no-xmlns) -- no dedicated python-evtx job is
+  # added here, matching rung A (all-normal-sub)'s own precedent.
+  # ---------------------------------------------------------------------
+  generate-ladder-all-string:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate decisive experiment (every substitution declared StringType)
+        run: |
+          mkdir -p artifacts-ladder-all-string
+          go run ./cmd/gen-ladder-all-string -out artifacts-ladder-all-string
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-all-string-evtx
+          path: artifacts-ladder-all-string/
+          retention-days: 7
+
+  get-winevent-ladder-all-string:
+    needs: generate-ladder-all-string
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-all-string-evtx
+          path: artifacts-ladder-all-string
+      - name: Parse decisive experiment (all-string) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-all-string/ladder-all-string.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "ALLSTRING STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "ALLSTRING STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "ALLSTRING STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "ALLSTRING STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "ALLSTRING PROP ToXml ok" }
+              catch { Write-Host "ALLSTRING PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "ALLSTRING PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "ALLSTRING GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "ALLSTRING GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "ALLSTRING GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "ALLSTRING GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on decisive experiment (all-string) fixture: $($failures -join '; ')"
+          }
+
+  generate-ladder-four-string:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate secondary rung (UserID/ProcessID/ThreadID/Keywords declared StringType)
+        run: |
+          mkdir -p artifacts-ladder-four-string
+          go run ./cmd/gen-ladder-four-string -out artifacts-ladder-four-string
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-four-string-evtx
+          path: artifacts-ladder-four-string/
+          retention-days: 7
+
+  get-winevent-ladder-four-string:
+    needs: generate-ladder-four-string
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-four-string-evtx
+          path: artifacts-ladder-four-string
+      - name: Parse secondary rung (four-string) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-four-string/ladder-four-string.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "FOURSTRING STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "FOURSTRING STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "FOURSTRING STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "FOURSTRING STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "FOURSTRING PROP ToXml ok" }
+              catch { Write-Host "FOURSTRING PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "FOURSTRING PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "FOURSTRING GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "FOURSTRING GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "FOURSTRING GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "FOURSTRING GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on secondary rung (four-string) fixture: $($failures -join '; ')"
+          }

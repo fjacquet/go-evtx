@@ -244,17 +244,46 @@ each record. A parser that resolves names or templates through the chunk hash
 tables finds nothing. This is the single most likely reason Event Viewer
 rejects the files.
 
-Implement both tables using the EVTX name hash — `hash = hash*65599 + c` over
-the UTF-16 code units of the string, as already used by the static NameNode
-table introduced in `67f8312`. Bucket names by `hash % 64` and templates by
-`template_id % 32`, write the chunk-relative offset of the first entry in each
-bucket, and chain subsequent entries through the `next_offset` field already
-present in the name and template structures.
+Implement both tables using the EVTX name hash — `hash = hash*65599 + c`, the
+SDBM rolling hash, as already used by the static NameNode table introduced in
+`67f8312`. Write the chunk-relative offset of the first entry in each bucket,
+and chain subsequent entries through the `next_offset` field already present in
+the name and template structures.
 
-The hash function must be confirmed against a real Windows-generated `.evtx`
-file before F6 is trusted: extract a chunk from a known-good file, recompute
-the bucket assignments, and assert they match. If they do not, the hash is
-wrong and F1 will not fix Event Viewer.
+**Bucket rules, corrected 2026-08-08 against real Windows files.** An earlier
+revision of this section asserted that templates bucket by `template_id % 32`,
+where `template_id` is the first four bytes of the GUID read as a little-endian
+`uint32`. That is wrong, and was never checked before being written down.
+
+| Table | Hash input | Bucket |
+|---|---|---|
+| Common strings (64) | The name's UTF-16 code units | `hash % 64` |
+| Templates (32) | The **full 16-byte GUID, read as 8 little-endian `uint16` units** | `hash % 32` |
+
+Both tables use the same SDBM routine. The template rule is not a special case
+so much as the general one: Windows feeds the hash 16-bit units, and a GUID is
+simply eight of them.
+
+Measured against two independent Windows-generated files from python-evtx's
+test corpus, walking every populated bucket and re-deriving the assignment:
+
+| Fixture | Chunks | Template entries | `template_id % 32` | SDBM over 8 LE uint16 |
+|---|---|---|---|---|
+| `system.evtx` | 17 | 146 | 10 | **146** |
+| `security.evtx` | 33 | 240 | 0 | **240** |
+
+The discredited rule scores at chance. Hashing the 16 GUID bytes individually,
+rather than as 16-bit units, scores zero on both files.
+
+Note also that hashing **UTF-16 code units, not UTF-8 bytes**, is what the
+format requires for names. The two agree for ASCII — which is every name
+go-evtx emits — and diverge above U+007F.
+
+Both rules must be re-confirmed against a real Windows-generated `.evtx` file
+before F6 is trusted, and that check belongs in the test suite rather than in a
+one-off script: extract chunks from a known-good file, recompute the bucket
+assignments, and assert they match. The correction above exists because that
+check was specified but deferred; when it finally ran, it failed immediately.
 
 ### F2. 8-byte record alignment
 

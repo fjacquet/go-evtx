@@ -43,11 +43,11 @@
 | ID | Requirement |
 |----|-------------|
 | R-01 | `Open(path)` opens an `.evtx` file; validates file magic and chunk count |
-| R-02 | `ReadRecord()` returns the next decoded event as a `Record` struct |
+| R-02 | `ReadEvent()` returns the next decoded event as an `Event` struct |
 | R-03 | `ReadRaw()` returns the next raw BinXML payload (symmetric with `WriteRaw`) |
 | R-04 | `ErrNoMoreRecords` is returned when all records have been read |
 | R-05 | Reader supports multi-chunk files (Windows-generated) |
-| R-06 | `Record` exposes: `RecordID`, `Timestamp`, `EventID`, `Level`, `Provider`, `Computer`, `TimeCreated`, `Fields` |
+| R-06 | `Event` exposes: `RecordID`, `Timestamp`, `System` (typed `<System>` fields including `EventID`, `Provider`, `Computer`, `TimeCreated`), `EventData` (ordered `Data` slice), `Binary`, `UserData` |
 
 ### 3.3 Writer v0.2.0 — delivered
 
@@ -62,11 +62,11 @@
 | ID | Requirement |
 |----|-------------|
 | R-01 | `Open(path)` opens an `.evtx` file; validates file magic and chunk count |
-| R-02 | `ReadRecord()` returns the next decoded event as a `Record` struct |
+| R-02 | `ReadEvent()` returns the next decoded event as an `Event` struct |
 | R-03 | `ReadRaw()` returns the next raw BinXML payload (symmetric with `WriteRaw`) |
 | R-04 | `ErrNoMoreRecords` is returned when all records have been read |
 | R-05 | Reader supports multi-chunk files (Windows-generated) |
-| R-06 | `Record` exposes: `RecordID`, `Timestamp`, `EventID`, `Level`, `Provider`, `Computer`, `TimeCreated`, `Fields` |
+| R-06 | `Event` exposes: `RecordID`, `Timestamp`, `System` (typed `<System>` fields including `EventID`, `Provider`, `Computer`, `TimeCreated`), `EventData` (ordered `Data` slice), `Binary`, `UserData` |
 
 ### 3.5 Planned — v0.3.0
 

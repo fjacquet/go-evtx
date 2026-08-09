@@ -1,0 +1,26 @@
+# Windows ground truth for testdata/system.evtx
+#
+# Produced by EventRecord.ToXml() on Windows Server 2025 (10.0.26100),
+# PowerShell 7.6.4, over the first 5 records of the tracked fixture.
+#
+# Why this file exists: "decodes without error" is a weak assertion for a
+# decoder whose predecessor returned empty fields on every real record without
+# ever failing. This is what Windows itself says the bytes mean, so the corpus
+# test can compare against an authority rather than against nothing.
+#
+# The fixture comes from python-evtx's public test corpus (originally plaso's
+# test_data), so its content is already public. md5 of the source file:
+# 182de19fe6a25b928a34ad59af0bbf1e
+#
+# Regenerate: scp testdata/system.evtx winvm:C:/probe/ then ToXml() per record.
+# See docs/windows-vm-setup.md.
+===== RECORD 1 =====
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-Eventlog' Guid='{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}'/><EventID>105</EventID><Version>0</Version><Level>4</Level><Task>105</Task><Opcode>0</Opcode><Keywords>0x8000000000000000</Keywords><TimeCreated SystemTime='2012-03-14T04:17:43.3545627Z'/><EventRecordID>12049</EventRecordID><Correlation/><Execution ProcessID='820' ThreadID='2868'/><Channel>System</Channel><Computer>WKS-WIN764BITB.shieldbase.local</Computer><Security/></System><UserData><AutoBackup xmlns:auto-ns3='http://schemas.microsoft.com/win/2004/08/events' xmlns='http://manifests.microsoft.com/win/2004/08/windows/eventlog'><Channel>System</Channel><BackupPath>C:\Windows\System32\Winevt\Logs\Archive-System-2012-03-14-04-17-39-932.evtx</BackupPath></AutoBackup></UserData></Event>
+===== RECORD 2 =====
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Service Control Manager' Guid='{555908d1-a6d7-4695-8e1e-26931d2012f4}' EventSourceName='Service Control Manager'/><EventID Qualifiers='16384'>7036</EventID><Version>0</Version><Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x8080000000000000</Keywords><TimeCreated SystemTime='2012-03-14T04:17:38.2763402Z'/><EventRecordID>12050</EventRecordID><Correlation/><Execution ProcessID='548' ThreadID='1340'/><Channel>System</Channel><Computer>WKS-WIN764BITB.shieldbase.local</Computer><Security/></System><EventData><Data Name='param1'>Windows Modules Installer</Data><Data Name='param2'>stopped</Data><Binary>540072007500730074006500640049006E007300740061006C006C00650072002F0031000000</Binary></EventData></Event>
+===== RECORD 3 =====
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Service Control Manager' Guid='{555908d1-a6d7-4695-8e1e-26931d2012f4}' EventSourceName='Service Control Manager'/><EventID Qualifiers='16384'>7036</EventID><Version>0</Version><Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x8080000000000000</Keywords><TimeCreated SystemTime='2012-03-14T04:33:11.9573375Z'/><EventRecordID>12051</EventRecordID><Correlation/><Execution ProcessID='548' ThreadID='5448'/><Channel>System</Channel><Computer>WKS-WIN764BITB.shieldbase.local</Computer><Security/></System><EventData><Data Name='param1'>WinHTTP Web Proxy Auto-Discovery Service</Data><Data Name='param2'>stopped</Data><Binary>570069006E0048007400740070004100750074006F00500072006F00780079005300760063002F0031000000</Binary></EventData></Event>
+===== RECORD 4 =====
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Service Control Manager' Guid='{555908d1-a6d7-4695-8e1e-26931d2012f4}' EventSourceName='Service Control Manager'/><EventID Qualifiers='16384'>7036</EventID><Version>0</Version><Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x8080000000000000</Keywords><TimeCreated SystemTime='2012-03-14T05:40:46.5534667Z'/><EventRecordID>12052</EventRecordID><Correlation/><Execution ProcessID='548' ThreadID='5764'/><Channel>System</Channel><Computer>WKS-WIN764BITB.shieldbase.local</Computer><Security/></System><EventData><Data Name='param1'>WinHTTP Web Proxy Auto-Discovery Service</Data><Data Name='param2'>running</Data><Binary>570069006E0048007400740070004100750074006F00500072006F00780079005300760063002F0034000000</Binary></EventData></Event>
+===== RECORD 5 =====
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Service Control Manager' Guid='{555908d1-a6d7-4695-8e1e-26931d2012f4}' EventSourceName='Service Control Manager'/><EventID Qualifiers='16384'>7036</EventID><Version>0</Version><Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x8080000000000000</Keywords><TimeCreated SystemTime='2012-03-14T05:57:16.5598027Z'/><EventRecordID>12053</EventRecordID><Correlation/><Execution ProcessID='548' ThreadID='3680'/><Channel>System</Channel><Computer>WKS-WIN764BITB.shieldbase.local</Computer><Security/></System><EventData><Data Name='param1'>WinHTTP Web Proxy Auto-Discovery Service</Data><Data Name='param2'>stopped</Data><Binary>570069006E0048007400740070004100750074006F00500072006F00780079005300760063002F0031000000</Binary></EventData></Event>

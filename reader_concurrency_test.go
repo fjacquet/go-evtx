@@ -47,7 +47,7 @@ func TestReader_ConcurrentReadRecord(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				_, err := r.ReadRecord()
+				_, err := r.ReadEvent()
 				if errors.Is(err, ErrNoMoreRecords) {
 					return
 				}
@@ -75,7 +75,7 @@ func TestReader_ConcurrentReadRecord(t *testing.T) {
 // loadChunk more than once.
 func recordCountForChunks(t *testing.T, n int) int {
 	t.Helper()
-	payload := buildBinXML(4663, testFields(), evtxRecordsStart+evtxRecordHeaderSize)
+	payload := buildBinXML(4663, 1, testFields(), evtxRecordsStart+evtxRecordHeaderSize).payload
 	rec := wrapEventRecord(1, 0, payload)
 	recSize := len(rec)
 	if recSize == 0 {
@@ -128,23 +128,23 @@ func TestReader_ConcurrentReadRecord_MultiChunk(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				rec, err := r.ReadRecord()
+				ev, err := r.ReadEvent()
 				if errors.Is(err, ErrNoMoreRecords) {
 					return
 				}
 				if err != nil {
-					t.Errorf("ReadRecord: %v", err)
+					t.Errorf("ReadEvent: %v", err)
 					return
 				}
-				idx := int(rec.RecordID) - 1
+				idx := int(ev.RecordID) - 1
 				mu.Lock()
 				switch {
 				case idx < 0 || idx >= len(seen):
 					mu.Unlock()
-					t.Errorf("RecordID %d out of range [1,%d]", rec.RecordID, records)
+					t.Errorf("RecordID %d out of range [1,%d]", ev.RecordID, records)
 				case seen[idx]:
 					mu.Unlock()
-					t.Errorf("RecordID %d delivered more than once", rec.RecordID)
+					t.Errorf("RecordID %d delivered more than once", ev.RecordID)
 				default:
 					seen[idx] = true
 					mu.Unlock()

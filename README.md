@@ -19,6 +19,22 @@ Generated files are parseable by [python-evtx](https://github.com/williballenthi
 
 > Full requirements and roadmap: [docs/PRD.md](docs/PRD.md)
 
+## Format references
+
+- **[MS-EVEN6]**, Microsoft's EventLog Remoting Protocol v6.0 —
+  <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-even6/> —
+  the *normative* BinXml specification; read this when a byte-level format
+  question needs an authoritative answer.
+- **libyal / libevtx** format documentation —
+  <https://github.com/libyal/libevtx/blob/main/documentation/Windows%20XML%20Event%20Log%20(EVTX).asciidoc> —
+  the most detailed reverse-engineered EVTX reference available, including a
+  complete value-type table; read this for structural detail MS-EVEN6 leaves
+  implicit.
+
+See [docs/evtx-format-notes.md](docs/evtx-format-notes.md) for what this
+project has verified about the format so far, source by source and measured
+claim by claim.
+
 ## Install
 
 ```bash

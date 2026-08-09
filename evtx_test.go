@@ -151,7 +151,7 @@ func TestWriter_WriteRaw_ProducesValidFile(t *testing.T) {
 		"Computer":     "testhost",
 	}
 	// For WriteRaw, the BinXML chunk offset must be at least evtxRecordsStart + evtxRecordHeaderSize.
-	rawPayload := buildBinXML(4663, fields, evtxRecordsStart+evtxRecordHeaderSize)
+	rawPayload := buildBinXML(4663, 1, fields, evtxRecordsStart+evtxRecordHeaderSize).payload
 
 	if err := w.WriteRaw(rawPayload); err != nil {
 		t.Fatalf("WriteRaw: %v", err)

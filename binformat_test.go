@@ -52,6 +52,39 @@ func TestToFILETIME(t *testing.T) {
 	}
 }
 
+// TestFromFILETIME_RoundTrip verifies the ordinary case: a modern timestamp
+// converted to FILETIME and back returns exactly what went in, with no error.
+func TestFromFILETIME_RoundTrip(t *testing.T) {
+	want := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	got, err := fromFILETIME(toFILETIME(want))
+	if err != nil {
+		t.Fatalf("fromFILETIME: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Errorf("fromFILETIME(toFILETIME(%v)) = %v, want %v", want, got, want)
+	}
+}
+
+// TestFromFILETIME_OutOfRangeIsError is carried finding A: ft == 0 is exactly
+// what a corrupt or absent timestamp field yields, and the pre-fix formula
+// (int64(ft)-filetimeEpochDelta)*100 silently overflows int64 for it instead
+// of failing. A decoder built to read untrusted forensic files must detect
+// this rather than return a silently wrong time.
+func TestFromFILETIME_OutOfRangeIsError(t *testing.T) {
+	if _, err := fromFILETIME(0); err == nil {
+		t.Fatal("fromFILETIME(0) must report an error, not a silently wrapped time")
+	}
+}
+
+// TestFromFILETIME_AboveInt64RangeIsError verifies the other overflow
+// direction: a FILETIME so large that int64(ft) itself would reinterpret as
+// negative must also be rejected, not silently misread.
+func TestFromFILETIME_AboveInt64RangeIsError(t *testing.T) {
+	if _, err := fromFILETIME(math.MaxUint64); err == nil {
+		t.Fatal("fromFILETIME(MaxUint64) must report an error")
+	}
+}
+
 // TestEncodeUTF16LE verifies the length-prefixed null-terminated UTF-16LE encoding.
 func TestEncodeUTF16LE(t *testing.T) {
 	cases := []struct {
@@ -118,7 +151,7 @@ func TestEncodeUTF16LE(t *testing.T) {
 
 // TestBuildFileHeader verifies the 4096-byte EVTX file header.
 func TestBuildFileHeader(t *testing.T) {
-	result := buildFileHeader(1, 42)
+	result := buildFileHeader(1, 42, 0)
 
 	if len(result) != 4096 {
 		t.Fatalf("buildFileHeader length = %d, want 4096", len(result))
@@ -230,13 +263,21 @@ func TestPatchChunkCRC(t *testing.T) {
 		t.Error("patchChunkCRC left [124:128] all zeros")
 	}
 
+	// B3: [120:124] must carry the constant observed in every real chunk.
+	if got := binary.LittleEndian.Uint32(chunk[120:]); got != evtxChunkUnknownField120 {
+		t.Errorf("chunk[120:124] = %d, want %d", got, evtxChunkUnknownField120)
+	}
+
 	// Recompute independently and compare
 	h := crc32.New(crc32.IEEETable)
-	// Note: chunk[120:128] is zeroed by patchChunkCRC before computing,
-	// so we must use a zeroed reference for the [120:128] range.
+	// Note: patchChunkCRC writes evtxChunkUnknownField120 into [120:124] and
+	// zeroes only the CRC placeholder at [124:128] before computing — neither
+	// sub-range is covered by the hash (h.Write below skips [120:128]
+	// entirely), so zeroing the whole [120:128] region in this independent
+	// copy is just a convenient way to exclude it, not a re-statement of what
+	// patchChunkCRC itself zeroes.
 	zeroedChunk := make([]byte, 512)
 	copy(zeroedChunk, chunk)
-	// Zero out [120:128] in the copy (as patchChunkCRC does before computing)
 	for i := 120; i < 128; i++ {
 		zeroedChunk[i] = 0
 	}
