@@ -65,6 +65,88 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
+          # --- EvtGetExtendedStatus probe (task-probe-extstatus) ---------------
+          # winevt.h's EvtGetExtendedStatus (Wevtapi.dll) returns descriptive text
+          # for the last Evt* call that failed ON THE CALLING THREAD. Never called
+          # anywhere in this project before now. Microsoft documents it primarily
+          # for EvtQuery/EvtSubscribe XPath errors, so it may return nothing useful
+          # for a ToXml()/Get-WinEvent render failure -- that is an acceptable,
+          # informative outcome, not a wasted call.
+          #
+          # Microsoft's own docs (nf-winevt-evtgetextendedstatus): "You must call
+          # this function on the thread that generated the error and before
+          # calling another Windows Event Log function." This script is plain
+          # sequential PowerShell -- no jobs, no runspaces, no async -- so it never
+          # leaves the thread that throws. The ordering half is met by calling
+          # Get-EvtExtendedStatus as the FIRST statement in each catch block below,
+          # before even formatting the exception's own .Message.
+          #
+          # Declared and primed here, before Stage 1 runs, so wevtapi.dll is
+          # already loaded and the P/Invoke stub already bound by the time a real
+          # failure needs it: the first call made from inside a real catch block
+          # should do nothing but ask the question, not also resolve a DLL import.
+          # (a single-line string, not a here-string: a here-string's closing
+          # '@ must sit at column 0, which cannot be indented to match this
+          # YAML block scalar's own indentation -- confirmed by feeding this
+          # file through yaml.safe_load, which fails a parse exactly there)
+          Add-Type -Namespace GoEvtxNative -Name EvtStatus -MemberDefinition '[DllImport("wevtapi.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint EvtGetExtendedStatus(uint BufferSize, System.Text.StringBuilder Buffer, out uint BufferUsed);'
+
+          function Get-EvtExtendedStatus {
+              # Two-call pattern per EvtGetExtendedStatus's own docs: first with
+              # BufferSize=0/Buffer=$null to learn the required size (BufferUsed,
+              # in WCHARs) via ERROR_INSUFFICIENT_BUFFER, then again with a buffer
+              # of that size. Buffer is marshaled Unicode (LPWSTR) via CharSet.Unicode.
+              $used = [uint32]0
+              [GoEvtxNative.EvtStatus]::EvtGetExtendedStatus([uint32]0, $null, [ref]$used) | Out-Null
+              if ($used -eq 0) { return '' }
+              $sb = New-Object System.Text.StringBuilder([int]$used)
+              $rc = [GoEvtxNative.EvtStatus]::EvtGetExtendedStatus($used, $sb, [ref]$used)
+              if ($rc -ne 0) { return "<EvtGetExtendedStatus call itself failed, rc=$rc>" }
+              return $sb.ToString()
+          }
+
+          function Get-Win32ErrorInfo {
+              # Raw Win32 error code alongside the message, so "The data is
+              # invalid." (ERROR_INVALID_DATA = 13) can be told apart from a far
+              # more specific ERROR_EVT_* code (15000-15999) if one is actually
+              # underneath. .NET's EventLogException has no public ErrorCode
+              # property (confirmed against the dotnet/runtime source): its
+              # int-errorCode constructor sets HResult = HRESULT_FROM_WIN32(errorCode),
+              # and .Message builds a throwaway Win32Exception purely for text --
+              # that instance is not exposed as InnerException. HRESULT_FROM_WIN32
+              # packs the original code into HResult's low 16 bits whenever the
+              # code is <= 0xFFFF, true for both 13 and the whole ERROR_EVT_*
+              # range, so "HResult -band 0xFFFF" recovers it directly. Still walk
+              # InnerException first for a literal Win32Exception, in case some
+              # other layer (not EventLogException) is what actually threw.
+              param($ErrorRecord)
+              $ex = $ErrorRecord.Exception
+              $code = $null
+              $source = $null
+              $cur = $ex
+              while ($null -ne $cur) {
+                  if ($cur -is [System.ComponentModel.Win32Exception]) {
+                      $code = $cur.NativeErrorCode
+                      $source = 'Win32Exception.NativeErrorCode'
+                      break
+                  }
+                  $cur = $cur.InnerException
+              }
+              if ($null -eq $code) {
+                  $code = $ex.HResult -band 0xFFFF
+                  $source = "$($ex.GetType().FullName).HResult low16 (full HResult 0x$('{0:X8}' -f $ex.HResult))"
+              }
+              "code=$code (0x$('{0:X}' -f $code)) source=$source exceptionType=$($ex.GetType().FullName)"
+          }
+
+          # Prime the P/Invoke binding (see comment above) before any Evt* call
+          # runs. No error exists yet, so an empty/harmless result is expected --
+          # this is not "another Windows Event Log function" relative to a later
+          # failure, it is the same function, deliberately called early.
+          $primeStatus = Get-EvtExtendedStatus
+          Write-Host "EXTSTATUS PRIME (before any Event Log call, expect empty): '$primeStatus'"
+          # --- end EvtGetExtendedStatus probe setup -----------------------------
+
           # Stage 1: can the log be opened at all? A FileNotFound/InvalidData
           # here is an open-time rejection -- the parser never reached a
           # record. This is diagnostic scaffolding in front of the
@@ -130,7 +212,16 @@ jobs:
                   catch { Write-Host "PROP $p FAILED - $($_.Exception.Message)" }
               }
               try   { $null = $firstNative.ToXml(); Write-Host "PROP ToXml ok" }
-              catch { Write-Host "PROP ToXml FAILED - $($_.Exception.Message)" }
+              catch {
+                  # Capture EvtGetExtendedStatus and the raw Win32/HResult code
+                  # FIRST, before anything else in this catch runs -- see the
+                  # probe setup's own comment for why order matters here.
+                  $toXmlExtStatus = Get-EvtExtendedStatus
+                  $toXmlErrInfo = Get-Win32ErrorInfo -ErrorRecord $_
+                  Write-Host "PROP ToXml FAILED - $($_.Exception.Message)"
+                  Write-Host "PROP ToXml EXTSTATUS: '$toXmlExtStatus'"
+                  Write-Host "PROP ToXml WIN32ERROR: $toXmlErrInfo"
+              }
           } else {
               Write-Host "PROP: skipped - no record captured from the raw reader"
           }
@@ -153,8 +244,16 @@ jobs:
               $events = @(Get-WinEvent -Path artifacts/generated.evtx -ErrorAction Stop)
               Write-Host "GETWINEVENT default: ok, $($events.Count) records"
           } catch {
+              # Same probe, reached for again here: Get-WinEvent is a different
+              # call path than EventRecord.ToXml() above, and per the task brief
+              # might populate extended status differently. Captured first, same
+              # as the ToXml catch.
+              $defaultExtStatus = Get-EvtExtendedStatus
+              $defaultErrInfo = Get-Win32ErrorInfo -ErrorRecord $_
               $errDefault = $_
               Write-Host "GETWINEVENT default: FAILED - $($_.Exception.Message)"
+              Write-Host "GETWINEVENT default EXTSTATUS: '$defaultExtStatus'"
+              Write-Host "GETWINEVENT default WIN32ERROR: $defaultErrInfo"
           }
 
           # Forward order.
@@ -164,8 +263,12 @@ jobs:
               $oldest = @(Get-WinEvent -Path artifacts/generated.evtx -Oldest -ErrorAction Stop)
               Write-Host "GETWINEVENT -Oldest: ok, $($oldest.Count) records"
           } catch {
+              $oldestExtStatus = Get-EvtExtendedStatus
+              $oldestErrInfo = Get-Win32ErrorInfo -ErrorRecord $_
               $errOldest = $_
               Write-Host "GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+              Write-Host "GETWINEVENT -Oldest EXTSTATUS: '$oldestExtStatus'"
+              Write-Host "GETWINEVENT -Oldest WIN32ERROR: $oldestErrInfo"
           }
 
           # Run the existing content assertions against whichever variant
