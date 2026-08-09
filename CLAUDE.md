@@ -128,7 +128,7 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 | 38 | Channel | STRING (from `fields["Channel"]`) |
 | 39 | Security/@UserID | NULL (no caller-supplied source) |
 | 40 | Provider/@Guid | STRING (from `fields["ProviderGuid"]`) |
-| 41 | EventID/@Qualifiers | NULL (no caller-supplied source; F14 reverted this from a UINT16 declared type — see below) |
+| 41 | EventID/@Qualifiers | NULL, declared type UINT16 (no caller-supplied source; F14 tried a NULL declared type and reverted — see below) |
 
 The 12 data fields (indices 5–28) are hardcoded in `dataFieldNames` in `binxml.go`; they kept their original indices and semantics across v0.7.0/Task 8b/8c — nothing calling `WriteRecord` needs to change.
 
@@ -140,4 +140,47 @@ The seven scalar children whose sole content is one substitution value (`Version
 
 `EventID/@Qualifiers` (F13c) is go-evtx's first NULL-valued `OptionalSubstitution` whose declared type is not a generic "null type" marker: `testdata/system.evtx` encodes this exact attribute as `[size 0, type UNSIGNED_WORD (0x06)]` — its own real declared type — and MS-EVEN6's own worked example shows the same shape.
 
-**F14 (v0.7.0, Task 8e): a false start, corrected in the same task.** The note above led directly to code: an initial version of Task 8e reclassified F12b's five NULL fields (34/35/36/37/39) from `binXMLTypeNull` (`0x00`) to their field's own real type (GUID, SID, UINT32), trusting task-8b-report.md's Step 1 table's claim that the real file encodes them that way. That build broke `python-evtx`'s own regression guard (`Evtx.Nodes.RootNode.substitutions()` computes a fixed-width type's length independent of the declared size and rejects a mismatch bigger than 4 bytes — `GUID`'s fixed 16 against a declared `0` fails outright). Re-verifying the Step 1 table three independent ways — a byte-for-byte raw re-parse of the exact real record it cites, `python-evtx==0.8.1`'s own successful parse of that same real record, and `UnsignedWordTypeNode`'s fixed-2-byte tolerance explaining why `EventID/@Qualifiers`'s wrong type never broke anything — found the table wrong at exactly four positions: substitution indices 4/7/12/18 in the real file's own numbering (`EventID/@Qualifiers`, `Correlation/@ActivityID`, `Security/@UserID`, `Correlation/@RelatedActivityID`) are all declared type `0x00` there, not `UNSIGNED_WORD`/`GUID`/`SID`. Every other row in the same table checked out exactly as stated. **The fix was reverted**: all six NULL-valued fields (F12b's original five, plus `EventID/@Qualifiers`, F13c's one) now declare `binXMLTypeNull` (`0x00`) — F12b's original choice was correct all along. task-8b-report.md and task-8c-report.md each carry their own correction note.
+**F14 (v0.7.0, Task 8e): two false starts, and where they landed.** Net
+effect on the encoder, after both corrections: **none** — every byte
+go-evtx writes is identical to what F12b/F13c already wrote. The value was
+in what got measured, not in a code change.
+
+*Attempt 1.* The note above led directly to code: reclassified F12b's five
+NULL fields (34/35/36/37/39) from `binXMLTypeNull` (`0x00`) to their
+field's own real type (GUID, SID, UINT32), trusting task-8b-report.md's
+Step 1 table's claim that the real file encodes them that way. Broke
+`python-evtx`'s own regression guard (`Evtx.Nodes.RootNode.substitutions()`
+computes a fixed-width type's length independent of the declared size and
+rejects a mismatch bigger than 4 bytes — `GUID`'s fixed 16 against a
+declared `0` fails outright).
+
+*Verification, three independent ways.* A byte-for-byte raw re-parse of the
+exact real record the Step 1 table cites; `python-evtx==0.8.1`'s own
+successful parse of that same real record (impossible if `ActivityID`
+really were `GUID`-typed at size 0); and `UnsignedWordTypeNode`'s fixed
+2-byte width explaining why `EventID/@Qualifiers`'s declared type never
+broke `python-evtx` either way. Found the Step 1 table's types wrong at
+exactly four positions — substitution indices 4/7/12/18 in the real file's
+own numbering (`EventID/@Qualifiers`, `Correlation/@ActivityID`,
+`Security/@UserID`, `Correlation/@RelatedActivityID`) are all declared type
+`0x00` there. Every other row checked out exactly as stated.
+
+*Attempt 2.* Reverted all six NULL-valued fields (the original five, plus
+`EventID/@Qualifiers`) to `binXMLTypeNull`. `python-evtx`'s crash was
+fixed — but `Get-WinEvent`'s `STAGE2 READ` (Task 8c's own breakthrough)
+**regressed** from reading all 403 records to failing on record 0. A third
+data point (the five fields `GUID`/`SID`/`UINT32`-typed, `Qualifiers` left
+at `UNSIGNED_WORD` — `STAGE2 READ` failed after 384 records, a third
+distinct failure mode) isolated it: of the three combinations tried,
+Windows fully accepts only the original — five fields `NULL`, `Qualifiers`
+`UNSIGNED_WORD`. **Reverted `Qualifiers` back to `UNSIGNED_WORD`** on that
+evidence, restoring byte-for-byte parity with F12b/F13c's original output.
+
+**Unresolved.** The two lines of evidence disagree and this was not
+reconciled: either this task's identification of "`Qualifiers` = index 4 in
+the real file's own numbering" doesn't hold — the Step 1 table's index
+assignments, not just some of its types, may themselves be unreliable, and
+this task did not independently re-derive them — or Windows' acceptance
+ties to this declared type through a mechanism not yet identified.
+task-8b-report.md and task-8c-report.md each carry their own correction
+note; task-8e-report.md has the full investigation.

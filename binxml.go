@@ -47,49 +47,67 @@ const (
 	binXMLTypeHexInt64 = 0x15 // Value type: HexInt64 (uint64, hex-rendered) (F12b)
 )
 
-// F14 (v0.7.0, Task 8e): a same-task false start and its correction, kept
-// here rather than silently squashed, per this release's own "record null
-// results" discipline.
+// F14 (v0.7.0, Task 8e): two false starts and where they landed, kept here
+// rather than silently squashed, per this release's own "record null
+// results" discipline. Net effect on the encoder, after both corrections:
+// none — every byte this function and buildTemplateBody write is identical
+// to what F12b/F13c already wrote. The value was in what got measured along
+// the way, not in a code change.
 //
 // task-8b-report.md's Step 1 table claims Correlation/@ActivityID and
 // @RelatedActivityID are typed GUID (0x0f), Security/@UserID is typed SID
 // (0x13), and EventID/@Qualifiers is typed UNSIGNED_WORD (0x06) — all at
-// size 0 — and F13c (Task 8c) built Qualifiers to match. An initial version
-// of this task believed that table and reclassified the other five NULL
-// fields (which F12b had left as a generic binXMLTypeNull) to match it too.
-// That build broke python-evtx's own regression guard immediately, on
-// record 0: `Evtx.Nodes.RootNode.substitutions()` computes each fixed-width
-// type's length independent of the declared size (`GuidTypeNode.tag_length()
-// == 16`, unconditionally) and raises `ParseException("Invalid substitution
+// size 0 — and F13c (Task 8c) built Qualifiers to match.
+//
+// Attempt 1: believed the table and reclassified the other five NULL fields
+// (which F12b had left as a generic binXMLTypeNull) to match it too. Broke
+// python-evtx's own regression guard immediately, on record 0:
+// `Evtx.Nodes.RootNode.substitutions()` computes each fixed-width type's
+// length independent of the declared size (`GuidTypeNode.tag_length() ==
+// 16`, unconditionally) and raises `ParseException("Invalid substitution
 // value size")` when `abs(declared_size - type_length) > 4` — 16 vs. a
-// declared 0 fails that check outright.
+// declared 0 fails outright.
 //
-// Independent re-verification — three separate methods, not one — settled
-// it the other way: (1) a byte-for-byte raw parse of testdata/system.evtx's
-// own record 0 (the exact record the Step 1 table cites, EventRecordID
-// 12049), reading the substitution array's spec bytes directly with no
-// decoding library involved, found substitution indices 4, 7, 12, and 18 —
-// Qualifiers, ActivityID, UserID, RelatedActivityID — are ALL declared type
+// Verified the table three independent ways before writing more code: (1) a
+// byte-for-byte raw parse of testdata/system.evtx's own record 0 (the exact
+// record the table cites, EventRecordID 12049), reading the substitution
+// array's spec bytes directly with no decoding library involved, found
+// substitution indices 4, 7, 12, and 18 — the positions the table names for
+// Qualifiers/ActivityID/UserID/RelatedActivityID — are ALL declared type
 // 0x00 (size 0) in the real file, not GUID/SID/UNSIGNED_WORD; every other
-// row in the same table (Level, Task, EventID content, Keywords,
-// TimeCreated, EventRecordID, Version, Execution's two non-null attributes)
-// checks out exactly as the table states. (2) `python-evtx==0.8.1` parses
-// testdata/system.evtx's own record 0 without error — via its own official
-// library, not this project's decoder — which would be impossible if that
-// record's ActivityID really were GUID-typed at size 0, per the same
-// tolerance check that broke go-evtx's build. (3)
-// `UnsignedWordTypeNode.tag_length()` is a fixed 2, so a declared size of 0
-// against it is within the library's abs()<=4 tolerance — which is why
-// Qualifiers/UInt16/size-0 (F13c) never broke python-evtx even though it
-// was, per (1) above, also wrong. The Step 1 table's error was localized to
-// exactly these four NULL-valued positions; nothing else in it was wrong.
+// row in the same table checks out exactly as stated. (2) `python-evtx==0.8.1`
+// parses that same real record without error, which would be impossible if
+// its ActivityID really were GUID-typed at size 0. (3)
+// `UnsignedWordTypeNode.tag_length()` is a fixed 2, within the library's
+// abs()<=4 tolerance of a declared 0 — why Qualifiers/UInt16/size-0 (F13c)
+// never broke python-evtx even though it was, per (1), also apparently
+// wrong.
 //
-// So: every NULL-valued OptionalSubstitution attribute go-evtx writes
-// declares the generic binXMLTypeNull (0x00) marker — F12b's original
-// choice, and (per the above) EventID/@Qualifiers now matches it too,
-// reverting F13c's own value-type choice for that one field. See
-// task-8b-report.md's own correction note (added by this task) for the
-// Step 1 table's row-level detail.
+// Attempt 2: reverted all six fields (the original five, plus Qualifiers) to
+// binXMLTypeNull, matching (1)-(3) above. python-evtx's crash was fixed —
+// but `Get-WinEvent`'s STAGE2 READ (Task 8c's own breakthrough,
+// `EventLogReader.ReadEvent()` reading all 403 records) regressed to failing
+// on record 0, an unambiguous, directly-measured Windows-side signal.
+// Isolated with a third data point (`eecb372`: the five fields GUID/SID/
+// UINT32-typed, Qualifiers left at UNSIGNED_WORD — STAGE2 READ failed after
+// 384 records, a third distinct failure mode): the ONLY one of these three
+// combinations Windows accepts in full is the original — five fields NULL,
+// Qualifiers UNSIGNED_WORD. Reverted Qualifiers back to UNSIGNED_WORD on
+// that evidence, restoring byte-for-byte parity with F12b/F13c.
+//
+// The two lines of evidence are not reconciled. Either this task's
+// identification of "Qualifiers = substitution index 4 in the real file's
+// own numbering" doesn't actually hold — the Step 1 table's index
+// assignments, not just (as (1)-(3) initially suggested) some of its types,
+// may themselves be unreliable, and this task did not independently
+// re-derive them, only re-checked the types at the indices the table
+// already named — or Windows' acceptance of a record ties to this declared
+// type through a mechanism this investigation did not identify. See
+// task-8e-report.md's "Concerns" section. task-8b-report.md carries its own
+// correction note for the four-position type discrepancy regardless of
+// which explanation is right — that byte-level finding (about real Windows
+// output) stands on its own, independent of what go-evtx's own encoder
+// needs to satisfy .NET's reader.
 
 // depIDNotSet is the "not set" sentinel for an OpenStartElementTag's
 // dependency_id field (libyal EVTX docs: "-1 (0xffff) => not set"). An
@@ -338,7 +356,7 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 //	38: Channel                    (STRING)   — F12b, from fields["Channel"]
 //	39: Security/@UserID               (NULL) — F12b, no source
 //	40: Provider/@Guid             (STRING)   — F13b, from fields["ProviderGuid"]
-//	41: EventID/@Qualifiers            (NULL) — F13c, no source; F14: reverted from a UINT16 declared type — see the F14 doc comment by the type constants
+//	41: EventID/@Qualifiers            (NULL, type UNSIGNED_WORD) — F13c, no source; F14 tried NULL-type here and it broke STAGE2 READ — see the F14 doc comment by the type constants
 //
 // Total: 29 + 13 = 42 substitutions.
 //
@@ -412,20 +430,30 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c; F14: NULL-type, not UINT16)
+	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c)
 	//
-	// F13c originally declared Qualifiers UNSIGNED_WORD (0x06) at size 0,
-	// believing task-8b-report.md's Step 1 table, which described this exact
-	// attribute that way. F14 (Task 8e) found that table wrong here — a
-	// byte-for-byte re-parse of the real record it cites shows this
-	// attribute's value-spec type is actually 0x00 (generic NULL), like
-	// every other NULL-valued attribute go-evtx writes. See the F14 doc
-	// comment by the type constants for the full correction and how it was
-	// verified (three independent methods, not one). F13a: the element's own
-	// dependency_id becomes subEventID (its own content index), and the
-	// content substitution switches to OptionalSubstitution.
+	// F13c declares Qualifiers UNSIGNED_WORD (0x06) at size 0.
+	// task-8b-report.md's Step 1 table cites this as the real file's own
+	// encoding; F14 (Task 8e) partly disputed that (a byte-for-byte re-parse
+	// of the real record the table cites found index 4 declared type 0x00,
+	// not 0x06) and briefly changed this to binXMLTypeNull to match — but
+	// that change made Windows' EventLogReader.ReadEvent() regress from
+	// reading all 403 records to failing on record 0 (STAGE2 READ), an
+	// unambiguous, directly-measured CI signal stronger than the byte-level
+	// re-parse it contradicts. Reverted back to UNSIGNED_WORD on that
+	// evidence. The two findings are not reconciled: either this task's
+	// index-to-field identification of "Qualifiers = substitution index 4 in
+	// the real file's own numbering" doesn't actually hold (the Step 1
+	// table's index assignments, not just its types, may themselves be
+	// unreliable — this task did not re-derive them independently, only
+	// re-checked the types at the indices the table already named), or some
+	// other mechanism ties Windows' acceptance to this declared type in a
+	// way not yet understood. See task-8e-report.md's "Concerns" for the
+	// open question this leaves. F13a: the element's own dependency_id
+	// becomes subEventID (its own content index), and the content
+	// substitution switches to OptionalSubstitution.
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", subEventID, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "Qualifiers", subEventIDQualifiers, binXMLTypeNull, false, baseOffset, names)
+	writeAttributeOptional(b, "Qualifiers", subEventIDQualifiers, binXMLTypeUint16, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	writeOptionalSubstitution(b, subEventID, binXMLTypeUint16)
@@ -716,13 +744,16 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// defaulting to "" when the caller doesn't supply one.
 	//
 	// EventID/@Qualifiers has no caller-supplied source (go-evtx's WriteRecord
-	// API has no concept of an event qualifier code), so it is NULL,
-	// binXMLTypeNull-typed like every other NULL field above. F13c originally
-	// declared it UNSIGNED_WORD, believing task-8b-report.md's Step 1 table;
-	// F14 (Task 8e) found that table wrong for this exact attribute (and
-	// three others) — see the F14 doc comment by the type constants.
+	// API has no concept of an event qualifier code), so it is NULL —
+	// declaring its own real type, UNSIGNED_WORD, with zero-length data, per
+	// F13c. F14 (Task 8e) tried declaring it binXMLTypeNull instead, matching
+	// a byte-for-byte re-parse of testdata/system.evtx's own record, and that
+	// made Get-WinEvent's STAGE2 READ regress from all 403 records to failing
+	// on record 0 — reverted back to UNSIGNED_WORD on that stronger, directly
+	// measured signal. See the F14 doc comment by the type constants for the
+	// full, unresolved story.
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 40 Provider/@Guid
-	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                       // 41 EventID/@Qualifiers
+	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 41 EventID/@Qualifiers
 
 	return subs
 }
@@ -853,17 +884,17 @@ func writeAttributeSub(b *bytes.Buffer, name string, subIndex uint16, subType by
 }
 
 // writeAttributeOptional is writeAttributeSub for an attribute value go-evtx
-// has no source for (Correlation's ActivityID/RelatedActivityID, Execution's
-// ProcessID/ThreadID, Security's UserID — F12b/F12c; EventID's Qualifiers —
-// F13c, reverted to this by F14): the value token is OptionalSubstitution
-// (0x0E) rather than NormalSubstitution (0x0D), and subType is
-// binXMLTypeNull in every call site, matching how testdata/system.evtx
-// itself encodes these exact fields when an event doesn't populate them
-// (value_spec size 0, type 0x00) — reproducing the real file's own answer
-// to "we don't have this," not inventing one. See the F14 doc comment by
-// the type constants: an earlier version of this function's callers briefly
-// used each field's own real type instead (GUID, SID, UINT32, UINT16),
-// believing a since-corrected reading of the real file.
+// has no source for: Correlation's ActivityID/RelatedActivityID, Execution's
+// ProcessID/ThreadID, and Security's UserID (F12b/F12c) pass binXMLTypeNull,
+// matching how testdata/system.evtx itself encodes these exact fields when
+// an event doesn't populate them (value_spec size 0, type 0x00) —
+// reproducing the real file's own answer to "we don't have this," not
+// inventing one. EventID's Qualifiers (F13c) is the one exception: it passes
+// binXMLTypeUint16 instead, which F14 found is empirically required for
+// Get-WinEvent to read the record at all, even though it does not match
+// this same reasoning — see the F14 doc comment by the type constants for
+// the full, unresolved story. In every case the value token is
+// OptionalSubstitution (0x0E) rather than NormalSubstitution (0x0D).
 //
 // Layout: [token: 1B] [name_offset: 4B] [NameNode] [0x0E subIdx subType]
 func writeAttributeOptional(b *bytes.Buffer, name string, subIndex uint16, subType byte, moreAttrs bool, binXMLBase uint32, refs *[]chunkRef) {
