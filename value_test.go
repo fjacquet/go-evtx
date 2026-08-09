@@ -1,11 +1,36 @@
 package evtx
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
+
+// u16LE encodes s as bare UTF-16LE code units — no count prefix and no
+// terminator, unlike binformat.go's encodeUTF16LE, which writes a NameNode's
+// framing as well.
+func u16LE(s string) []byte {
+	var b []byte
+	for _, c := range utf16.Encode([]rune(s)) {
+		b = binary.LittleEndian.AppendUint16(b, c)
+	}
+	return b
+}
+
+// u16Array builds an array-of-String (0x81) payload: each element as UTF-16LE
+// followed by a NUL code unit.
+func u16Array(parts ...string) []byte {
+	var b []byte
+	for _, p := range parts {
+		b = append(b, u16LE(p)...)
+		b = append(b, 0, 0)
+	}
+	return b
+}
 
 func TestDecodeValue_FixedWidths(t *testing.T) {
 	tests := []struct {
@@ -69,10 +94,145 @@ func TestDecodeValue_WrongWidthIsError(t *testing.T) {
 
 // Measured zero times across 284635 real records. Rejected rather than guessed.
 func TestDecodeValue_UnsupportedTypesRejected(t *testing.T) {
-	for _, typ := range []ValueType{ValAnsiString, 0x81, 0x8a, 0x7f} {
+	// 0x81 — array of UTF-16 strings — used to be here. It is the one array
+	// type that occurs in the corpus (22 036 records) and is now decoded; see
+	// TestDecodeValue_StringArray. Every other array type stays rejected.
+	for _, typ := range []ValueType{ValAnsiString, 0x8a, 0x7f} {
 		if _, err := decodeValue(typ, []byte{0x00}); err == nil {
 			t.Errorf("type %#x: expected an error, got none", typ)
 		}
+	}
+}
+
+// TestDecodeValue_StringArray covers value type 0x81 — ValString with the
+// array flag — laid out as NUL-separated UTF-16 runs. Measured across the
+// derivation corpus: 22 036 records carry it, and it is the only array type
+// that occurs at all.
+func TestDecodeValue_StringArray(t *testing.T) {
+	arrayOfString := ValString | valArrayFlag
+	tests := []struct {
+		name string
+		data []byte
+		want []string
+	}{
+		{"two terminated elements", u16Array("AB", "CD"), []string{"AB", "CD"}},
+		{"single element", u16Array("Service"), []string{"Service"}},
+		// A run after the last NUL is a final element that was not terminated.
+		{"final element unterminated", append(u16Array("AB"), u16LE("CD")...), []string{"AB", "CD"}},
+		// An empty element in the middle is legitimate and must survive; only
+		// the terminator of the last element is allowed to vanish.
+		{"empty middle element", u16Array("AB", "", "CD"), []string{"AB", "", "CD"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := decodeValue(arrayOfString, tc.data)
+			if err != nil {
+				t.Fatalf("decodeValue: %v", err)
+			}
+			got, ok := v.Strings()
+			if !ok {
+				t.Fatal("Strings() reported this is not a string array")
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeValue_StringArrayZeroLengthIsAbsent(t *testing.T) {
+	v, err := decodeValue(ValString|valArrayFlag, nil)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	if !v.IsAbsent() {
+		t.Error("a zero-length string array is an absent optional substitution, not an error")
+	}
+}
+
+func TestDecodeValue_StringArrayOddLength(t *testing.T) {
+	if _, err := decodeValue(ValString|valArrayFlag, []byte{0x41, 0x00, 0x42}); err == nil {
+		t.Fatal("expected an error for an odd-length string array")
+	}
+}
+
+func TestValue_MarshalJSON_StringArray(t *testing.T) {
+	v, err := decodeValue(ValString|valArrayFlag, u16Array("alpha", "beta"))
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got, want := string(b), `["alpha","beta"]`; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+// TestDecodeValue_SysTime covers value type 0x12 — Win32 SYSTEMTIME, eight
+// little-endian uint16 fields. 8 records of the derivation corpus carry it.
+func TestDecodeValue_SysTime(t *testing.T) {
+	// wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds
+	data := make([]byte, 16)
+	for i, f := range []uint16{2020, 1, 3, 1, 12, 34, 56, 789} {
+		binary.LittleEndian.PutUint16(data[2*i:], f)
+	}
+	v, err := decodeValue(ValSysTime, data)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	if got, want := v.String(), "2020-01-01T12:34:56.789Z"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got, want := string(b), `"2020-01-01T12:34:56.789Z"`; got != want {
+		t.Errorf("JSON got %s, want %s", got, want)
+	}
+}
+
+func TestDecodeValue_SysTimeWrongLength(t *testing.T) {
+	if _, err := decodeValue(ValSysTime, make([]byte, 8)); err == nil {
+		t.Fatal("expected an error for an 8-byte SysTime")
+	}
+}
+
+// TestDecodeValue_SysTimeOutOfRange pins that malformed components are
+// rejected rather than normalised. time.Date turns month 13 into January of
+// the following year and day 32 into the next month, so without this check a
+// corrupt record would decode as a plausible wrong timestamp.
+func TestDecodeValue_SysTimeOutOfRange(t *testing.T) {
+	sysTime := func(fields ...uint16) []byte {
+		b := make([]byte, 16)
+		for i, f := range fields {
+			binary.LittleEndian.PutUint16(b[2*i:], f)
+		}
+		return b
+	}
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		// wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds
+		{"month 13", sysTime(2020, 13, 0, 1, 0, 0, 0, 0)},
+		{"month 0", sysTime(2020, 0, 0, 1, 0, 0, 0, 0)},
+		{"day 32", sysTime(2020, 1, 0, 32, 0, 0, 0, 0)},
+		{"day 0", sysTime(2020, 1, 0, 0, 0, 0, 0, 0)},
+		{"31 February", sysTime(2020, 2, 0, 31, 0, 0, 0, 0)},
+		{"hour 24", sysTime(2020, 1, 0, 1, 24, 0, 0, 0)},
+		{"minute 60", sysTime(2020, 1, 0, 1, 0, 60, 0, 0)},
+		{"second 60", sysTime(2020, 1, 0, 1, 0, 0, 60, 0)},
+		{"millisecond 1000", sysTime(2020, 1, 0, 1, 0, 0, 0, 1000)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if v, err := decodeValue(ValSysTime, tc.data); err == nil {
+				t.Fatalf("expected an error, got %q", v.String())
+			}
+		})
 	}
 }
 

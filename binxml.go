@@ -42,11 +42,47 @@ const (
 	binXMLTypeString   = 0x01 // Value type: UTF-16LE string (WSTRING)
 	binXMLTypeUint8    = 0x04 // Value type: uint8 (UNSIGNED_BYTE) (F12a/F12b)
 	binXMLTypeUint16   = 0x06 // Value type: uint16 (UNSIGNED_WORD)
+	binXMLTypeUint32   = 0x08 // Value type: uint32 (UNSIGNED_DWORD) (F15)
 	binXMLTypeUint64   = 0x0A // Value type: uint64 (UNSIGNED_QWORD) (F12b)
+	binXMLTypeGuid     = 0x0F // Value type: GUID (F15)
 	binXMLTypeFiletime = 0x11 // Value type: FILETIME (uint64)
+	binXMLTypeSid      = 0x13 // Value type: SID (F15)
 	binXMLTypeHexInt64 = 0x15 // Value type: HexInt64 (uint64, hex-rendered) (F12b)
 )
 
+// F15 (the shape census): an OptionalSubstitution's TOKEN declares the field's
+// own type; its entry in the SUBSTITUTION ARRAY declares NULL when the value
+// is absent. The two are different fields at opposite ends of the record, and
+// conflating them is what left F14 unresolved.
+//
+// Measured over 320 398 real records — 27 million shape observations, and
+// testdata/system.evtx contributes none of them:
+//
+//	token Guid        + array Null   566 046
+//	token Sid         + array Null   308 235
+//	token UInt16      + array Null   226 089
+//	token Binary      + array Null    35 905
+//	token StringArray + array Null    15 624
+//	token UInt32      + array Null       415
+//	token UInt64      + array Null       415
+//	token Null        + array Null         0   <-- what go-evtx wrote
+//
+// Zero occurrences of Null/Null in the whole corpus; go-evtx emitted 2015 of
+// them in its own 403-record fixture, five per record.
+//
+// This also explains F14's two false starts. Its attempt 1 put Guid/Sid/UInt32
+// in the ARRAY at size 0, which python-evtx rightly refuses — a GUID is a
+// fixed 16 bytes. Its verification then re-parsed a real record, found 0x00,
+// and concluded the types were wrong; it was reading the array. And it
+// explains why EventID/@Qualifiers had to stay UNSIGNED_WORD: token UInt16
+// with array Null is the 226 089-occurrence shape, and reverting the token to
+// Null regressed STAGE2 READ.
+
+// **RESOLVED by F15 above — read that first.** F14 was measuring the
+// substitution ARRAY while reasoning about the template TOKEN. Everything
+// below is kept because its measurements are correct and its dead ends are
+// worth not repeating; only its conclusion ("unresolved") is superseded.
+//
 // F14 (v0.7.0, Task 8e): two false starts and where they landed, kept here
 // rather than silently squashed, per this release's own "record null
 // results" discipline. Net effect on the encoder, after both corrections:
@@ -535,16 +571,16 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 
 	//     <Correlation ActivityID="%34" RelatedActivityID="%35"/>       (F12b/F12c)
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Correlation", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "ActivityID", subActivityID, binXMLTypeNull, true, baseOffset, names)
-	writeAttributeOptional(b, "RelatedActivityID", subRelatedActivityID, binXMLTypeNull, false, baseOffset, names)
+	writeAttributeOptional(b, "ActivityID", subActivityID, binXMLTypeGuid, true, baseOffset, names)
+	writeAttributeOptional(b, "RelatedActivityID", subRelatedActivityID, binXMLTypeGuid, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Execution ProcessID="%36" ThreadID="%37"/>                   (F12b/F12c)
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Execution", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "ProcessID", subProcessID, binXMLTypeNull, true, baseOffset, names)
-	writeAttributeOptional(b, "ThreadID", subThreadID, binXMLTypeNull, false, baseOffset, names)
+	writeAttributeOptional(b, "ProcessID", subProcessID, binXMLTypeUint32, true, baseOffset, names)
+	writeAttributeOptional(b, "ThreadID", subThreadID, binXMLTypeUint32, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
@@ -563,7 +599,7 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 
 	//     <Security UserID="%39"/>                                      (F12b/F12c)
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Security", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "UserID", subSecurityUserID, binXMLTypeNull, false, baseOffset, names)
+	writeAttributeOptional(b, "UserID", subSecurityUserID, binXMLTypeSid, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)

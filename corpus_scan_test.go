@@ -1,0 +1,325 @@
+package evtx
+
+// corpus_scan_test.go — a fact dumper for a local corpus of real .evtx files.
+//
+// Why a test and not a cmd/: the facts worth measuring live in unexported
+// structures (templateCache, parseSubstitutions, the template-definition
+// header), and a cmd/ package cannot reach them. Exporting them would mean
+// carrying a permanent public contract for what is scaffolding. An in-package
+// test sees everything, adds no public surface, and skips unless a corpus
+// path is handed to it — so CI never runs it.
+//
+// Why a dumper and not a suite of named invariants: an invariant only answers
+// the question it was written for. One pass that emits structural facts as
+// JSON Lines answers the questions we have not thought of yet — each becomes a
+// one-line query over the output. Once a rule is confirmed, it graduates into
+// a real assertion elsewhere.
+//
+// Two rules the output obeys, both load-bearing:
+//
+//   - Facts are reported for records the strict decoder REJECTS, with the
+//     rejection recorded alongside. Measuring only what already decodes is the
+//     round-trip blindness that hid every v0.6.0 defect.
+//   - No string values are ever emitted — element and attribute names, types,
+//     sizes, offsets and counts only. Real logs carry account names, SIDs,
+//     machine names and IP addresses, and this output ends up quoted in docs/.
+//
+// Usage:
+//
+//	EVTX_CORPUS=/path/to/corpus go test -run TestCorpusScan -v .
+//
+// Writes JSON Lines to $EVTX_CORPUS_OUT (default: a file in os.TempDir(),
+// whose path the test logs).
+
+import (
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// fileFact, chunkFact and recordFact are the three record shapes the dumper
+// emits. Kind discriminates them; every field is a count, an offset, a type or
+// a hash — never content.
+type fileFact struct {
+	Kind    string `json:"kind"`
+	File    int    `json:"file"`
+	Major   uint16 `json:"major"`
+	Minor   uint16 `json:"minor"`
+	Chunks  int    `json:"chunks"`
+	Records int    `json:"records"`
+	Decoded int    `json:"decoded"`
+}
+
+type chunkFact struct {
+	Kind       string   `json:"kind"`
+	File       int      `json:"file"`
+	Chunk      int      `json:"chunk"`
+	Records    int      `json:"records"`
+	FreeOff    int      `json:"free_off"`
+	NameSlots  int      `json:"name_slots"`
+	TmplSlots  int      `json:"tmpl_slots"`
+	TmplOffs   []int    `json:"tmpl_offs"`
+	TmplGUIDs  []string `json:"tmpl_guids"`
+	DistinctID int      `json:"distinct_template_defs"`
+}
+
+type recordFact struct {
+	Kind     string         `json:"kind"`
+	File     int            `json:"file"`
+	Chunk    int            `json:"chunk"`
+	Off      int            `json:"off"`
+	Size     int            `json:"size"`
+	SizeMod8 int            `json:"size_mod8"`
+	OffMod8  int            `json:"off_mod8"`
+	Payload  int            `json:"payload_len"`
+	FragHdr  bool           `json:"frag_header"`
+	DefOff   int            `json:"def_off"`
+	Inline   bool           `json:"def_inline"`
+	DefWhere string         `json:"def_where"` // before | inside | after — relative to this record
+	GUID     string         `json:"tmpl_guid"`
+	Subs     int            `json:"subs"`
+	Types    map[string]int `json:"sub_types"`
+	Trailing int            `json:"trailing"` // bytes after the substitution array
+	HasDef   bool           `json:"has_def"`  // a template instance was found; DefOff/DefWhere mean nothing without it
+	ScanErr  string         `json:"scan_err,omitempty"`
+	DecErr   string         `json:"decode_err,omitempty"`
+}
+
+// fragScan walks the top of one record payload exactly as
+// decodeBinXMLFragment does, but records what it finds instead of validating
+// it. Deliberately a separate walk: the decoder returns on the first rule
+// violation, and a violated rule is precisely what this dumper exists to
+// measure.
+func fragScan(cache *templateCache, chunkOff, length int, f *recordFact) {
+	chunk := cache.chunk
+	if chunkOff < 0 || length < 0 || chunkOff+length > len(chunk) {
+		f.ScanErr = "payload outside chunk"
+		return
+	}
+	payload := chunk[chunkOff : chunkOff+length]
+
+	pos := 0
+	if len(payload) > 0 && payload[0] == tokFragmentHeader {
+		f.FragHdr = true
+		pos = 4
+	}
+	if pos+10 > len(payload) || payload[pos] != tokTemplateInstance {
+		f.ScanErr = "no template instance"
+		return
+	}
+	f.DefOff = int(le32(payload[pos+6:]))
+	f.HasDef = true
+	pos += 10
+	f.Inline = f.DefOff == chunkOff+pos
+
+	def, err := cache.get(f.DefOff)
+	if err != nil {
+		f.ScanErr = err.Error()
+		return
+	}
+	f.GUID = hex.EncodeToString(def.GUID[:])
+	if f.Inline {
+		pos += templateDefHeaderSize + len(def.Body)
+		if pos > len(payload) {
+			f.ScanErr = "inline definition runs past the fragment"
+			return
+		}
+	}
+
+	subs, _, consumed, err := parseSubstitutions(payload[pos:])
+	if err != nil {
+		f.ScanErr = err.Error()
+		return
+	}
+	f.Subs = len(subs)
+	f.Types = make(map[string]int, len(subs))
+	for i := range subs {
+		f.Types[fmt.Sprintf("%#02x", uint8(subs[i].Type))]++
+	}
+	f.Trailing = len(payload) - (pos + consumed)
+}
+
+// scanEVTX walks one file's chunks and records, emitting one fact per file,
+// per chunk and per record. It never stops on a bad record: a corpus scan that
+// aborts at the first surprise measures nothing.
+func scanEVTX(path string, fileID int, emit func(any), onShape func(shapeEvent)) error {
+	b, err := os.ReadFile(path) // #nosec G304 — a developer-supplied corpus path
+	if err != nil {
+		return err
+	}
+	if len(b) < int(evtxFileHeaderSize) || string(b[0:8]) != evtxFileMagic {
+		return fmt.Errorf("not an evtx file")
+	}
+	ff := fileFact{
+		Kind:   "file",
+		File:   fileID,
+		Minor:  binary.LittleEndian.Uint16(b[36:38]),
+		Major:  binary.LittleEndian.Uint16(b[38:40]),
+		Chunks: int(binary.LittleEndian.Uint16(b[42:44])),
+	}
+
+	for ci := 0; ci < ff.Chunks; ci++ {
+		start := int(evtxFileHeaderSize) + ci*int(evtxChunkSize)
+		if start+int(evtxChunkSize) > len(b) {
+			break
+		}
+		chunk := b[start : start+int(evtxChunkSize)]
+		if string(chunk[0:8]) != evtxChunkMagic {
+			continue
+		}
+		cache := newTemplateCache(chunk)
+		cache.onShape = onShape
+
+		cf := chunkFact{Kind: "chunk", File: fileID, Chunk: ci,
+			FreeOff: int(binary.LittleEndian.Uint32(chunk[48:52]))}
+		for i := 0; i < 64; i++ {
+			if binary.LittleEndian.Uint32(chunk[128+4*i:]) != 0 {
+				cf.NameSlots++
+			}
+		}
+		for i := 0; i < 32; i++ {
+			if off := int(binary.LittleEndian.Uint32(chunk[384+4*i:])); off != 0 {
+				cf.TmplSlots++
+				cf.TmplOffs = append(cf.TmplOffs, off)
+				if def, err := cache.get(off); err == nil {
+					cf.TmplGUIDs = append(cf.TmplGUIDs, hex.EncodeToString(def.GUID[:]))
+				}
+			}
+		}
+
+		seenDefs := map[int]bool{}
+		off := int(evtxChunkHeaderSize)
+		for off+24 <= cf.FreeOff && cf.FreeOff <= len(chunk) {
+			if binary.LittleEndian.Uint32(chunk[off:]) != evtxRecordSignature {
+				break
+			}
+			size := int(binary.LittleEndian.Uint32(chunk[off+4:]))
+			if size < 28 || off+size > len(chunk) {
+				break
+			}
+			rf := recordFact{Kind: "record", File: fileID, Chunk: ci, Off: off,
+				Size: size, SizeMod8: size % 8, OffMod8: off % 8, Payload: size - 28}
+			fragScan(cache, off+24, size-28, &rf)
+
+			// Only a record whose template instance was actually located
+			// contributes a definition offset. Classifying a bailed-out scan
+			// as "before" and counting its zero offset would silently inflate
+			// distinct_template_defs and corrupt the def_where distribution —
+			// a measuring instrument must not invent the value it failed to
+			// read.
+			if rf.HasDef {
+				switch {
+				case rf.DefOff >= off && rf.DefOff < off+size:
+					rf.DefWhere = "inside"
+				case rf.DefOff < off:
+					rf.DefWhere = "before"
+				default:
+					rf.DefWhere = "after"
+				}
+				seenDefs[rf.DefOff] = true
+			}
+
+			if _, err := decodeRecordBinXML(cache, off+24, size-28); err != nil {
+				rf.DecErr = err.Error()
+			} else {
+				ff.Decoded++
+			}
+			emit(rf)
+
+			cf.Records++
+			off += size
+		}
+		cf.DistinctID = len(seenDefs)
+		ff.Records += cf.Records
+		emit(cf)
+	}
+	emit(ff)
+	return nil
+}
+
+func TestCorpusScan(t *testing.T) {
+	root := os.Getenv("EVTX_CORPUS")
+	if root == "" {
+		t.Skip("set EVTX_CORPUS to a directory of real .evtx files")
+	}
+	outPath := os.Getenv("EVTX_CORPUS_OUT")
+	if outPath == "" {
+		outPath = filepath.Join(os.TempDir(), "corpus-facts.jsonl")
+	}
+	out, err := os.Create(outPath) // #nosec G304 — a developer-supplied output path
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = out.Close() }()
+	enc := json.NewEncoder(out)
+	emit := func(v any) {
+		if err := enc.Encode(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files, failed := 0, 0
+	walk := func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".evtx") {
+			return nil //nolint:nilerr // an unreadable entry is skipped, not fatal
+		}
+		if isExcludedFixture(p) {
+			t.Logf("skip %s: excluded as evidence", filepath.Base(p))
+			return nil
+		}
+		// Facts carry a session-local integer, never a path. A corpus lives
+		// under a developer's home directory and its subdirectories are named
+		// after machines, accounts and campaigns; this output is quoted in
+		// docs/. The id-to-path mapping is logged to the console instead,
+		// where it stays ephemeral and correlation is still possible.
+		files++
+		fileID := files
+		t.Logf("file %d = %s", fileID, filepath.Base(p))
+		if scanErr := scanEVTX(p, fileID, emit, nil); scanErr != nil {
+			t.Logf("skip file %d: %v", fileID, scanErr)
+			files--
+			failed++
+			return nil
+		}
+		return nil
+	}
+	// Same multi-root form as the census: a corpus is usually more than one
+	// directory, and having the two tools disagree about their input syntax
+	// is how a scan silently walks a path that does not exist.
+	for _, r := range filepath.SplitList(root) {
+		if err := filepath.WalkDir(r, walk); err != nil {
+			t.Fatalf("walk %s: %v", r, err)
+		}
+	}
+	// A scan that found nothing must fail. The walk callback swallows
+	// per-entry errors by design, so a mistyped root would otherwise produce
+	// an empty output file and a passing test.
+	if files == 0 {
+		t.Fatalf("no .evtx files found under %q", root)
+	}
+	t.Logf("scanned %d files (%d unreadable) -> %s", files, failed, outPath)
+}
+
+// excludedFixture names the file this project must not measure the format
+// from. Every rule go-evtx encodes it took from testdata/system.evtx — the
+// <System> block's fourteen children, the per-element OptionalSubstitution
+// choice, the dependency_id rule, EventID/@Qualifiers's declared type, the
+// 0x46/0x06 attribute-token rule — so the encoder was built to imitate one
+// sample, and ToXml rejects what the encoder produces. It is also measurably
+// odd: 55 of its records carry a Null-typed substitution with data, a
+// construct occurring zero times in the other 320 398 records of the local
+// corpus.
+//
+// Enforced here rather than left to whoever sets EVTX_CORPUS, because a
+// convention that is only written down is a convention that gets forgotten.
+const excludedFixture = "system.evtx"
+
+func isExcludedFixture(path string) bool {
+	return strings.EqualFold(filepath.Base(path), excludedFixture)
+}

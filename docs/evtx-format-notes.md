@@ -841,6 +841,100 @@ code change: none. See "Declared type vs. actual width" above and
 `task-9f-report.md` for the full audit table and the size-not-type
 hypothesis the regression leaves open.
 
+## The corpus scanner, and what 37 364 real records say
+
+`corpus_scan_test.go` walks a directory of real `.evtx` files and emits one
+JSON Lines fact per file, per chunk and per record — offsets, sizes, declared
+types, template references, trailing-byte counts, and the strict decoder's
+verdict. Never string values: real logs carry account names, SIDs, machine
+names and IP addresses, and this output gets quoted here.
+
+```
+EVTX_CORPUS=/path/to/corpus go test -run TestCorpusScan -v .
+```
+
+It is a test rather than a `cmd/` because the facts worth measuring live in
+unexported structures; exporting them would mean a permanent public contract
+for scaffolding. It skips unless `EVTX_CORPUS` names one or more directories,
+so CI never runs it, and `isExcludedFixture` refuses any file called
+`system.evtx` — see "No `.evtx` is tracked" in `testdata/README.md`. Facts
+carry a session-local file id, never a path: corpus directories are named
+after machines, accounts and campaigns.
+
+**It reports facts for records the decoder REJECTS.** Measuring only what
+already decodes is the round-trip blindness that hid every v0.6.0 defect.
+
+Measured 2026-08-09 over 278 files (264 × 3.1, 14 × 3.2), 37 364 records,
+0.89 s. Zero structural scan errors — the walk completes on 100 % of the
+corpus. 96.9 % decode.
+
+### Three rules with no exception in 37 364 records
+
+- **`size % 8 == 0` and `off % 8 == 0`: 37 364 of 37 364**, both format
+  versions. Record alignment is not merely common, it is universal. F2 is no
+  longer an inference drawn from a sample.
+- **Trailing bytes after the substitution array: always 1 to 8, never 0** —
+  the EOF token plus 0–7 bytes of padding. go-evtx emits zero on every record.
+- **A template definition is declared inline exactly once and then shared.**
+  545 definitions across the corpus, 477 of them reused by later records;
+  36 819 instances point *backward* at an existing definition, 545 are the
+  inline declaration itself, and **zero** point forward.
+
+### The template model, ours against Windows'
+
+| | real | go-evtx |
+|---|---|---|
+| definition declared inline | 545 times total | in **every** record |
+| instance pointing back at a shared definition | 36 819 | 0 |
+| instance pointing forward | 0 | 0 |
+
+**Hypothesis, not yet measured.** This is the leading explanation for why
+adding any byte to the payload flips the 403-record fixture from `STAGE2
+READ: ok, 403 records` to failing on record 0 while a single-record file with
+the same shape passes: Windows resolves the template through the chunk's
+template table, not through each instance's own `template_offset`. go-evtx
+writes one table entry (record 0's copy, chunk offset 550) and 402 further
+inline copies nobody points at. While nothing moves, offset 550 is correct.
+Add a byte anywhere and everything after it shifts. One record means nothing
+to shift. Confirming this needs a writer that declares each template once —
+it has not been built.
+
+### What the same scan says about the decoder's own gaps (#40)
+
+1151 failures, four causes:
+
+| records | files | cause |
+|---|---|---|
+| 745 | 38 | the template's declared type disagrees with the substitution array's — `UInt8`/`UInt16` (415), `SizeT`/`HexInt32` (176), `SizeT`/`HexInt64` (154). The decoder treats the disagreement as fatal; Windows does not. |
+| 396 | 11 | array value types inside nested fragments, rejected by a guard whose "measured zero occurrences" comment is wrong |
+| 8 | 1 | `SysTime` not implemented |
+| 2 | 1 | `AnsiString` unsupported |
+
+The first two are 99 % of all failures.
+
+**All four were then closed**, except `AnsiString`, which stays unimplemented
+because the format carries no codepage and any decoding would be invention.
+The derivation corpus now decodes **320 382 of 320 398 records — 99.995 %** —
+and the 16 that remain are exactly those `AnsiString` records.
+
+**A correction the scan forced, and its consequence.** The strict decoder read
+1496 of `testdata/system.evtx`'s 1601 records, not all of them, and the repo
+had believed otherwise. A `decodedFloor` constant briefly pinned that number
+as a CI smoke gate. Both are gone: `testdata/system.evtx` was removed from the
+repository altogether, because every rule this project encodes was derived
+from that one sample and the same file was then used to assert the rules were
+right — an assertion that cannot fail when the derivation is wrong.
+
+### What this changes about method
+
+Seventeen tasks were spent asking Windows a yes/no question about one
+hypothesis at a time — a one-bit oracle over a large space, at a CI round-trip
+per attempt, and a "no" that teaches nothing about why. The corpus answers a
+different and better question — *what does Windows write?* — exhaustively,
+locally, in under a second. The order that follows: **the corpus derives, the
+specification names, the VM confirms, CI records.** The VM's role is to close
+a hypothesis, not to search for one.
+
 ## What is still unknown
 
 **The central open question, stated precisely.** `.NET`'s

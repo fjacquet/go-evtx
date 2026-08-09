@@ -2985,3 +2985,95 @@ full account.
 Full verbatim job output, the complete 42-row audit table, and the
 side-by-side real-file decode are in
 `.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9f-report.md`.
+
+## F15: `ToXml` renders. The defect was five bytes per record.
+
+**Run `31331139326`, `head_sha` `5c3b32f85267691c23239019eefc5e901c98bb5b`**,
+selected by `head_sha` and equal to the commit measured, per this document's
+own rule. `Format Verify`: **success**, all five jobs.
+
+### Result: row 22 — every Windows-side signal green, for the first time
+
+```
+wrote artifacts/generated.evtx (403 records, max ObjectName 31236 runes)
+OK: 403 records, all chunk checksums verify
+STAGE1 OPEN: ok
+STAGE2 READ: ok, 403 records
+LOGINFO: ok - records=403 oldest=1 full=False
+PROP ToXml ok
+GETWINEVENT default: ok, 403 records
+GETWINEVENT -Oldest: ok, 403 records
+OK: 403 records, ObjectName round-trips (variant: default)
+MINIMAL STAGE1 OPEN: ok
+MINIMAL STAGE2 READ: ok, 1 records
+MINIMAL PROP ToXml ok
+MINIMAL GETWINEVENT default: ok, 1 records
+MINIMAL GETWINEVENT -Oldest: ok, 1 records
+```
+
+`PROP ToXml ok` is the line this release has been chasing since Task 8c. Both
+`Get-WinEvent` orderings return all 403 records, and the content assertion —
+`ObjectName round-trips` — passes on the main fixture and on the minimal one.
+
+### The defect
+
+An `OptionalSubstitution`'s **token** declares the field's own type; its entry
+in the **substitution array** declares `NULL` when the value is absent.
+go-evtx wrote `NULL` in both. Five bytes per record: substitution indices
+34/35 now declare `Guid`, 36/37 declare `UInt32`, 39 declares `Sid`; their
+array entries are unchanged.
+
+### How it was found, and why the previous method could not
+
+Not by another hypothesis-and-verdict cycle. A **shape census**: profile every
+structural shape in 320 398 real records across 281 files (27 million
+observations), profile go-evtx's own output the same way, and list every shape
+we emit that no real record emits. The list had exactly one entry —
+
+| token declares | array declares | occurrences in the corpus |
+|---|---|---|
+| `Guid` | `Null` | 566 046 |
+| `Sid` | `Null` | 308 235 |
+| `UInt16` | `Null` | 226 089 |
+| `Binary` | `Null` | 35 905 |
+| `StringArray` | `Null` | 15 624 |
+| `UInt32` | `Null` | 415 |
+| `UInt64` | `Null` | 415 |
+| **`Null`** | **`Null`** | **0** — go-evtx emitted 2015 |
+
+The seventeen preceding tasks used a one-bit oracle: encode a hypothesis, ask
+Windows yes or no. That cannot distinguish a wrong hypothesis from a right
+hypothesis aimed at the wrong field, which is exactly what happened. F14
+(Task 8e) changed and re-measured the substitution *array* while reasoning
+about the *token* — opposite ends of the record — and concluded "unresolved"
+from two observations that never conflicted. F16 (Task 9f) then built its
+"size-not-type" hypothesis on the same conflation. **Both are superseded: the
+signal is the token's declared type, and size was never the variable.**
+
+It also explains index 41. `EventID/@Qualifiers` as token `UInt16` with array
+`Null` is the 226 089-occurrence shape — which is why keeping `UNSIGNED_WORD`
+worked, and why every perturbation of it regressed something.
+
+### Two harness bugs the green run exposed
+
+Neither is a format defect; both are recorded because a test that has never
+run is not a test that passes.
+
+- The `ObjectName` assertion compared `$verified[0]` against
+  `expected.object_names[0]`, but `Get-WinEvent`'s default order is newest
+  first. It had been wrong for as long as it existed and nothing could notice,
+  because `Get-WinEvent` threw before reaching it on every go-evtx file ever
+  measured. Fixed to read the expected value from the same end as the variant.
+- Truncating this workflow to drop the bisection jobs cut one line inside
+  `get-winevent-minimal`'s final `if` block, costing its generated `.ps1` a
+  closing brace. Restored.
+
+### What this row does not settle
+
+`W1` (fragment EOF token) and `W2`/`F2` (8-byte record alignment) are still
+unimplemented, though `size % 8 == 0` and `off % 8 == 0` now measure 37 364 of
+37 364 on real records. The writer still re-declares a full inline template
+definition in every record where real Windows declares one per chunk and
+points back at it (36 819 backward references to 545 definitions, zero
+forward). And with `testdata/system.evtx` removed, CI no longer checks the
+chunk hash-table rules against any real file.

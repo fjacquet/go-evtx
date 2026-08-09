@@ -36,7 +36,7 @@ func readFixtureChunk(t *testing.T, n int) []byte {
 // their absent magic would mistake normal EVTX layout for a damaged fixture.
 func readFixtureChunkOK(t *testing.T, n int) ([]byte, bool) {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/system.evtx")
+	raw, err := os.ReadFile(fixturePath(t)) // #nosec G304 — a developer-supplied corpus path
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -122,6 +122,19 @@ func TestFixture_StringTableBucketRule(t *testing.T) {
 // pre-allocated evtxChunkSize slots the file is long by byte size (see
 // readFixtureChunkOK's comment above).
 func TestFixture_TemplateTableBucketRule(t *testing.T) {
+	// The GUID bucket rule is format-3.1-only, and that is a measured fact,
+	// not a suspicion: it places 386 of 386 entries correctly on 3.1 files and
+	// 0 of 1387 (app.evtx), 0 of 9358 (security.evtx) and 39 of 3465
+	// (system2.evtx) on 3.2 ones — at or below the 1-in-32 chance rate. The
+	// 3.2 rule is not known; see the "template bucket rule is 3.1-only" note
+	// in docs/evtx-format-notes.md.
+	//
+	// This check used to run against a tracked 3.1 fixture and so could never
+	// surface the limitation. Now that the fixture is whatever EVTX_FIXTURE
+	// names, the version guard has to be explicit.
+	if v := fixtureMinorVersion(t); v != 1 {
+		t.Skipf("EVTX_FIXTURE is format 3.%d; the GUID bucket rule is 3.1-only", v)
+	}
 	checked := 0
 	for chunkNo := 0; ; chunkNo++ {
 		chunk, ok := readFixtureChunkOK(t, chunkNo)
@@ -155,12 +168,16 @@ func TestFixture_TemplateTableBucketRule(t *testing.T) {
 			}
 		}
 	}
-	// The fixture is known to hold 146 template entries across the 9 chunks
-	// its file header advertises (ChunkCount, not the 17 pre-allocated
-	// slots). An exact pin turns a silently-truncated walk into a failure.
-	if checked != 146 {
-		t.Errorf("validated %d TemplateNodes, want 146 — the table walk changed", checked)
+	// This used to pin an exact 146, the count for testdata/system.evtx, so a
+	// silently-truncated walk would fail. The pin went with the file: the
+	// fixture is now whatever EVTX_FIXTURE names, and an exact count would
+	// only assert which file the developer happened to point at. The walk is
+	// still guarded — every entry it does find must hash into the bucket it
+	// was found in, and a chain that does not terminate is fatal.
+	if checked == 0 {
+		t.Fatal("no TemplateNodes found in any chunk — the table walk is wrong")
 	}
+	t.Logf("validated %d TemplateNodes", checked)
 }
 
 // TestFillHashTables_FirstOccurrenceWins registers three distinct names and
@@ -346,4 +363,44 @@ func TestFillHashTables_SkipsInvalidOffset(t *testing.T) {
 				"not registered, and must not block the following valid ref", b, got, good)
 		}
 	})
+}
+
+// fixturePath returns the real Windows-generated .evtx these tests measure
+// against, or skips.
+//
+// The repository tracks no such file. It used to track testdata/system.evtx,
+// and that was the whole problem: every format rule go-evtx encodes was
+// derived from that one sample, and the same file was then used to assert the
+// rules were right — an assertion that cannot fail when the derivation is
+// wrong. It was removed rather than merely held out, so nothing can quietly
+// start depending on it again.
+//
+// The cost is stated plainly: with no tracked real file, CI does not check
+// these rules at all. They run locally against any corpus file, and the fix is
+// a small real log generated on a Windows machine we control, licensed to us —
+// not another borrowed sample.
+//
+//	EVTX_FIXTURE=/path/to/real.evtx go test ./...
+func fixturePath(t *testing.T) string {
+	t.Helper()
+	p := os.Getenv("EVTX_FIXTURE")
+	if p == "" {
+		t.Skip("set EVTX_FIXTURE to a real Windows-generated .evtx; none is tracked in this repository")
+	}
+	return p
+}
+
+// fixtureMinorVersion reads the fixture's format minor version from its file
+// header (offset 36, uint16 LE). 1 is Vista-era 3.1; 2 is Windows 10 2004 and
+// later.
+func fixtureMinorVersion(t *testing.T) uint16 {
+	t.Helper()
+	raw, err := os.ReadFile(fixturePath(t)) // #nosec G304 — a developer-supplied corpus path
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if len(raw) < 40 {
+		t.Fatalf("fixture is %d bytes, too short for a file header", len(raw))
+	}
+	return binary.LittleEndian.Uint16(raw[36:38])
 }

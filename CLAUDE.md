@@ -40,7 +40,8 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `binxml.go` | BinXML encoder: template body, substitution array, token writers, `fieldPatch` back-patching for `data_size`/`attr_list_size` |
 | `binxml_reader.go` | BinXML decoder: `decodeBinXML()`, substitution array parser, UTF-16LE decoder |
 | `chunkhash.go` | Per-chunk hash tables: `sdbmHash` (UTF-16 code units), `guidHash`, bucket rules, `fillHashTables` |
-| `binxml_variants.go` | Encoder variants used only by the `cmd/gen-ladder-*` bisection tools — never on the production write path |
+| `corpus_scan_test.go` | Corpus fact dumper: one JSON Lines fact per file, chunk and record. Never string values |
+| `corpus_shape_test.go` | The shape census and the diff that found F15 |
 | `evtx_unix.go` | `syncDir()` — fsyncs the containing directory so a rename is durable (`//go:build !windows`) |
 | `evtx_windows.go` | `syncDir()` no-op — NTFS makes the directory entry durable on `MoveFileEx` (`//go:build windows`) |
 
@@ -62,7 +63,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `flush_atomicity_test.go` | `flushChunkLocked` commits `chunkCount`/`currentSize`/`records`/`firstID`/`lastRecordOffset` together or not at all |
 | `onfsync_test.go` | `OnFsync` fires on every sync, and outside `w.mu` |
 | `evtx_unix_test.go` / `evtx_windows_test.go` | `isLinkUnsupported` classification per platform |
-| `chunkhash_test.go` | Bucket rules validated against `testdata/system.evtx`; `fillHashTables` unit tests |
+| `chunkhash_test.go` | Bucket rules validated against `$EVTX_FIXTURE` (skips without one); the template GUID rule is 3.1-only and skips on 3.2; `fillHashTables` unit tests |
 | `nodecollect_test.go` | `buildBinXML` reports NameNode/TemplateNode offsets; `goldenFields()` lives here |
 | `hashtable_integration_test.go` | A written file's chunk tables are populated and self-consistent; the CRC-ordering guard |
 | `fileheader_test.go` | `LastEventRecordDataOffset`, dirty/full flags, `LastChunkNumber` underflow, chunk ceiling |
@@ -71,7 +72,6 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `attrlist_test.go` | `attr_list_size` sits after the inline NameNode and carries a real value |
 | `namespace_test.go` | The `<Event>` root declares the event schema namespace |
 | `system_test.go` | `<System>` children, their value types and optional substitutions |
-| `binxml_variants_test.go` | The bisection variants encode what they claim (`walkVariantBody`) |
 
 **Write data flow:**
 
@@ -87,19 +87,35 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 3. `ReadRaw()` → returns raw BinXML bytes (compatible with `WriteRaw`)
 4. `ReadRecord()` → calls `decodeBinXML()` → parses substitution array → maps indices to `Record` fields
 
-## `cmd/` — the format bisection harness
+## `cmd/` — two fixture generators
 
-Thirteen `main` packages, none of them shipped: `.goreleaser.yaml` sets `builds: [{skip: true}]` because this is a library. They exist so a CI job can produce a specific `.evtx` file and a Windows runner can report whether it parses.
+Neither is shipped: `.goreleaser.yaml` sets `builds: [{skip: true}]` because this is a library. They exist so a CI job can produce a specific `.evtx` file and a Windows runner can report whether it parses.
 
 | Command | Role |
 |---|---|
 | `gen-fixture` | **Frozen.** Produces the main measurement fixture. Every row of `docs/format-baseline.md` compares against it, so changing its output silently invalidates the comparison chain. Do not touch it. |
 | `gen-fixture-minimal` | One record, one chunk, pure ASCII — the smallest file the library can produce |
-| `gen-splice-fixture` | Writes a **real** record's BinXML into our container via `WriteRaw`. This is what proved the container sound |
-| `gen-hybrid-*` | Real/ours grafts at the preamble and the self-closing-tag convention |
-| `gen-ladder-*` | Shrink-ladder variants: `<System>`-only, one data pair, literal data names, all-normal-substitution, no-xmlns, all-string, four-string |
 
-The `gen-hybrid-*` and `gen-ladder-*` commands are experiments whose results are already recorded in `docs/format-baseline.md`. They can be deleted once the remaining defect is found — but until then each is a reproducible measurement, not dead code.
+**The bisection harness is gone.** Eleven further `main` packages plus `binxml_variants.go` and its test — 3067 lines — produced the shrink-ladder and real/ours graft experiments. Their results stay recorded in `docs/format-baseline.md`; the code went once the defect they were hunting was found (F15, the shape census). Deleting them also took `Format Verify` from 28 jobs to 5.
+
+## Finding format rules: the corpus, not a sample
+
+`corpus_scan_test.go` and `corpus_shape_test.go` are how this project now learns the format. Both are tests rather than `cmd/` packages because the facts live in unexported structures, and both skip unless pointed at a corpus.
+
+```bash
+EVTX_CORPUS=/dir/one:/dir/two go test -run TestCorpusScan -v .          # per-record facts, JSON Lines
+EVTX_CORPUS=/dir/one:/dir/two go test -run TestCorpusShapeCensus -v .   # shape census -> testdata/shape-census.json
+EVTX_SHAPE_TARGET=/path/to/generated.evtx go test -run TestShapeDiffTarget -v .
+EVTX_FIXTURE=/path/to/real.evtx go test ./...                           # the hash-table rule tests
+```
+
+Three rules, each of which was broken at least once:
+
+- **No `.evtx` is tracked.** `isExcludedFixture` refuses any file named `system.evtx`. Deriving the format from one sample and then asserting against that same sample is what cost this project seventeen tasks — the assertion cannot fail when the derivation is wrong.
+- **Facts are recorded for records the decoder rejects.** Measuring only what already decodes is the round-trip blindness that hid every v0.6.0 defect.
+- **No string values leave the corpus.** Names, types, sizes, offsets, counts. Real logs carry account names, SIDs, machine names and IP addresses, and this output gets quoted in `docs/`.
+
+The order that follows: **the corpus derives, the specification names, the VM confirms, CI records.** A one-bit "does Windows accept this?" oracle cannot distinguish a wrong hypothesis from a right hypothesis aimed at the wrong field — which is exactly how F14 spent a whole task and concluded "unresolved".
 
 ## Measurement discipline
 
@@ -189,6 +205,29 @@ The seven scalar children whose sole content is one substitution value (`Version
 `Provider` (F13b) is the first element go-evtx emits with two attributes (`Name`, `Guid`), and the real file confirms the "more attributes follow" token (`0x46`) is required for every non-final attribute in a list, not just `0x06` for a lone one: `Name`'s own attribute token becomes `0x46`, `Guid`'s (the last) stays `0x06`. `Guid`'s value is a real substitution (`fields["ProviderGuid"]`, STRING-typed like `Name`), not a literal, even though the real file happens to encode `Provider`'s own `Name`/`Guid` as literal `ValueText` — a provider GUID varies per caller, the same reasoning that already made `Name` a substitution despite the real file's own literal encoding.
 
 `EventID/@Qualifiers` (F13c) is go-evtx's first NULL-valued `OptionalSubstitution` whose declared type is not a generic "null type" marker: `testdata/system.evtx` encodes this exact attribute as `[size 0, type UNSIGNED_WORD (0x06)]` — its own real declared type — and MS-EVEN6's own worked example shows the same shape.
+
+**F15 (the shape census): the `<System>` NULL fields, resolved.** An
+`OptionalSubstitution`'s **token** declares the field's own type; its entry in
+the **substitution array** declares `NULL` when the value is absent. go-evtx
+wrote `NULL` in both places. Real Windows never does — token `Null` with array
+`Null` occurs **zero times in 27 million shape observations across 320 398
+records**, while `Guid`/`Sid`/`UInt16`/`Binary`/`StringArray`/`UInt32`/`UInt64`
+with array `Null` occurs 1.15 million times. Indices 34/35 now declare `Guid`,
+36/37 declare `UInt32`, 39 declares `Sid`; their array entries stay `NULL`.
+
+That five-byte change is what finally made `EventLogRecord.ToXml()` and
+`Get-WinEvent` accept a go-evtx file — `PROP ToXml ok`, `GETWINEVENT default:
+ok, 403 records`, both orderings, after seventeen tasks of rejection.
+
+It also explains index 41: `EventID/@Qualifiers` as token `UInt16` with array
+`Null` is the 226 089-occurrence shape, which is why keeping `UNSIGNED_WORD`
+worked and reverting the token to `Null` regressed `STAGE2 READ`.
+
+**F14's conclusion below is superseded; its measurements are not.** F14 changed
+and re-measured the substitution *array* while reasoning about the *token* —
+two different fields at opposite ends of the record. Both of its lines of
+evidence were correct and they never actually contradicted each other. The
+account is kept because its dead ends are worth not repeating.
 
 **F14 (v0.7.0, Task 8e): two false starts, and where they landed.** Net
 effect on the encoder, after both corrections: **none** — every byte
