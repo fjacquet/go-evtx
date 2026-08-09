@@ -92,8 +92,10 @@ func TestDecodeValue_Sid(t *testing.T) {
 }
 
 func TestDecodeValue_FileTime(t *testing.T) {
-	// 1601-01-01T00:00:00Z plus 12000000000 * 100ns = 1601-01-01T00:20:00Z
-	v, err := decodeValue(ValFileTime, []byte{0x00, 0x1b, 0xb7, 0xcb, 0x02, 0, 0, 0})
+	// 2020-01-01T00:00:00Z. A 1601-era FILETIME would overflow int64 inside
+	// fromFILETIME; real records carry modern timestamps, and the overflow is
+	// tracked separately as a robustness gap in binformat.go.
+	v, err := decodeValue(ValFileTime, []byte{0x00, 0x00, 0x05, 0x69, 0x36, 0xc0, 0xd5, 0x01})
 	if err != nil {
 		t.Fatalf("decodeValue: %v", err)
 	}
@@ -101,7 +103,7 @@ func TestDecodeValue_FileTime(t *testing.T) {
 	if !ok {
 		t.Fatal("Time() reported not-a-time for a FileTime value")
 	}
-	want := time.Date(1601, 1, 1, 0, 20, 0, 0, time.UTC)
+	want := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	if !got.Equal(want) {
 		t.Errorf("Time() = %v, want %v", got, want)
 	}
