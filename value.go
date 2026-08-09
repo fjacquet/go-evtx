@@ -53,11 +53,6 @@ const (
 	valArrayFlag ValueType = 0x80
 )
 
-// Node is a placeholder so this file compiles ahead of Task 5, which replaces
-// it with the real element-tree type in binxml_decode.go. Delete this
-// declaration there — do not define Node twice.
-type Node struct{}
-
 var valueTypeNames = map[ValueType]string{
 	ValNull: "Null", ValString: "String", ValAnsiString: "AnsiString",
 	ValInt8: "Int8", ValUInt8: "UInt8", ValInt16: "Int16", ValUInt16: "UInt16",
