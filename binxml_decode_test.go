@@ -281,7 +281,7 @@ func TestDecodeRecordBinXML_NegativeCases(t *testing.T) {
 		{
 			name: "EOF token present but wrong value",
 			mutate: func(t *testing.T, payload []byte) []byte {
-				eofPos := len(payload) - 5 // see the "no EOF token" case above
+				eofPos := len(payload) - 5 // buildSimpleRecord appends [EOF][4 bytes padding]
 				if payload[eofPos] != tokEOF {
 					t.Fatalf("test bug: payload[%d] = %#02x, want tokEOF", eofPos, payload[eofPos])
 				}

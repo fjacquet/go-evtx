@@ -201,9 +201,16 @@ for the trailing size copy]** via `wrapEventRecord` (`binformat.go`):
 [end-4:end]           Size copy (same value as offset 4)
 ```
 
-**8-byte record alignment (F2), and the missing fragment EOF token (W1),
-were both fixed in `buildBinXML` (`binxml.go`) — v0.7.0's
-`2026-08-09-generic-evtx-decoder` plan, Task 7.** F2 stayed genuinely
+**8-byte record alignment (F2) and the missing fragment EOF token (W1) were
+implemented in `buildBinXML` and then REVERTED — v0.7.0's
+`2026-08-09-generic-evtx-decoder` plan, Task 7, commit `cfa5f9b`.** Both are
+real divergences: real Windows emits the EOF token and 8-aligns on 100 683 of
+100 683 measured records. But emitting them regressed Windows' own
+`EventLogReader` on the 403-record fixture from reading all of them to failing
+on record 0 — measured in CI and reproduced independently on the VM — while
+single-record files kept working and our own strict decoder read all 403
+without error. Unexplained; tracked as #38/#39. `binxml.go` is byte-identical
+to its pre-attempt state. F2 stayed genuinely
 unimplemented for the reason the paragraph below (kept for its own history)
 describes, through this release's original writer-conformance effort. The
 generic-decoder plan's Task 5 review then found a second, previously
@@ -808,7 +815,7 @@ verbatim CI output behind every "changed"/"no change" cell.
 | F13b | `<Provider>` gains a second attribute, `Guid` | `2e86005` | none (stayed green) | see F13a |
 | F13c | `<EventID>` gains a NULL `Qualifiers` attribute | `2e86005` | none (stayed green) | see F13a |
 | F15 | Substitution-array `String` values carried a spurious null terminator | `b41ac76` | none (stayed green) | none |
-| F2 | 8-byte record alignment | fixed later, `2026-08-09-generic-evtx-decoder` Task 7 (not this release's own commit set — see "Event record wrapper" above) | not yet measured | not yet measured |
+| F2 | 8-byte record alignment | attempted then REVERTED, `2026-08-09-generic-evtx-decoder` Task 7 / `cfa5f9b` — see "Event record wrapper" above | regressed STAGE2 READ 403 -> 0 | reverted, back to 403 |
 
 **F13's attribution is genuinely unresolved, not simplified for this table.**
 F13a/F13b/F13c were deliberately batched against one Step-1 measurement (the
@@ -951,14 +958,21 @@ metadata.
   disqualifying, but a genuinely shared/cache-referenced template has never
   been attempted from go-evtx's own encoder. Named here as the most concrete
   untried structural lead.
-- **8-byte record alignment (F2) is no longer unattempted** — fixed, along
+- **8-byte record alignment (F2) has now been attempted and reverted**, along
   with the previously undocumented missing fragment EOF token (W1), by the
   `2026-08-09-generic-evtx-decoder` plan's Task 7 (see the Event record
-  wrapper section above). Confirmed via hand-built `WriteRaw` payloads on the
-  Windows VM (all four EOF/alignment combinations) that this does **not**
-  resolve the still-unsolved `ToXml` rejection, so the cache-referenced-
-  template lead above is now the most concrete untried structural item
-  remaining.
+  wrapper section above). Two measurements bound the result. Hand-built
+  `WriteRaw` payloads on the Windows VM, covering all four EOF/alignment
+  combinations, confirmed this does **not** resolve the `ToXml` rejection.
+  And shipping it in the writer made things worse: `STAGE2 READ` fell from 403
+  records to failing on record 0, so it was reverted. The failure is
+  size-dependent in a way nobody has explained — single-record files pass, and
+  our own strict decoder reads all 403 records of the failing file cleanly,
+  which means the decoder still shares a wrong assumption with the writer
+  somewhere in the multi-chunk path. That disagreement is the most concrete
+  untried lead remaining, ahead of the cache-referenced-template one above,
+  because it is the first time Windows and a tool we control disagree about a
+  specific file rather than Windows simply refusing everything.
 - **`ToXml()` itself is not exonerated or implicated by the Task 9e
   finding.** Every variant that experiment measured that *reached*
   `ToXml()` (the four-field variant, the main fixture) still failed there
