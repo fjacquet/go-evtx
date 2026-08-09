@@ -268,6 +268,12 @@ so template bucketing and name bucketing are one routine fed two different
 inputs. The name-bucketing rule itself (`sdbm(name) % 64`) was confirmed
 separately at 170/170 real `NameNode`s in `system.evtx`.
 
+**Scope correction (2026-08-09): the template rule above holds for format
+version 3.1 only.** Both fixtures behind the 386/386 figure are 3.1 files.
+Measured against a larger corpus of format **3.2** files, the same rule scores
+at zero. The name rule is unaffected and gains a large corroboration. See
+"Format version 3.1 vs 3.2" immediately below.
+
 **Hashing UTF-16 code units, not UTF-8 bytes, is what the format requires**
 [read: libyal + MS-EVEN6, both describing names as UTF-16LE]. The two
 encodings agree for ASCII, which is every name go-evtx currently emits, and
@@ -280,6 +286,91 @@ necessary — `TestWrittenFile_ChunkTablesArePopulated` walks every bucket
 chain in a real written file and re-derives each name's bucket from its own
 hash — but **measured not sufficient on its own** to make Windows accept the
 file (see "What is still unknown").
+
+### Format version 3.1 vs 3.2
+
+**[measured, 2026-08-09]** `MinorVersion` at file header `[36:38]` is 1 or 2.
+Until this date every measurement in this release ran against 3.1 files only.
+go-evtx writes 3.1 (`binformat.go:107-108`).
+
+| Version | Windows | Source |
+|---|---|---|
+| 3.1 | Vista and later | libyal |
+| 3.2 | Windows 10 (2004) and later | libyal |
+
+**[read: libyal]** libyal documents **no** structural difference between 3.1
+and 3.2 — it maps each to a Windows release and describes one uniform layout.
+
+**[read: MS-EVEN6 scope]** Microsoft's normative spec covers *BinXml*, the
+record payload encoding. The container — file header, chunks, the two hash
+tables — is not in MS-EVEN6 and is not documented by Microsoft anywhere. Every
+container claim in this file is therefore reverse-engineered by construction,
+and no specification can settle a container question. This is the one area
+where the project's "normative sources first" rule has no normative source to
+reach for.
+
+**[measured]** Every fixed field of the file header and the chunk header was
+dumped side by side across a 3.1 file and two 3.2 files. `MinorVersion` is the
+**only** differing structural field. Layout, field order, sizes and the CRC
+placements are identical. The template definition layout is also identical
+across versions — `next_offset(0) | GUID(4) | data_size(20) | fragment(24)` —
+which matches libyal's own table once its offsets are renumbered from the
+definition start rather than from the enclosing template instance.
+
+**[measured]** The bucket rules, re-derived across four real files (2516
+chunks). Distinct-key counts matter more than entry counts: a template
+repeated in 40 chunks is one piece of evidence, not 40.
+
+| File | Version | Name entries | Names matched | Distinct template GUIDs | Templates matched |
+|---|---|---|---|---|---|
+| `system.evtx` | 3.1 | 306 | **306** | 36 | **36** |
+| `system2.evtx` | 3.2 | 9563 | **9563** | 13 | ~0 |
+| `app.evtx` | 3.2 | 5906 | **5906** | 55 | **0** |
+| `security.evtx` | 3.2 | 55388 | **55388** | 11 | **0** |
+| **Combined** | — | **71163** | **71163** | — | — |
+
+So:
+
+- **The name rule is version-independent and now very strongly held**:
+  `sdbm(name-as-UTF-16) % 64`, 71163 of 71163, both versions, no exception.
+  This supersedes the earlier 170/170 figure.
+- **The template rule is version-specific.** `sdbm(guid-as-8-uint16) % 32` is
+  exact on 3.1 (36 of 36 *distinct* GUIDs; chance is 32⁻³⁶) and scores zero on
+  3.2 (0 of 55 distinct GUIDs in `app.evtx`).
+
+**What the 3.2 template rule is: still unknown.** Ruled out by measurement,
+not by argument:
+
+- *Not a layout shift.* Candidate GUID offsets 0..40 were swept; only +4
+  produces the 3.1 result, and the surrounding fields (`data_size` at +20, the
+  `0f 01 01 00` fragment header at +24) confirm +4 in 3.2 too.
+- *Not a chaining artefact.* Head nodes — those addressed directly by the
+  bucket array — score 0/1284 in `app.evtx` on their own.
+- *Not a constant displacement.* The `(actual − predicted) mod 32` histogram is
+  spread, not a spike.
+- *Not keyed on libyal's "template identifier".* That 4-byte field 8 bytes
+  before the definition is simply the GUID's first four bytes as a
+  little-endian `uint32`; it is not an independent key.
+- *Not any of twelve candidate hashes*: SDBM over raw bytes / big-endian
+  `uint16`s, CRC-32 IEEE and Castagnoli, `Data1`, XOR-fold, byte sum, and the
+  GUID hashed as canonical text in UTF-16 (upper and lower case, with and
+  without braces). All at chance on 3.2.
+- The bucket *is* a deterministic function of the GUID in 3.2 — each distinct
+  GUID occupies exactly one bucket across all chunks — so a rule exists; we
+  have not found it.
+
+**Why this may not matter.** The tables are an index, not a requirement: a
+parser can resolve every template through each record's inline
+`template_offset`, which is what python-evtx does (`chunkhash.go:13-15`).
+go-evtx declares 3.1 and writes the verified 3.1 rule, so it is internally
+consistent. Declaring 3.2 while writing 3.1 tables would *introduce* an
+inconsistency rather than remove one — the version byte is not a free knob.
+
+**A correction to an earlier judgement in this session.** On first seeing the
+version split I proposed bumping the writer to 3.2 as a cheap CI experiment.
+That was too quick: it is a two-variable experiment (declared version × table
+rule) in which only one cell is known. It is still worth running, but as a
+deliberate probe with that caveat recorded, not as a likely fix.
 
 ### BinXML: fragment header, template instance, template definition
 
