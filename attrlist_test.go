@@ -46,7 +46,11 @@ func TestWriteOpenElement_AttrListSizeAfterNameNode(t *testing.T) {
 		if payload[i] != binXMLOpenElementAttrs {
 			continue
 		}
-		if binary.LittleEndian.Uint16(payload[i+1:]) != 0xffff {
+		if dep := binary.LittleEndian.Uint16(payload[i+1:]); !isRecognisedDependencyID(dep) {
+			// F13a: EventID is now a 0x41 (attribute-bearing) element whose
+			// dependency_id is subEventID (1), not depIDNotSet — recognise it
+			// via the same helper dependency_test.go defines, rather than
+			// silently skipping EventID's own Qualifiers attribute list.
 			continue // not a genuine element header
 		}
 

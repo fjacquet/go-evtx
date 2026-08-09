@@ -8,10 +8,22 @@
 // only Provider/EventID/Level/TimeCreated/Computer, 5 of the real file's 14
 // <System> children. Both assertions failed as expected before F12a/F12b
 // landed.
+//
+// Task 8c (F13a/F13b/F13c) adds three more tests below, closing the named
+// list task-8b-report.md's "Concerns" section left open: EventID/Level must
+// use OptionalSubstitution (0x0E) with a real dependency_id, Provider must
+// carry a second attribute (Guid) using the 0x46/0x06 "more attributes
+// follow" pattern, and EventID must carry a Qualifiers attribute whose value
+// is NULL (UNSIGNED_WORD-typed, zero-length). All three were confirmed
+// failing against the pre-F13 encoder before implementation: EventID/Level's
+// OpenStartElementTag carried depIDNotSet (0xffff) and their content used
+// binXMLNormalSubstitution (0x0D); Provider had one attribute; "Guid" and
+// "Qualifiers" appeared nowhere in the payload.
 package evtx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"unicode/utf16"
 )
@@ -63,5 +75,185 @@ func TestBuildTemplateBody_NewSystemChildrenPresent(t *testing.T) {
 		if !bytes.Contains(res.payload, encoded) {
 			t.Errorf("encoded payload does not contain the element/attribute name %q", name)
 		}
+	}
+}
+
+// utf16Bytes returns the UTF-16LE encoding of s with no null terminator —
+// how a NameNode's own character run is stored, matching writeNameNode.
+func utf16Bytes(s string) []byte {
+	u16 := utf16.Encode([]rune(s))
+	buf := make([]byte, len(u16)*2)
+	for i, c := range u16 {
+		buf[i*2] = byte(c)
+		buf[i*2+1] = byte(c >> 8)
+	}
+	return buf
+}
+
+// TestBuildTemplateBody_EventIDAndLevelUseOptionalSubstitution (F13a):
+// testdata/system.evtx ties EventID's and Level's own OpenStartElementTag
+// dependency_id to their own content substitution's index (3 and 0 in the
+// real file's numbering; task-8b-report.md's Step 1 table), the same
+// convention F12b/F12c already established for Version/Task/Opcode/Keywords/
+// EventRecordID. go-evtx's own indices for EventID/Level are 1 and 2
+// (unchanged — see the sub* constants), so their dependency_id must now be
+// 1 and 2 respectively, not depIDNotSet, and their content token must be
+// OptionalSubstitution (0x0E), not NormalSubstitution (0x0D).
+func TestBuildTemplateBody_EventIDAndLevelUseOptionalSubstitution(t *testing.T) {
+	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+	res := buildBinXML(4663, 1, goldenFields(), base)
+	payload := res.payload
+
+	cases := []struct {
+		name    string
+		subIdx  uint16
+		subType byte
+	}{
+		{"EventID", subEventID, binXMLTypeUint16},
+		{"Level", subLevel, binXMLTypeUint8},
+	}
+
+	for _, c := range cases {
+		encoded := utf16Bytes(c.name)
+		nn := bytes.Index(payload, encoded)
+		if nn < 8 {
+			t.Fatalf("%s: NameNode characters not found in payload (or too close to start)", c.name)
+		}
+		// NameNode layout: next_offset(4) + hash(2) + char_count(2) + chars + null(2).
+		// The characters start 8 bytes into the NameNode.
+		nameNodeStart := nn - 8
+		// writeOpenElement's fixed header: token(1) + dep_id(2) + data_size(4) + name_offset(4) = 11.
+		tokenPos := nameNodeStart - 11
+		if tokenPos < 0 {
+			t.Fatalf("%s: computed OpenStartElement token position %d is negative", c.name, tokenPos)
+		}
+		tok := payload[tokenPos]
+		if tok != binXMLOpenElement && tok != binXMLOpenElementAttrs {
+			t.Fatalf("%s: byte 0x%02x at computed token position %d is not an OpenStartElement token", c.name, tok, tokenPos)
+		}
+		depID := binary.LittleEndian.Uint16(payload[tokenPos+1:])
+		if depID != c.subIdx {
+			t.Errorf("%s: OpenStartElementTag dependency_id = 0x%04x, want 0x%04x (own content substitution index)", c.name, depID, c.subIdx)
+		}
+
+		// The content substitution token follows shortly after the NameNode's
+		// null terminator (immediately for Level, after an attribute list for
+		// EventID) — search a bounded window rather than compute the exact
+		// offset, since EventID's Qualifiers attribute varies the gap.
+		nameNodeEnd := nn + len(encoded) + 2 // + null terminator
+		end := nameNodeEnd + 200
+		if end > len(payload) {
+			end = len(payload)
+		}
+		window := payload[nameNodeEnd:end]
+		wantTok := []byte{binXMLOptionalSubstitution, byte(c.subIdx), byte(c.subIdx >> 8), c.subType}
+		if !bytes.Contains(window, wantTok) {
+			t.Errorf("%s: OptionalSubstitution token %x not found shortly after its NameNode", c.name, wantTok)
+		}
+		unwantTok := []byte{binXMLNormalSubstitution, byte(c.subIdx), byte(c.subIdx >> 8), c.subType}
+		if bytes.Contains(window, unwantTok) {
+			t.Errorf("%s: still emits NormalSubstitution token %x (0x0D) instead of OptionalSubstitution", c.name, unwantTok)
+		}
+	}
+}
+
+// TestBuildTemplateBody_ProviderTwoAttributes (F13b): Provider must carry a
+// second attribute, Guid, and — per a previous task's confirmation that the
+// real file writes 0x46 ("more attributes follow") for a non-final attribute
+// and 0x06 for the last — Name's own attribute token must become 0x46 now
+// that it is no longer the only attribute, while Guid's is 0x06.
+//
+// Located via res.names (the offsets buildBinXML itself reports) rather than
+// raw byte search: "Name" is not unique in the payload (every one of the 12
+// <Data> elements also has a "Name" attribute), but names are appended in
+// emission order and Provider's own Name/Guid are emitted first.
+func TestBuildTemplateBody_ProviderTwoAttributes(t *testing.T) {
+	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+	res := buildBinXML(4663, 1, goldenFields(), base)
+	payload := res.payload
+
+	wantNameHash := sdbmHash("Name")
+	wantGuidHash := sdbmHash("Guid")
+	var nameOff, guidOff uint32
+	foundName, foundGuid := false, false
+	for _, ref := range res.names {
+		if !foundName && ref.key == wantNameHash {
+			nameOff = ref.offset
+			foundName = true
+		}
+		if !foundGuid && ref.key == wantGuidHash {
+			guidOff = ref.offset
+			foundGuid = true
+		}
+	}
+	if !foundName {
+		t.Fatal("no NameNode for \"Name\" reported by buildBinXML")
+	}
+	if !foundGuid {
+		t.Fatal("no NameNode for \"Guid\" reported by buildBinXML — Provider/@Guid is missing")
+	}
+
+	// writeAttributeSub's layout: [token:1][name_offset:4][NameNode...] — the
+	// attribute token sits 5 bytes before the NameNode itself.
+	nameTokPos := int(nameOff) - int(base) - 5
+	guidTokPos := int(guidOff) - int(base) - 5
+	if nameTokPos < 0 || guidTokPos < 0 {
+		t.Fatalf("computed attribute token positions out of range: name=%d guid=%d", nameTokPos, guidTokPos)
+	}
+	if got := payload[nameTokPos]; got != binXMLAttributeMore {
+		t.Errorf("Provider's Name attribute token = 0x%02x, want 0x%02x (more attributes follow — Guid comes after it)", got, binXMLAttributeMore)
+	}
+	if got := payload[guidTokPos]; got != binXMLAttribute {
+		t.Errorf("Provider's Guid attribute token = 0x%02x, want 0x%02x (last attribute in the list)", got, binXMLAttribute)
+	}
+}
+
+// TestCollectSubstitutions_ProviderGuidIsString (F13b): the Guid substitution
+// slot must round-trip an arbitrary caller-supplied value, confirming it is
+// wired as a real substitution (STRING-typed, per Provider/@Name's existing
+// precedent) rather than hardcoded or dropped.
+func TestCollectSubstitutions_ProviderGuidIsString(t *testing.T) {
+	fields := goldenFields()
+	const want = "{54849625-5478-4994-A5BA-3E3B0328C30D}"
+	fields["ProviderGuid"] = want
+
+	subs := collectSubstitutionsFromFields(4663, 1, fields)
+	if len(subs) <= subProviderGuid {
+		t.Fatalf("collectSubstitutionsFromFields returned %d entries, want > %d", len(subs), subProviderGuid)
+	}
+	got := subs[subProviderGuid]
+	if got.typ != binXMLTypeString {
+		t.Errorf("Provider/@Guid (substitution %d) value type = 0x%02x, want 0x%02x (STRING)", subProviderGuid, got.typ, binXMLTypeString)
+	}
+	if decoded := decodeSubString(got.data); decoded != want {
+		t.Errorf("Provider/@Guid round-trip = %q, want %q", decoded, want)
+	}
+}
+
+// TestBuildTemplateBody_EventIDQualifiersIsNullOptional (F13c): EventID must
+// carry a Qualifiers attribute, and — since go-evtx has no caller-supplied
+// source for it — its substitution entry must be NULL exactly the way
+// testdata/system.evtx itself encodes NULL: value-spec type UNSIGNED_WORD
+// (0x06, Qualifiers' own declared type, per task-8b-report.md's Step 1
+// table), size 0. Not binXMLTypeNull (0x00) — the real file does not use a
+// generic "null type" marker; it uses the field's real type with size 0.
+func TestBuildTemplateBody_EventIDQualifiersIsNullOptional(t *testing.T) {
+	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+
+	encoded := utf16Bytes("Qualifiers")
+	if !bytes.Contains(res.payload, encoded) {
+		t.Fatal("encoded payload does not contain the attribute name \"Qualifiers\"")
+	}
+
+	subs := collectSubstitutionsFromFields(4663, 1, goldenFields())
+	if len(subs) <= subEventIDQualifiers {
+		t.Fatalf("collectSubstitutionsFromFields returned %d entries, want > %d", len(subs), subEventIDQualifiers)
+	}
+	got := subs[subEventIDQualifiers]
+	if got.typ != binXMLTypeUint16 {
+		t.Errorf("EventID/@Qualifiers (substitution %d) value type = 0x%02x, want 0x%02x (UNSIGNED_WORD, matching the real file's NULL encoding)", subEventIDQualifiers, got.typ, binXMLTypeUint16)
+	}
+	if len(got.data) != 0 {
+		t.Errorf("EventID/@Qualifiers (substitution %d) value data length = %d, want 0 (NULL)", subEventIDQualifiers, len(got.data))
 	}
 }

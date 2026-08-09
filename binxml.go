@@ -95,7 +95,37 @@ const (
 
 	subSecurityUserID = 39
 
-	totalSubstitutions = 40
+	// F13b/F13c (Task 8c): the two remaining named divergences from
+	// testdata/system.evtx's <System> block — Provider/@Guid and
+	// EventID/@Qualifiers. Appended after the F12b/F12c range, not
+	// interleaved, for the same reason that range was itself appended after
+	// 0-28: nothing before this task's own indices renumbers.
+	subProviderGuid      = 40
+	subEventIDQualifiers = 41
+
+	totalSubstitutions = 42
+)
+
+// subEventID and subLevel name the two pre-existing substitution indices
+// (unchanged by this task — see indices 0-4 below) that Task 8c (F13a) also
+// starts using as their own OpenStartElementTag's dependency_id. Named for
+// the same reason the F12b constants above are: dependency_test.go's
+// knownOptionalDependencyIDs needs to recognise them as legitimate
+// non-sentinel dependency identifiers rather than corruption.
+//
+// Measured against testdata/system.evtx (task-8b-report.md's Step 1 table,
+// extended by task-8c-report.md): the real file ties EventID's element-level
+// dependency_id to its own content substitution's index — 0x0003 there, NOT
+// the index of its Qualifiers attribute (0x0004) — and Level's the same way
+// (0x0000, its own content index). Both match the convention F12b/F12c
+// already established for Version/Task/Opcode/Keywords/EventRecordID:
+// dependency_id equals the element's own content substitution index. F12b
+// left EventID/Level at depIDNotSet as an explicit, permitted scope decision
+// ("elements that are genuinely always present may legitimately stay
+// 0x0D") — this task closes that out to match the real file exactly.
+const (
+	subEventID = 1
+	subLevel   = 2
 )
 
 // eventNamespaceURI is the schema every real Windows .evtx record declares on
@@ -179,6 +209,7 @@ type binXMLResult struct {
 //   - "Computer"      → substitution 4 (STRING)
 //   - "TimeCreated"   → RFC3339Nano timestamp; fallback to time.Now()
 //   - "Channel"       → substitution 38 (STRING); defaults to "" (F12b)
+//   - "ProviderGuid"  → substitution 40 (STRING); defaults to "" (F13b)
 //   - 12 data fields by name (see dataFieldNames)
 func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLChunkOffset uint32) binXMLResult {
 	// Template body starts after: fragment header + template instance + template node header.
@@ -233,19 +264,20 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 
 // buildTemplateBody constructs the BinXML template body. Most substitutions
 // are NormalSubstitution (0x0D); F12c's five scalar System children
-// (Version/Task/Opcode/Keywords/EventRecordID) and three attribute-only
-// elements' attribute values (Correlation/Execution/Security) use
+// (Version/Task/Opcode/Keywords/EventRecordID), F13a's EventID/Level, and
+// four attribute-only elements' attribute values
+// (Correlation/Execution/Security/EventID's own Qualifiers) use
 // OptionalSubstitution (0x0E) instead, matching testdata/system.evtx.
 //
 // Substitution indices — see the comment above the sub* constants for how
-// indices 29-39 were chosen; <System> element order below matches the real
+// indices 29-41 were chosen; <System> element order below matches the real
 // file's order exactly (Task 8b Step 1): Provider, EventID, Version, Level,
 // Task, Opcode, Keywords, TimeCreated, EventRecordID, Correlation,
 // Execution, Channel, Computer, Security.
 //
 //	0:  ProviderName  (STRING)
-//	1:  EventID       (UINT16)
-//	2:  Level         (UINT8)                         — F12a: was UINT16
+//	1:  EventID       (UINT16)                        — F13a: now OptionalSubstitution, dependency_id = own index
+//	2:  Level         (UINT8)                         — F12a: was UINT16; F13a: now OptionalSubstitution, dependency_id = own index
 //	3:  SystemTime    (FILETIME)
 //	4:  Computer      (STRING)
 //	5+2i:  Data[i] Name attr  (STRING)   — 12 data fields
@@ -261,8 +293,10 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 //	37: Execution/@ThreadID            (NULL) — F12b, no source
 //	38: Channel                    (STRING)   — F12b, from fields["Channel"]
 //	39: Security/@UserID               (NULL) — F12b, no source
+//	40: Provider/@Guid             (STRING)   — F13b, from fields["ProviderGuid"]
+//	41: EventID/@Qualifiers            (NULL, type UNSIGNED_WORD) — F13c, no source
 //
-// Total: 29 + 11 = 40 substitutions.
+// Total: 29 + 13 = 42 substitutions.
 //
 // names accumulates the chunk-relative offset and hash of every NameNode
 // emitted along the way, in emission order.
@@ -316,17 +350,38 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	dataSizeStack = pushOpenElement(b, "System", false, depIDNotSet, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
 
-	//     <Provider Name="%0"/>
+	//     <Provider Name="%0" Guid="%40"/>                              (F13b)
+	//
+	// Provider's first attribute (Name) is no longer the list's only one, so
+	// its own token must switch from binXMLAttribute (0x06) to
+	// binXMLAttributeMore (0x46) — a previous task confirmed real Windows
+	// writes 0x46 for every non-final attribute and 0x06 only for the last;
+	// go-evtx had only ever emitted 0x06 because every element it wrote had
+	// exactly one attribute until now. Guid's value is a substitution (like
+	// Name's), not a literal, even though the real file happens to write
+	// Provider's Guid as a literal ValueText — a provider GUID varies per
+	// caller, so it needs the same per-record flexibility Name already has.
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Provider", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeSub(b, "Name", 0, binXMLTypeString, false, baseOffset, names)
+	writeAttributeSub(b, "Name", 0, binXMLTypeString, true, baseOffset, names)
+	writeAttributeSub(b, "Guid", subProviderGuid, binXMLTypeString, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <EventID>%1</EventID>
-	dataSizeStack = pushOpenElement(b, "EventID", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c)
+	//
+	// F13c: Qualifiers is go-evtx's first NULL-valued OptionalSubstitution
+	// attribute whose declared type is NOT binXMLTypeNull — testdata/system.evtx
+	// encodes this exact attribute as [size 0, type UNSIGNED_WORD (0x06)],
+	// its own real declared type, not a generic null-type marker (task-8b-report.md's
+	// Step 1 table, extended by task-8c-report.md). F13a: the element's own
+	// dependency_id becomes subEventID (its own content index), and the
+	// content substitution switches to OptionalSubstitution.
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", subEventID, baseOffset, names, dataSizeStack)
+	writeAttributeOptional(b, "Qualifiers", subEventIDQualifiers, binXMLTypeUint16, false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
-	writeSubstitution(b, 1, binXMLTypeUint16)
+	writeOptionalSubstitution(b, subEventID, binXMLTypeUint16)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Version>%29</Version>                                        (F12b/F12c)
@@ -335,10 +390,10 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	writeOptionalSubstitution(b, subVersion, binXMLTypeUint8)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <Level>%2</Level>                                             (F12a: UINT8, was UINT16)
-	dataSizeStack = pushOpenElement(b, "Level", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	//     <Level>%2</Level>                                             (F12a: UINT8, was UINT16; F13a: OptionalSubstitution)
+	dataSizeStack = pushOpenElement(b, "Level", false, subLevel, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeSubstitution(b, 2, binXMLTypeUint8)
+	writeOptionalSubstitution(b, subLevel, binXMLTypeUint8)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Task>%30</Task>                                              (F12b/F12c)
@@ -537,10 +592,10 @@ func writeEndElement(b *bytes.Buffer, stack []uint32, patches []fieldPatch) ([]u
 	return stack, patches
 }
 
-// collectSubstitutionsFromFields gathers all 40 substitution values from a
+// collectSubstitutionsFromFields gathers all 42 substitution values from a
 // fields map plus the writer-tracked recordID (F12b/F12c raised this from
-// 29; see the sub* constants and buildTemplateBody's doc comment for the
-// full index map).
+// 29 to 40; F13b/F13c raised it again to 42; see the sub* constants and
+// buildTemplateBody's doc comment for the full index map).
 //
 // Sub 0: ProviderName (STRING) from fields["ProviderName"]
 // Sub 1: EventID (UINT16) from eventID parameter
@@ -549,6 +604,7 @@ func writeEndElement(b *bytes.Buffer, stack []uint32, patches []fieldPatch) ([]u
 // Sub 4: Computer (STRING) from fields["Computer"]
 // Subs 5..28: 12 data field name+value pairs from fields map (see dataFieldNames)
 // Subs 29..39: F12b's nine added System children — see buildTemplateBody
+// Subs 40..41: F13b/F13c's Provider/@Guid and EventID/@Qualifiers — see buildTemplateBody
 func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[string]string) []substitutionEntry {
 	// Parse TimeCreated from fields, falling back to time.Now().
 	var systemTime time.Time
@@ -600,6 +656,23 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 37 Execution/@ThreadID
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["Channel"])}) // 38 Channel
 	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 39 Security/@UserID
+
+	// Sub 40..41 (F13b/F13c): the two remaining named divergences.
+	//
+	// Provider/@Guid varies per caller like ProviderName does, so it follows
+	// Name's own pattern: a real substitution sourced from the fields map,
+	// defaulting to "" when the caller doesn't supply one.
+	//
+	// EventID/@Qualifiers has no caller-supplied source (go-evtx's WriteRecord
+	// API has no concept of an event qualifier code), so it is NULL — but
+	// unlike F12b's five NULL fields (which all declare binXMLTypeNull),
+	// Qualifiers declares its own real type, UNSIGNED_WORD, with zero-length
+	// data: that is what testdata/system.evtx itself does for this exact
+	// attribute (Step 1 table), and MS-EVEN6's own worked example shows the
+	// same shape — a NULL OptionalSubstitution whose declared type is the
+	// attribute's real type, not a generic null-type marker.
+	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 40 Provider/@Guid
+	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 41 EventID/@Qualifiers
 
 	return subs
 }
@@ -673,12 +746,15 @@ func writeSubstitutionArray(b *bytes.Buffer, subs []substitutionEntry) {
 // depID is written verbatim as dependency_id: depIDNotSet (0xffff, libyal
 // EVTX docs: "-1 (0xffff) => not set") for the elements confirmed against
 // testdata/system.evtx to always render, or one of the sub* constants
-// (Task 8b/F12c) for the five elements whose own OptionalSubstitution
-// content wraps that same index — real Windows ties dependency_id to exactly
-// that substitution for every element of this shape it emits, including
-// EventID and Level, which go-evtx had before this task (left as depIDNotSet
-// here — F12c's own text permits, rather than requires, reclassifying
-// elements whose value go-evtx always supplies).
+// (Task 8b/F12c, Task 8c/F13a) for the seven elements whose own
+// OptionalSubstitution content wraps that same index — real Windows ties
+// dependency_id to exactly that substitution for every element of this shape
+// it emits. EventID and Level are two of the seven: F12b left them at
+// depIDNotSet as an explicit, permitted scope decision ("elements that are
+// genuinely always present may legitimately stay 0x0D"); F13a (Task 8c)
+// closes that out to match the real file exactly, since the measured table
+// shows real Windows uses 0x0E for them too, dependency_id tied to their own
+// content index (not, for EventID, its Qualifiers attribute's index).
 func writeOpenElement(b *bytes.Buffer, name string, hasAttrs bool, depID uint16, binXMLBase uint32, refs *[]chunkRef) (tokenPos, attrListPos uint32) {
 	tokenPos = uint32(b.Len())
 	if hasAttrs {

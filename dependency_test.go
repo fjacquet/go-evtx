@@ -1,10 +1,10 @@
 // dependency_test.go — every OpenStartElement must carry dependency_id
 // depIDNotSet (0xffff), the sentinel libyal's EVTX documentation defines as
-// "not set" — UNLESS it is one of the five F12c elements (Task 8b) whose sole
-// content is the OptionalSubstitution of that same index, matching
-// testdata/system.evtx. 0 is otherwise a valid identifier pointing at
-// template value 0, which is a claim go-evtx has no business making on any
-// other element it writes.
+// "not set" — UNLESS it is one of the seven F12c/F13a elements (Tasks 8b/8c)
+// whose own dependency_id ties to their own content substitution's index,
+// matching testdata/system.evtx. 0 is otherwise a valid identifier pointing
+// at template value 0, which is a claim go-evtx has no business making on
+// any other element it writes.
 package evtx
 
 import (
@@ -12,22 +12,27 @@ import (
 	"testing"
 )
 
-// knownOptionalDependencyIDs are the F12c substitution indices legitimate
-// OpenStartElementTags may carry as their own dependency_id instead of the
-// depIDNotSet sentinel — Version, Task, Opcode, Keywords, EventRecordID,
-// each an unattributed element whose own text content is the
-// OptionalSubstitution of that same index (see binxml.go's sub* constants).
-// Shared with datasize_test.go.
+// knownOptionalDependencyIDs are the F12c/F13a substitution indices
+// legitimate OpenStartElementTags may carry as their own dependency_id
+// instead of the depIDNotSet sentinel: Version, Task, Opcode, Keywords,
+// EventRecordID (F12c) are each an unattributed element whose own text
+// content is the OptionalSubstitution of that same index; EventID and Level
+// (F13a) are the same shape but pre-existing, and now attributed in
+// EventID's case — their dependency_id still ties to their own CONTENT
+// index, not any attribute's (see binxml.go's sub* constants and
+// subEventID/subLevel's doc comment). Shared with datasize_test.go.
 var knownOptionalDependencyIDs = map[uint16]bool{
 	subVersion:       true,
 	subTask:          true,
 	subOpcode:        true,
 	subKeywords:      true,
 	subEventRecordID: true,
+	subEventID:       true,
+	subLevel:         true,
 }
 
 // isRecognisedDependencyID reports whether dep is either the "always
-// present" sentinel or one of the five known F12c optional indices above.
+// present" sentinel or one of the seven known F12c/F13a optional indices above.
 func isRecognisedDependencyID(dep uint16) bool {
 	return dep == depIDNotSet || knownOptionalDependencyIDs[dep]
 }
@@ -54,18 +59,29 @@ func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 	// Walk the payload for OpenStartElement tokens and check each one's
 	// dependency identifier. Tokens: 0x01 without attributes, 0x41 with.
 	//
-	// The scan starts at preambleSize, not 0: the fixed 38-byte preamble
-	// (outer FragmentHeader + TemplateInstanceNode + TemplateNode header)
-	// contains structural bytes that are not element tokens but coincidentally
-	// pass the "plausible header" guard below — the outer fragment header's
-	// minor-version byte (0x01) followed by flags(0x00)+TemplateInstance
-	// token(0x0C) reads as a small, in-range "size", and likewise the low
-	// byte of the TemplateNode GUID (== template_id == 1). Real
-	// OpenStartElement tokens only ever occur in the template body, which
-	// starts at preambleSize.
+	// The scan starts at preambleSize+fragHeaderSize, not preambleSize: the
+	// fixed 38-byte preamble (outer FragmentHeader + TemplateInstanceNode +
+	// TemplateNode header) contains structural bytes that are not element
+	// tokens but coincidentally pass the "plausible header" guard below — the
+	// outer fragment header's minor-version byte (0x01) followed by
+	// flags(0x00)+TemplateInstance token(0x0C) reads as a small, in-range
+	// "size", and likewise the low byte of the TemplateNode GUID (==
+	// template_id == 1). The template body's OWN nested FragmentHeader (B2,
+	// Task 7 Part B: "every real template body opens with its own nested
+	// fragment header, before the first element token") occupies the first 4
+	// bytes of the body itself and has the exact same problem: byte 1 of that
+	// header is 0x01 (major version), immediately followed by 0x01 0x00 (minor
+	// version + flags) — which reads as token 0x01 with dependency_id 0x0001.
+	// Harmless before F13a (Task 8c), when no OpenStartElementTag legitimately
+	// carried dependency_id 1; F13a's EventID now does, so this coincidence
+	// stopped being filtered out by the "not recognised" branch and instead
+	// got miscounted as a real match, then advanced the scan by a false
+	// 11-byte header, desynchronising it. Real OpenStartElement tokens only
+	// ever occur after both nested fragment headers, i.e. at
+	// preambleSize+fragHeaderSize.
 	found := 0
 	foundOptional := 0
-	for i := preambleSize; i+3 < bodyEnd; i++ {
+	for i := preambleSize + fragHeaderSize; i+3 < bodyEnd; i++ {
 		tok := payload[i]
 
 		// F8/F12b knock-on: an Attribute token (0x06, or 0x46 "more
@@ -112,6 +128,40 @@ func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 		if tok != binXMLOpenElement && tok != binXMLOpenElementAttrs {
 			continue
 		}
+
+		// headerSize is 11 for BOTH the with- and without-attributes forms
+		// (Task 7f/F11): real Windows places the NameNode at the same fixed
+		// offset either way, and go-evtx now matches — see writeOpenElement's
+		// doc comment in binxml.go.
+		const headerSize = 11 // token(1) + dep_id(2) + data_size(4) + name_offset(4)
+
+		// Verify this candidate is a genuine element header BEFORE trusting
+		// its dependency_id: name_offset (the 4 bytes at i+7) must equal the
+		// exact absolute address writeOpenElement would place the inline
+		// NameNode at, base+i+headerSize — the same verification already used
+		// for Attribute tokens above and for OpenElementAttrs in
+		// attrlist_test.go.
+		//
+		// Needed since F13a (Task 8c): a 0x01/0x41 byte can occur inside
+		// string data or other token bytes (already true before this task —
+		// hence the old "plausible size" guard below), but F13a introduced a
+		// NEW, more specific coincidence a size-only guard cannot catch:
+		// Provider's Name attribute is now a NormalSubstitution whose own
+		// type byte is 0x01 (STRING) — the same value as binXMLOpenElement —
+		// and it sits directly before Guid's own attribute token (0x06).
+		// Together, those two unrelated bytes decode as tok=0x01,
+		// dependency_id=0x5806, and 0x5806 happens to pair with a small
+		// "size" that used to slip past the old guard. name_offset doesn't:
+		// a real header's name_offset is always base+i+11, and this
+		// coincidence decodes to something else entirely.
+		if i+headerSize > len(payload) {
+			continue
+		}
+		nameOffset := binary.LittleEndian.Uint32(payload[i+7:])
+		if nameOffset != base+uint32(i)+headerSize {
+			continue // not a genuine element header — ordinary byte, advance by one
+		}
+
 		dep := binary.LittleEndian.Uint16(payload[i+1:])
 		if isRecognisedDependencyID(dep) {
 			if dep == depIDNotSet {
@@ -132,29 +182,18 @@ func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 			// content-derived value instead of the 0 it used to be),
 			// attributes, and any real nested children that follow are still
 			// scanned normally.
-			//
-			// headerSize is 11 for BOTH the with- and without-attributes forms
-			// (Task 7f/F11): real Windows places the NameNode at the same
-			// fixed offset either way, and go-evtx now matches — see
-			// writeOpenElement's doc comment in binxml.go.
-			const headerSize = 11 // token(1) + dep_id(2) + data_size(4) + name_offset(4)
-			i += headerSize - 1   // loop's own i++ accounts for the last byte
+			i += headerSize - 1 // loop's own i++ accounts for the last byte
 			continue
 		}
-		// A 0x01/0x41 byte can occur inside string data, so only flag a
-		// mismatch when the following bytes look like a plausible header.
-		size := binary.LittleEndian.Uint32(payload[i+3:])
-		if size < uint32(len(payload)) {
-			t.Errorf("offset %d: OpenStartElement dependency_id = 0x%04x, want 0xffff or a known F12c optional index", i, dep)
-		}
+		t.Errorf("offset %d: OpenStartElement dependency_id = 0x%04x, want 0xffff or a known F12c/F13a optional index", i, dep)
 	}
 	if found == 0 {
 		t.Fatal("no OpenStartElement tokens with dependency_id 0xffff found — " +
 			"the scan is wrong or nothing was emitted")
 	}
 	if foundOptional != len(knownOptionalDependencyIDs) {
-		t.Errorf("found %d OpenStartElement tokens with a known F12c optional dependency_id, want exactly %d (one per scalar element)",
+		t.Errorf("found %d OpenStartElement tokens with a known F12c/F13a optional dependency_id, want exactly %d (one per scalar element)",
 			foundOptional, len(knownOptionalDependencyIDs))
 	}
-	t.Logf("%d OpenStartElement tokens carry the 0xffff sentinel, %d carry a known F12c optional dependency_id", found, foundOptional)
+	t.Logf("%d OpenStartElement tokens carry the 0xffff sentinel, %d carry a known F12c/F13a optional dependency_id", found, foundOptional)
 }

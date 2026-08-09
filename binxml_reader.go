@@ -9,8 +9,8 @@
 // Substitution index → Record field mapping (per buildTemplateBody):
 //
 //	0   ProviderName  STRING
-//	1   EventID       UINT16
-//	2   Level         UINT8    (F12a: was UINT16)
+//	1   EventID       UINT16   (F13a: template body token is now OptionalSubstitution, but the array entry itself is unchanged — always has real data)
+//	2   Level         UINT8    (F12a: was UINT16; F13a: template body token is now OptionalSubstitution)
 //	3   SystemTime    FILETIME
 //	4   Computer      STRING
 //	5+2i DataField[i] name   STRING  (== dataFieldNames[i])
@@ -18,13 +18,13 @@
 //
 // Indices 29-39 (F12b: Version, Task, Opcode, Keywords, EventRecordID,
 // Correlation/@ActivityID, Correlation/@RelatedActivityID,
-// Execution/@ProcessID, Execution/@ThreadID, Channel, Security/@UserID —
-// see the sub* constants in binxml.go) are parsed by parseSubstitutionArray
-// like every other entry but are not mapped onto Record: most have no
-// caller-supplied source (go-evtx writes a placeholder solely so the encoded
-// <System> block matches a real Windows record's shape), and EventRecordID
-// is already exposed as Record.RecordID from the event record header, not
-// from BinXML.
+// Execution/@ProcessID, Execution/@ThreadID, Channel, Security/@UserID) and
+// 40-41 (F13b/F13c: Provider/@Guid, EventID/@Qualifiers — see the sub*
+// constants in binxml.go) are parsed by parseSubstitutionArray like every
+// other entry but are not mapped onto Record: most have no caller-supplied
+// source (go-evtx writes a placeholder solely so the encoded <System> block
+// matches a real Windows record's shape), and EventRecordID is already
+// exposed as Record.RecordID from the event record header, not from BinXML.
 package evtx
 
 import (
