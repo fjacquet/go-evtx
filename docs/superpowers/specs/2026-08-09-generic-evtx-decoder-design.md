@@ -138,10 +138,35 @@ seven of these. Array variants are the scalar identifier with bit 0x80 set.
 | 0x0c | Real64Type | | | |
 | 0x0d | BoolType (32-bit, 0 or 1) | | | |
 
-Two entries deserve attention at implementation. `BinXmlType` (0x21) is a
-nested BinXML fragment — real files use it for `UserData`, so the decoder must
-recurse. `SizeTType` (0x10) is 32- or 64-bit depending on the writer, so its
-width comes from the value descriptor, not the type.
+**Measured frequency across the corpus** [284 635 records, all four files, zero
+records unparsed — which also confirms the record and template-instance framing
+is understood correctly]:
+
+| Type | Share | | Type | Share |
+|---|---|---|---|---|
+| Null | 27.7 % | | HexInt64 | 5.4 % |
+| UInt8 | 16.1 % | | **BinXml** | **5.4 %** |
+| UInt16 | 12.5 % | | FileTime | 5.4 % |
+| UInt32 | 10.7 % | | UInt64 | 5.4 % |
+| String | 7.1 % | | Guid | 4.4 % |
+| | | | Sid | 0.1 % |
+
+Eleven types carry the entire corpus, not twenty-five. Every other scalar type
+— Int8/16/32/64, Real32/64, Bool, Binary, SizeT, SysTime, HexInt32, AnsiString,
+EvtHandle, EvtXml — and **every array variant** appear zero times. They must
+still be rejected explicitly rather than ignored, but they need no decoding
+path until one is observed.
+
+**`BinXmlType` (0x21) occurs exactly once in every record** — 284 635
+occurrences for 284 635 records. Recursion is the nominal case, not an edge
+case, and the decoder is not usable on any real file without it. Our writer
+emits no nested fragment at all, which makes this a structural divergence from
+every real record; whether Windows requires it is a separate question, recorded
+as a lead for the writer investigation rather than a conclusion.
+
+`SizeTType` (0x10) is 32- or 64-bit depending on the writer, so its width would
+come from the value descriptor rather than the type — untestable here, since it
+never occurs.
 
 ### Structure follows the format, not our template
 
@@ -298,8 +323,9 @@ changes record sizes, which would invalidate the 21-row measurement chain in
   the tables are an index, and a decoder can resolve every template through
   each record's inline `template_offset`. It is recorded so that no one later
   assumes the decoder validated it.
-- **`AnsiStringType` needs a codepage** the format does not carry. Real files
-  in the corpus should be checked for its frequency before choosing between
-  assuming a codepage and erroring.
+- ~~**`AnsiStringType` needs a codepage** the format does not carry.~~
+  **Resolved by measurement, 2026-08-09.** Zero occurrences across 284 635
+  records in all four corpus files, and no array variant of any type appears
+  either. Erroring on both costs nothing real.
 - **The corpus is one person's machine.** Four files from a single Windows
   install is broad coverage of records, narrow coverage of provider diversity.
