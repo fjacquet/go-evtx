@@ -59,7 +59,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 **Write data flow:**
 
-1. `buildBinXML()` → constructs a BinXML fragment using a fixed template with 40 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value, plus 11 more added in v0.7.0/Task 8b to round `<System>` out to match a real Windows record — see the index map below)
+1. `buildBinXML()` → constructs a BinXML fragment using a fixed template with 42 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value, plus 13 more added in v0.7.0/Task 8b/8c to round `<System>` out to match a real Windows record — see the index map below)
 2. `wrapEventRecord()` → wraps BinXML payload in a 24-byte event record header (signature, size, recordID, FILETIME timestamp)
 3. Records appended to the `Writer.records` byte buffer (the pending chunk)
 4. The buffer is committed as a chunk by `flushChunkLocked()` when it fills, by `tickFlushLocked()` on the background flush tick, by `rotate()`, and by `Close()`
@@ -121,12 +121,12 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 | 31 | Opcode | UINT8 (always 0, no caller-supplied source) |
 | 32 | Keywords | HEXINT64 (always 0, no caller-supplied source) |
 | 33 | EventRecordID | UINT64 (the writer's own record ID) |
-| 34 | Correlation/@ActivityID | NULL (no caller-supplied source) |
-| 35 | Correlation/@RelatedActivityID | NULL (no caller-supplied source) |
-| 36 | Execution/@ProcessID | NULL (no caller-supplied source) |
-| 37 | Execution/@ThreadID | NULL (no caller-supplied source) |
+| 34 | Correlation/@ActivityID | NULL, declared type GUID (no caller-supplied source) |
+| 35 | Correlation/@RelatedActivityID | NULL, declared type GUID (no caller-supplied source) |
+| 36 | Execution/@ProcessID | NULL, declared type UINT32 (no caller-supplied source) |
+| 37 | Execution/@ThreadID | NULL, declared type UINT32 (no caller-supplied source) |
 | 38 | Channel | STRING (from `fields["Channel"]`) |
-| 39 | Security/@UserID | NULL (no caller-supplied source) |
+| 39 | Security/@UserID | NULL, declared type SID (no caller-supplied source) |
 | 40 | Provider/@Guid | STRING (from `fields["ProviderGuid"]`) |
 | 41 | EventID/@Qualifiers | NULL, declared type UINT16 (no caller-supplied source) |
 
@@ -138,4 +138,6 @@ The seven scalar children whose sole content is one substitution value (`Version
 
 `Provider` (F13b) is the first element go-evtx emits with two attributes (`Name`, `Guid`), and the real file confirms the "more attributes follow" token (`0x46`) is required for every non-final attribute in a list, not just `0x06` for a lone one: `Name`'s own attribute token becomes `0x46`, `Guid`'s (the last) stays `0x06`. `Guid`'s value is a real substitution (`fields["ProviderGuid"]`, STRING-typed like `Name`), not a literal, even though the real file happens to encode `Provider`'s own `Name`/`Guid` as literal `ValueText` — a provider GUID varies per caller, the same reasoning that already made `Name` a substitution despite the real file's own literal encoding.
 
-`EventID/@Qualifiers` (F13c) is go-evtx's first NULL-valued `OptionalSubstitution` whose declared type is not a generic "null type" marker: `testdata/system.evtx` encodes this exact attribute as `[size 0, type UNSIGNED_WORD (0x06)]` — its own real declared type — and MS-EVEN6's own worked example shows the same shape. (F12b's five NULL fields at 34–37/39 all declare `binXMLTypeNull` (`0x00`) instead; that predates this task, is not one of its named items, and is left as a note for a future task to reconcile against the same real-file evidence if it revisits those fields.)
+`EventID/@Qualifiers` (F13c) is go-evtx's first NULL-valued `OptionalSubstitution` whose declared type is not a generic "null type" marker: `testdata/system.evtx` encodes this exact attribute as `[size 0, type UNSIGNED_WORD (0x06)]` — its own real declared type — and MS-EVEN6's own worked example shows the same shape.
+
+**F14 (v0.7.0, post-Task-8d): the note above was acted on.** F12b's five NULL fields at 34–37/39 all declared `binXMLTypeNull` (`0x00`) — a claim task-8b-report.md's own prose asserted was "reproducing exactly how the real file itself encodes these fields," directly contradicted by that same report's own Step 1 table two paragraphs above it, which shows `Correlation/@ActivityID`/`@RelatedActivityID` typed GUID (`0x0f`) and `Security/@UserID` typed SID (`0x13`), both at size 0 — never `0x00`. No real record sampled anywhere in this release ever emits `binXMLTypeNull`; it has been removed from the codebase. All five fields now declare their own real type at size 0 (`Execution/@ProcessID`/`@ThreadID` → UINT32, by extension from the one real sample found, which happens to populate both non-null) — the same convention `EventID/@Qualifiers` already used. This did not change any byte's *width* (every affected entry stays size 0); only the declared type byte moved, in both the substitution array's value-spec and the `OptionalSubstitution` token's own type byte in the template body.
