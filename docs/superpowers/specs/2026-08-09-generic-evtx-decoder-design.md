@@ -151,11 +151,22 @@ is understood correctly]:
 | String | 7.1 % | | Guid | 4.4 % |
 | | | | Sid | 0.1 % |
 
-Eleven types carry the entire corpus, not twenty-five. Every other scalar type
-— Int8/16/32/64, Real32/64, Bool, Binary, SizeT, SysTime, HexInt32, AnsiString,
-EvtHandle, EvtXml — and **every array variant** appear zero times. They must
-still be rejected explicitly rather than ignored, but they need no decoding
-path until one is observed.
+Eleven types carry the corpus **at this level**. Every other scalar type —
+Int8/16/32/64, Real32/64, Bool, Binary, SizeT, SysTime, HexInt32, AnsiString,
+EvtHandle, EvtXml — appears zero times here. They must still be rejected
+explicitly rather than ignored, but they need no decoding path until one is
+observed.
+
+**Correction, 2026-08-09, once the decoder could first reach nested
+fragments.** The table above, and the "no array variant" claim that stood here,
+were measured by scanning **top-level** substitution descriptors only. Nested
+substitution arrays were unreachable by any tool until the token walker learned
+that a `BinXml` substitution carries a whole template instance rather than an
+element tree. Array type `0x81` **does occur** inside them; `AnsiString` remains
+unobserved. The measurement was true of its scope and was written as though it
+were general — the same error `docs/evtx-format-notes.md`'s own discipline
+section records against the template bucket rule. Array support is required,
+not theoretical.
 
 **`BinXmlType` (0x21) occurs exactly once in every record** — 284 635
 occurrences for 284 635 records. Recursion is the nominal case, not an edge
@@ -325,7 +336,19 @@ changes record sizes, which would invalidate the 21-row measurement chain in
   assumes the decoder validated it.
 - ~~**`AnsiStringType` needs a codepage** the format does not carry.~~
   **Resolved by measurement, 2026-08-09.** Zero occurrences across 284 635
-  records in all four corpus files, and no array variant of any type appears
-  either. Erroring on both costs nothing real.
+  records in all four corpus files, at top level and inside nested fragments
+  alike. Erroring on it costs nothing real.
+- **Array variants are required after all.** This entry previously claimed they
+  never occur; that measurement only ever scanned top-level descriptors. Type
+  `0x81` occurs inside nested substitution arrays, which nothing could reach
+  until the token walker resolved a `BinXml` substitution as a template
+  instance. Until support lands, the corpus decodes at 44–98 % per file and
+  this is one of the two causes of every remaining failure.
+- **A template declaring `SizeT` against an array declaring `HexInt64`**, seen
+  inside a nested fragment of `security.evtx`. The decoder reports the
+  disagreement rather than picking a side, which is correct behaviour for an
+  oracle — but whether Windows tolerates it, or whether this is another
+  unreliable index/type table of the kind Task 8e already found once, is
+  unresolved. It is the second cause of the remaining corpus failures.
 - **The corpus is one person's machine.** Four files from a single Windows
   install is broad coverage of records, narrow coverage of provider diversity.
