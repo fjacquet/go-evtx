@@ -43,7 +43,7 @@ baseline the rest of the release compares against.**
 | 15 | `b41ac76` | 403 records, 27 chunks, max ObjectName **31236** runes — NOT byte-identical to rows 12-14 (F15 drops `encodeSubString`'s null terminator, shrinking every String-typed substitution value by 2 bytes; chunk count unchanged at 27, but the binary-searched near-maximum ObjectName ceiling moves from 31208 to 31236 runes as a direct consequence — see "Task 8f" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records` (held — the win stayed protected). `PROP ToXml FAILED - "The data is invalid."`, `GETWINEVENT default`/`-Oldest` both FAILED, same message — byte-for-byte the same failure shape as row 14. NULL RESULT: the null-terminator fix did not change the outcome — see "Task 8f" below |
 | 16 | `07f81f0` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to row 15 (Task 9a touched no fixture or `binxml.go`/`evtx.go` code; this row is a regression check, not a fix attempt — see "Task 9a" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 15 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two new fixtures measured alongside this one — see "Task 9a" below |
 | 17 | `92b5a3f` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-16 (Task 9b touched no fixture, `binxml.go`, or `evtx.go` code; this row is a regression check — three new hybrid fixtures measured alongside it, not fixture-generator changes — see "Task 9b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 16 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Three hybrid fixtures measured alongside this one — see "Task 9b" below |
-| 18 | `69ca68a` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-17, confirmed two ways (empty `git diff --stat` on `binxml.go`/`evtx.go`/`cmd/gen-fixture/main.go`, and a matching SHA-256 hash of the fixture bytes before/after this task's change — Task 9c touched no fixture or production encoder code; four new ladder-rung fixtures measured alongside it — see "Task 9c" below) | **PENDING** — CI run [`31290241031`](https://github.com/fjacquet/go-evtx/actions/runs/31290241031) was still `in_progress` when this row was written; not yet re-confirmed at this head | **PENDING** — same run; not yet re-confirmed at this head |
+| 18 | `69ca68a` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-17, confirmed two ways (empty `git diff --stat` on `binxml.go`/`evtx.go`/`cmd/gen-fixture/main.go`, and a matching SHA-256 hash of the fixture bytes before/after this task's change — Task 9c touched no fixture or production encoder code; four new ladder-rung fixtures measured alongside it — see "Task 9c" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 17 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Four ladder-rung fixtures measured alongside this one — see "Task 9c" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2435,15 +2435,81 @@ $ git rev-parse HEAD
 `Format Verify` run [`31290241031`](https://github.com/fjacquet/go-evtx/actions/runs/31290241031),
 `CI` run [`31290241162`](https://github.com/fjacquet/go-evtx/actions/runs/31290241162).
 
-### Result: PENDING
+`Format Verify` run [`31290241031`](https://github.com/fjacquet/go-evtx/actions/runs/31290241031)
+overall: **failure** (expected — the four `get-winevent-ladder-*`/
+`get-winevent-minimal` jobs fail by design, see below; not a regression).
+`CI` run [`31290241162`](https://github.com/fjacquet/go-evtx/actions/runs/31290241162):
+**success**.
 
-Per this task's own instruction against sitting in a CI polling loop, both
-runs above were checked twice, bounded, and were still `in_progress` (the
-`generate-*` jobs had started; the dependent `get-winevent-*` jobs had not)
-at the second check. **This section will be completed with the verbatim
-`STAGE2 READ`/`PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest`
-output for all four rungs, and the pass/fail boundary they establish, once
-those runs finish** — the mechanical next step is pulling each
-`get-winevent-ladder-*`/`get-winevent-minimal` job's log at head `69ca68a`
-and transcribing it here, append-only, the same way every prior row in this
-document was completed.
+### Result: every rung fails, including `<System>` alone — no boundary exists
+
+```text
+LADDER1-SYSTEMONLY STAGE1 OPEN: ok
+LADDER1-SYSTEMONLY STAGE2 READ: ok, 1 records
+LADDER1-SYSTEMONLY PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+LADDER1-SYSTEMONLY GETWINEVENT default: FAILED - The data is invalid.
+LADDER1-SYSTEMONLY GETWINEVENT -Oldest: FAILED - The data is invalid.
+
+LADDER2-ONEDATAPAIR STAGE1 OPEN: ok
+LADDER2-ONEDATAPAIR STAGE2 READ: ok, 1 records
+LADDER2-ONEDATAPAIR PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+LADDER2-ONEDATAPAIR GETWINEVENT default: FAILED - The data is invalid.
+LADDER2-ONEDATAPAIR GETWINEVENT -Oldest: FAILED - The data is invalid.
+
+MINIMAL STAGE1 OPEN: ok
+MINIMAL STAGE2 READ: ok, 1 records
+MINIMAL PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+MINIMAL GETWINEVENT default: FAILED - The data is invalid.
+MINIMAL GETWINEVENT -Oldest: FAILED - The data is invalid.
+
+LADDER4-LITERALNAME STAGE1 OPEN: ok
+LADDER4-LITERALNAME STAGE2 READ: ok, 1 records
+LADDER4-LITERALNAME PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+LADDER4-LITERALNAME GETWINEVENT default: FAILED - The data is invalid.
+LADDER4-LITERALNAME GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+**Stated prominently, per this task's own instruction: there is no
+pass/fail boundary.** Rung 1 — `<Event><System>...</System></Event>`, no
+`<EventData>` at all, 18 substitutions, the smallest event record go-evtx's
+encoder can produce — fails with the exact same exception, on the exact
+same call (`ToXml()`), with the exact same message, as the largest rung
+measured (the control, 12 Data pairs). All four rungs, spanning 18 to 42
+implied substitutions and 0 to 12 `Data` elements, fail identically.
+
+**Reading this result.** The defect is **not** in `<EventData>`'s
+structure or the substitution array's count/shape — rung 2 (one pair) and
+rung 4 (literal names, refuting that hypothesis cleanly — see below) both
+isolate those variables and both still fail exactly like the 12-pair
+control. It is somewhere in what **every rung shares**: `<System>`'s own
+content, `<Event>`'s `xmlns` attribute, or the outer preamble. Task 9b
+already eliminated the outer preamble (both directions) and one specific
+`<System>` divergence (the self-closing-tag convention); this task's own
+rung 1 adds a new, stronger data point in the same direction — go-evtx's
+own trivial preamble, paired with go-evtx's own `<System>`-only body (no
+`<EventData>` at all), still fails. The remaining, now-narrower suspect is
+something about `<System>`'s *content* not yet tested — most likely a
+substitution *value* encoding (a type/byte-width mismatch, or the
+`OptionalSubstitution`/`dependency_id` mechanism itself) for one or more of
+its 18 fields, since `<System>`'s *structure* (children, order, element
+shapes) was already confirmed to match `testdata/system.evtx` byte-for-byte
+and this task shows that structural match alone is not sufficient.
+
+**Rung 4's hypothesis — that `Data/@Name` must be a template-fixed literal,
+not a substitution — is refuted, not confirmed.** Making the change
+produced the identical exception and message as the control (rung 3), with
+every other variable held constant (same 12-pair scale, same field
+content). This closes the hypothesis out cleanly as a null result.
+
+**No regression.** `generate`: `wrote artifacts/generated.evtx (403
+records, max ObjectName 31236 runes)` — byte-identical to row 17.
+`python-evtx-differential`: `OK: 403 records, all chunk checksums verify` —
+stayed green. `get-winevent`: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403
+records` (the release's hard-won win, held) / `PROP ToXml FAILED` / both
+`GETWINEVENT` orderings `FAILED` — `"The data is invalid."` — identical in
+every respect to row 17.
+
+Full verbatim job output, method detail, and concerns (including F8's
+`xmlns` and the outer preamble being held fixed rather than re-varied by
+this task) are in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9c-report.md`.
