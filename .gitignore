@@ -35,7 +35,8 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
-# Test output
+# Test output, and every real .evtx a developer keeps locally.
+# No exception: the repository tracks no .evtx at all. It used to track
+# testdata/system.evtx, and deriving the format from that one sample while
+# also asserting against it is what cost this project seventeen tasks.
 testdata/*.evtx
-# ...except the vendored Windows fixture, which is ground truth, not output.
-!testdata/system.evtx
