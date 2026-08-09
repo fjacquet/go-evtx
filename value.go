@@ -51,7 +51,9 @@ const (
 	valArrayFlag ValueType = 0x80
 )
 
-// Node represents a decoded BinXML fragment. Fully populated in Task 5.
+// Node is a placeholder so this file compiles ahead of Task 5, which replaces
+// it with the real element-tree type in binxml_decode.go. Delete this
+// declaration there — do not define Node twice.
 type Node struct{}
 
 var valueTypeNames = map[ValueType]string{
@@ -193,9 +195,16 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 
 	switch t {
 	case ValNull:
+		if len(data) > 0 {
+			return Value{}, fmt.Errorf("go_evtx: Null value declares %d bytes of data", len(data))
+		}
 		return Value{Type: t, absent: true}, nil
 	case ValString:
-		return Value{Type: t, str: decodeUTF16(data)}, nil
+		s, err := decodeUTF16(data)
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Type: t, str: s}, nil
 	case ValBinary:
 		b := make([]byte, len(data))
 		copy(b, data)
@@ -236,19 +245,23 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 }
 
 // decodeUTF16 decodes UTF-16LE, tolerating one trailing null terminator.
-func decodeUTF16(data []byte) string {
+// It returns an error if the remaining data (after null-terminator strip) has odd length.
+func decodeUTF16(data []byte) (string, error) {
 	end := len(data)
 	if end >= 2 && data[end-2] == 0 && data[end-1] == 0 {
 		end -= 2
 	}
-	if end < 2 {
-		return ""
+	if end == 0 {
+		return "", nil
+	}
+	if end%2 != 0 {
+		return "", fmt.Errorf("go_evtx: UTF-16 data has odd length %d", end)
 	}
 	u16 := make([]uint16, end/2)
 	for i := range u16 {
 		u16[i] = binary.LittleEndian.Uint16(data[i*2:])
 	}
-	return string(utf16.Decode(u16))
+	return string(utf16.Decode(u16)), nil
 }
 
 // formatGUID renders the on-disk little-endian GUID struct in canonical form.

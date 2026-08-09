@@ -108,3 +108,60 @@ func TestDecodeValue_FileTime(t *testing.T) {
 		t.Errorf("Time() = %v, want %v", got, want)
 	}
 }
+
+// Test rejection of malformed variable-length types
+func TestDecodeValue_GuidWrongLength(t *testing.T) {
+	if _, err := decodeValue(ValGuid, []byte{0x01, 0x02}); err == nil {
+		t.Fatal("expected error for Guid with wrong length")
+	}
+}
+
+func TestDecodeValue_SidLengthMismatch(t *testing.T) {
+	// Declares 2 sub-authorities but only provides 1 (missing 4 bytes)
+	data := []byte{0x01, 0x02, 0, 0, 0, 0, 0, 0x05, 0x12, 0, 0, 0}
+	if _, err := decodeValue(ValSid, data); err == nil {
+		t.Fatal("expected error for Sid with mismatched length")
+	}
+}
+
+func TestDecodeValue_SizeTWrongWidth(t *testing.T) {
+	if _, err := decodeValue(ValSizeT, []byte{0x01, 0x02, 0x03}); err == nil {
+		t.Fatal("expected error for SizeT with non-4/8 byte width")
+	}
+}
+
+func TestDecodeValue_NullWithData(t *testing.T) {
+	if _, err := decodeValue(ValNull, []byte{0x01}); err == nil {
+		t.Fatal("expected error for Null with data")
+	}
+}
+
+func TestDecodeValue_UTF16OddLength(t *testing.T) {
+	if _, err := decodeValue(ValString, []byte{'h', 0, 'i'}); err == nil {
+		t.Fatal("expected error for UTF-16 with odd length")
+	}
+}
+
+func TestDecodeValue_Real64(t *testing.T) {
+	// IEEE 754 double for 3.14159...
+	data := []byte{0x6e, 0x2d, 0x44, 0x54, 0xfb, 0x21, 0x09, 0x40}
+	v, err := decodeValue(ValReal64, data)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	// Just verify it decodes and produces a string
+	if s := v.String(); s == "" {
+		t.Error("Real64 String() returned empty")
+	}
+}
+
+func TestDecodeValue_Binary(t *testing.T) {
+	data := []byte{0x48, 0x65, 0x6c, 0x6c, 0x6f}
+	v, err := decodeValue(ValBinary, data)
+	if err != nil {
+		t.Fatalf("decodeValue: %v", err)
+	}
+	if s := v.String(); s != "48656c6c6f" {
+		t.Errorf("String() = %q, want %q", s, "48656c6c6f")
+	}
+}
