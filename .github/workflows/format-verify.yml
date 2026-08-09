@@ -17,7 +17,12 @@ jobs:
       - name: Generate fixture
         run: |
           mkdir -p artifacts
-          go run ./cmd/gen-fixture -out artifacts
+          # gen-fixture-system, not gen-fixture: the frozen generator supplies
+          # no ProviderName/Computer/Channel, and since F18 an unsupplied value
+          # is NULL, which drops those elements entirely. Valid file, event too
+          # incomplete for Get-WinEvent to format. gen-fixture stays frozen and
+          # still reproduces every historical row of docs/format-baseline.md.
+          go run ./cmd/gen-fixture-system -out artifacts
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: generated-evtx

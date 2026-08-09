@@ -36,7 +36,10 @@ go.work.sum
 Thumbs.db
 
 # Test output, and every real .evtx a developer keeps locally.
-# No exception: the repository tracks no .evtx at all. It used to track
-# testdata/system.evtx, and deriving the format from that one sample while
-# also asserting against it is what cost this project seventeen tasks.
 testdata/*.evtx
+# One exception: a log this project generated on a Windows machine it
+# controls, committed so CI can check the chunk hash-table rules against real
+# Windows output again. It is a CI fixture, NOT a source of format rules —
+# rules are derived from the corpus census, never from one file. That
+# distinction is what the deleted testdata/system.evtx got wrong.
+!testdata/win2025-system.evtx

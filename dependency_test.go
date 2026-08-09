@@ -21,6 +21,13 @@ import (
 // EventID's case — their dependency_id still ties to their own CONTENT
 // index, not any attribute's (see binxml.go's sub* constants and
 // subEventID/subLevel's doc comment). Shared with datasize_test.go.
+// F18 adds Channel, Computer and the twelve <Data> values. Those carry a
+// caller-supplied string that may legitimately be empty, and the census says
+// an absent value is only ever referenced by an OptionalSubstitution: a
+// NormalSubstitution paired with a NULL array entry occurs 0 times in 27
+// million observations of real output, against 1 152 729 for the optional
+// form. Each of these elements' dependency_id therefore names its own content
+// substitution, exactly like the seven above.
 var knownOptionalDependencyIDs = map[uint16]bool{
 	subVersion:       true,
 	subTask:          true,
@@ -29,6 +36,15 @@ var knownOptionalDependencyIDs = map[uint16]bool{
 	subEventRecordID: true,
 	subEventID:       true,
 	subLevel:         true,
+	subChannel:       true,
+	subComputer:      true,
+}
+
+func init() {
+	// The twelve <Data> value slots, 6, 8, ... 28.
+	for i := 0; i < 12; i++ {
+		knownOptionalDependencyIDs[uint16(6+i*2)] = true
+	}
 }
 
 // isRecognisedDependencyID reports whether dep is either the "always

@@ -154,12 +154,14 @@ knowing before you choose this library.
   `EventData` schema. Arbitrary Windows event schemas are not supported. Use
   `WriteRaw` to copy records verbatim from an existing file.
 - `WriteRecord` and `WriteRaw` must not be mixed in the same session.
+- **A field you do not supply omits its element.** That is what the format
+  means by a `NULL` substitution and what Windows does, but it has a sharp
+  edge: an event with no `<Provider Name>` or no `<Computer>` is a valid file
+  that `EventLogReader` reads in full and that `Get-WinEvent`'s formatter
+  throws on. Supply `ProviderName` and `Computer`.
 - Each record re-declares its template inline. Real Windows writes the
   definition once per chunk and points later records at it, so a go-evtx file
-  is larger than it needs to be. Tracked for v0.7.1.
-- Records are not 8-byte aligned and carry no fragment EOF token, where real
-  Windows does both on every record measured. Windows reads our files anyway;
-  this is a conformance gap, not a defect. Tracked for v0.7.1.
+  is larger than it needs to be.
 
 **Reading**
 

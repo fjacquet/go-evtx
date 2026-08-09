@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-09
+
+The writer now emits what Windows emits. 0.7.0 made `ToXml()` render; this
+closes the two conformance gaps it left, and the one that was silently
+blocking them.
+
+### Fixed
+
+- **A value the caller did not supply is now encoded the way Windows encodes
+  one.** `ProviderName`, `Provider/@Guid`, `Channel`, `Computer` and the twelve
+  `<Data>` values are referenced by an `OptionalSubstitution` declaring the
+  field's real type, and their substitution-array entry is `NULL` when nothing
+  was supplied. go-evtx used to write `{size 0, type String}` — a shape that
+  occurs **zero** times in 333 100 real records, against 1 686 434 zero-length
+  descriptors that all declare `0x00`.
+
+- **Records carry a fragment EOF token and are 8-byte aligned** (W1 and W2).
+  Both are absolutes in real output: 37 364 of 37 364 measured records are
+  8-aligned in size and offset, and every one carries 1 to 8 trailing bytes
+  after its substitution array.
+
+  These were implemented and reverted twice in earlier releases because
+  Windows rejected the result. The empty-value encoding above is why: while a
+  zero-length value was written as a `String`, Windows refused any record that
+  also carried trailing bytes. All three had to land together — measured
+  separately, each alone still fails.
+
+  Verified in CI run `31335727200`: 403 records read, `ToXml` renders, both
+  `Get-WinEvent` orderings enumerate, content round-trips, and python-evtx
+  agrees. `docs/format-baseline.md` row 23.
+
+### Changed
+
+- **An unsupplied field now omits its element** rather than emitting an empty
+  one — which is what the format means by a `NULL` substitution, and what
+  Windows does. If you leave `ProviderName` or `Computer` unset, the resulting
+  event has no `<Provider Name>` and no `<Computer>`. The file is valid and
+  `EventLogReader` reads it, but `Get-WinEvent`'s formatting layer throws on an
+  event with no provider name. **Supply them.**
+
+### Added
+
+- `cmd/gen-fixture-system`, the generator `Format Verify` now gates on. It
+  supplies the three `<System>` fields above; `cmd/gen-fixture` is frozen and
+  does not, and still reproduces every historical row of
+  `docs/format-baseline.md`.
+
+### Known limitations
+
+- Each record still re-declares its template inline, where Windows declares
+  one per chunk and points later records at it. A file-size matter, not a
+  correctness one.
+- The template hash-table bucket rule is correct for format 3.1 and scores at
+  or below chance on 3.2. The 3.2 rule is unknown. Reading is unaffected.
+- `AnsiString` is rejected rather than guessed at: the format carries no
+  codepage. 16 records in a 320 398-record corpus.
+
 ## [0.7.0] - 2026-08-09
 
 Windows reads the files this library writes, and this library reads the files
@@ -218,7 +275,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/fjacquet/go-evtx/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/fjacquet/go-evtx/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/fjacquet/go-evtx/compare/v0.5.0...v0.6.0
 [0.4.0]: https://github.com/fjacquet/go-evtx/compare/v0.3.0...v0.4.0

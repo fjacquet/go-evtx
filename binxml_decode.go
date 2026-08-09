@@ -345,15 +345,15 @@ func decodeBinXMLFragment(cache *templateCache, chunkOff, length int, top bool, 
 	// always the EOF token; the padding after it is never zeroed, so only its
 	// length is checked, never its content.
 	//
-	// One tolerated exception, and it is go-evtx's own doing: this writer stops
-	// at the substitution array and emits neither the EOF token nor the
-	// padding (tracked as #38/#39 — the writer is non-conformant, this check is
-	// not wrong). Emitting both WAS implemented and then REVERTED: it regressed
-	// Windows' own EventLogReader on our 403-record fixture from reading all of
-	// them to failing on record 0, measured in CI and independently on the VM,
-	// while single-record files kept working. Until that is understood, a
-	// top-level payload ending exactly at the substitution array is accepted.
-	// Anything present after it is still validated in full.
+	// One tolerated exception, kept purely for backward compatibility: go-evtx
+	// v0.7.0 and earlier stopped at the substitution array and emitted neither
+	// the EOF token nor the padding. Since F18/W1/W2 this writer emits both,
+	// so nothing produced from here on takes this branch — but files already
+	// written by an older version still must be readable, and refusing them
+	// would be a strictness with no upside for the person holding the file.
+	//
+	// It is not a tolerance for a current defect. Anything present after the
+	// substitution array is still validated in full.
 	rem := len(payload) - (pos + consumed)
 	switch {
 	case rem == 0 && top:

@@ -365,29 +365,31 @@ func TestFillHashTables_SkipsInvalidOffset(t *testing.T) {
 	})
 }
 
-// fixturePath returns the real Windows-generated .evtx these tests measure
-// against, or skips.
+// trackedFixture is the one real .evtx this repository commits: a System log
+// exported from a disposable Windows Server 2025 instance the project
+// controls. Format 3.2, 11 chunks, 1818 records. See testdata/README.md for
+// its provenance and for exactly what it contains.
 //
-// The repository tracks no such file. It used to track testdata/system.evtx,
-// and that was the whole problem: every format rule go-evtx encodes was
-// derived from that one sample, and the same file was then used to assert the
-// rules were right — an assertion that cannot fail when the derivation is
-// wrong. It was removed rather than merely held out, so nothing can quietly
-// start depending on it again.
-//
-// The cost is stated plainly: with no tracked real file, CI does not check
-// these rules at all. They run locally against any corpus file, and the fix is
-// a small real log generated on a Windows machine we control, licensed to us —
-// not another borrowed sample.
-//
-//	EVTX_FIXTURE=/path/to/real.evtx go test ./...
+// It is a CI fixture and nothing more. Format rules come from the corpus
+// census over hundreds of files (corpus_shape_test.go), never from this file
+// — that separation is the whole lesson of the deleted testdata/system.evtx,
+// where a rule derived from one sample was then asserted against that same
+// sample and so could not fail.
+const trackedFixture = "testdata/win2025-system.evtx"
+
+// fixturePath returns the .evtx the hash-table rule tests measure against:
+// $EVTX_FIXTURE when set — point it at a 3.1 file to exercise the template
+// bucket rule, which trackedFixture's 3.2 format skips — otherwise the
+// tracked fixture.
 func fixturePath(t *testing.T) string {
 	t.Helper()
-	p := os.Getenv("EVTX_FIXTURE")
-	if p == "" {
-		t.Skip("set EVTX_FIXTURE to a real Windows-generated .evtx; none is tracked in this repository")
+	if p := os.Getenv("EVTX_FIXTURE"); p != "" {
+		return p
 	}
-	return p
+	if _, err := os.Stat(trackedFixture); err != nil {
+		t.Skipf("%s is absent and EVTX_FIXTURE is unset", trackedFixture)
+	}
+	return trackedFixture
 }
 
 // fixtureMinorVersion reads the fixture's format minor version from its file

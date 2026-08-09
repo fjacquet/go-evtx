@@ -222,6 +222,12 @@ const (
 
 	subChannel = 38
 
+	// F18 named the two indices that had been written as bare literals, so
+	// the OptionalSubstitution token and the element's dependency_id can be
+	// seen to reference the same slot.
+	subProviderName = 0
+	subComputer     = 4
+
 	subSecurityUserID = 39
 
 	// F13b/F13c (Task 8c): the two remaining named divergences from
@@ -388,6 +394,28 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 	// 5. Substitution array.
 	writeSubstitutionArray(out, subs)
 
+	// 6. Fragment EOF token (W1), then zero padding so the on-disk record —
+	// 24-byte header + this payload + the 4-byte trailing size copy — is a
+	// multiple of 8 (W2/F2).
+	//
+	// Both are measured absolutes in real output: every one of 37 364 real
+	// records is 8-aligned in both size and offset, and every one carries 1
+	// to 8 trailing bytes after its substitution array, never zero.
+	//
+	// These were implemented and reverted twice before. What blocked them was
+	// not the trailing bytes themselves but F18: while go-evtx wrote a
+	// zero-length value as {size 0, type String}, Windows' reader rejected
+	// any record that also carried trailing bytes. With F18 in place all
+	// three ship together — measured on Windows, 400 records read, ToXml
+	// renders, and both Get-WinEvent orderings enumerate.
+	//
+	// The padding's content is this writer's own choice: real Windows padding
+	// is measured non-zero, and a conforming reader checks only its length.
+	out.WriteByte(0x00)
+	for (evtxRecordHeaderSize+out.Len()+4)%8 != 0 {
+		out.WriteByte(0x00)
+	}
+
 	return binXMLResult{payload: out.Bytes(), names: names, templates: templates}
 }
 
@@ -491,8 +519,8 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	// Provider's Guid as a literal ValueText — a provider GUID varies per
 	// caller, so it needs the same per-record flexibility Name already has.
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Provider", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeSub(b, "Name", 0, binXMLTypeString, true, baseOffset, names)
-	writeAttributeSub(b, "Guid", subProviderGuid, binXMLTypeString, false, baseOffset, names)
+	writeAttributeOptional(b, "Name", subProviderName, binXMLTypeString, true, baseOffset, names)
+	writeAttributeOptional(b, "Guid", subProviderGuid, binXMLTypeString, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
@@ -585,16 +613,16 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <Channel>%38</Channel>                                        (F12b)
-	dataSizeStack = pushOpenElement(b, "Channel", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	//     <Channel>%38</Channel>                                        (F12b, F18)
+	dataSizeStack = pushOpenElement(b, "Channel", false, subChannel, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeSubstitution(b, subChannel, binXMLTypeString)
+	writeOptionalSubstitution(b, subChannel, binXMLTypeString)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
-	//     <Computer>%4</Computer>
-	dataSizeStack = pushOpenElement(b, "Computer", false, depIDNotSet, baseOffset, names, dataSizeStack)
+	//     <Computer>%4</Computer>                                       (F18)
+	dataSizeStack = pushOpenElement(b, "Computer", false, subComputer, baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeSubstitution(b, 4, binXMLTypeString)
+	writeOptionalSubstitution(b, subComputer, binXMLTypeString)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Security UserID="%39"/>                                      (F12b/F12c)
@@ -615,11 +643,14 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	for i := 0; i < 12; i++ {
 		nameIdx := uint16(5 + i*2)
 		valueIdx := uint16(6 + i*2)
-		dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Data", depIDNotSet, baseOffset, names, dataSizeStack)
+		// F18: the value may be absent, so it is an OptionalSubstitution and
+		// <Data>'s own dependency_id names it. The NAME never is — it comes
+		// from dataFieldNames — so it stays a NormalSubstitution.
+		dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Data", valueIdx, baseOffset, names, dataSizeStack)
 		writeAttributeSub(b, "Name", nameIdx, binXMLTypeString, false, baseOffset, names)
 		patches = closeAttrList(b, attrListPos, patches)
 		b.WriteByte(binXMLCloseElement)
-		writeSubstitution(b, valueIdx, binXMLTypeString)
+		writeOptionalSubstitution(b, valueIdx, binXMLTypeString)
 		dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 	}
 
@@ -836,9 +867,25 @@ func writeSubstitutionArray(b *bytes.Buffer, subs []substitutionEntry) {
 	writeUint32LE(b, uint32(len(subs)))
 
 	// Value specs.
+	//
+	// F18: an absent value declares NULL. Measured across 333 100 records of
+	// the derivation corpus — every one of the 1 686 434 zero-length
+	// descriptors declares 0x00, and a zero-length String occurs zero times.
+	//
+	// This half alone is not the rule, and shipping it alone (F17) regressed
+	// Windows' reader from 403 records to zero. The census says why: a
+	// NormalSubstitution with a Null array entry occurs 0 times in 27 million
+	// observations, while an OptionalSubstitution with one occurs 1 152 729
+	// times. NULL in the array is only legal for a value the TEMPLATE also
+	// marks optional — so buildTemplateBody's possibly-empty fields became
+	// OptionalSubstitution in the same change.
 	for _, s := range subs {
+		typ := s.typ
+		if len(s.data) == 0 {
+			typ = binXMLTypeNull
+		}
 		writeUint16LE(b, uint16(len(s.data)))
-		b.WriteByte(s.typ)
+		b.WriteByte(typ)
 		b.WriteByte(0x00) // padding
 	}
 

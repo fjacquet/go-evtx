@@ -1,9 +1,39 @@
 # Test fixtures
 
-## No real `.evtx` is tracked here
+## `win2025-system.evtx` — the one tracked log
 
-`.gitignore` excludes `testdata/*.evtx` with no exception. Two reasons, and the
-second is the one that cost this project time.
+A System log exported from a disposable Windows Server 2025 instance this
+project runs in a throwaway VPC. Format **3.2**, 11 chunks, 1818 records,
+1 118 208 bytes, md5 `87b255e5b3e1729e9ddb41ee2f211679`. The strict decoder
+reads 1813 of the 1818; the 5 it refuses carry `AnsiString`, which stays
+deliberately unimplemented.
+
+`win2025-system-expected.xml` beside it is Windows' own
+`EventLogRecord.ToXml()` rendering of the first four records, captured on the
+machine that produced the file. That is what `event_test.go` and
+`binxml_decode_test.go` assert against — Windows' rendering, never this
+library's own decode of the same bytes, because a decoder checked against
+itself agrees with itself.
+
+**It is a CI fixture, not a source of format rules.** Rules come from the
+corpus census over hundreds of files (`corpus_shape_test.go`). Keeping those
+two roles apart is the whole lesson of the section below.
+
+**What it contains, audited before it was committed** — three machine names
+(`EC2AMAZ-LNQ713N`, `EC2AMAZ-ETN574G`, `WIN-UK9M20OS250`), two machine SIDs
+each with RID 500, `Administrator` as a subject name, and link-local addresses
+(`169.254.169.123`, the AWS time service). No user accounts beyond the
+built-in, no third-party providers, no routable addresses. The instance and
+its VPC exist only for these tests.
+
+Scrubbing was considered and rejected: anonymising an `.evtx` means rewriting
+records, which changes the very bytes the fixture exists to be ground truth
+for.
+
+## Why no *other* real `.evtx` is tracked
+
+`.gitignore` excludes `testdata/*.evtx` with that single exception. Two
+reasons, and the second is the one that cost this project time.
 
 **Privacy and size.** Real logs — `Security` above all — carry account names,
 SIDs, machine names and often IP addresses, and this repository is public. A
@@ -29,11 +59,12 @@ asked to carry more evidentiary weight than one file can.
 
 ## Running the tests that need a real file
 
-A few tests measure hash-table rules against real Windows output. They skip
-unless given a file:
+They use `win2025-system.evtx` by default. Point `EVTX_FIXTURE` at a **3.1**
+file to also exercise the template GUID bucket rule, which is 3.1-only and
+therefore skips on the tracked 3.2 fixture:
 
 ```
-EVTX_FIXTURE=/path/to/real.evtx go test ./...
+EVTX_FIXTURE=/path/to/real-3.1.evtx go test ./...
 ```
 
 The corpus tools take one or more directories, and never read a file named
@@ -45,10 +76,10 @@ EVTX_CORPUS=/dir/one:/dir/two go test -run TestCorpusShapeCensus -v .
 EVTX_SHAPE_TARGET=/path/to/generated.evtx go test -run TestShapeDiffTarget -v .
 ```
 
-**Consequence, stated rather than hidden:** with no tracked real file, CI does
-not check these rules at all. Restoring that coverage needs a small real log
-generated on a Windows machine we control and licensed to us — not another
-borrowed sample.
+**What CI does and does not check.** With `win2025-system.evtx` tracked, CI
+verifies the name hash-table rule against real Windows output again. It still
+does not verify the **template** bucket rule: that rule holds only on format
+3.1, and the tracked fixture is 3.2. The 3.2 rule is unknown.
 
 ## What may be committed
 

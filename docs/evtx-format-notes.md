@@ -935,6 +935,83 @@ locally, in under a second. The order that follows: **the corpus derives, the
 specification names, the VM confirms, CI records.** The VM's role is to close
 a hypothesis, not to search for one.
 
+## W1/W2 re-measured after F15: still rejected, and the reason is not F15
+
+Measured 2026-08-09 on the Windows VM, after `ToXml` began rendering.
+
+| variant | `STAGE2 READ` |
+|---|---|
+| control (v0.7.0 encoder, unaligned, no EOF token) | ok, 403 records |
+| + fragment EOF token only | FAILED after 0 records |
+| + 8-byte alignment only | FAILED after 0 records |
+| + both | FAILED after 0 records |
+
+**This corrects a hypothesis recorded earlier the same day.** After F15 it was
+written here, and in the v0.7.1 backlog, that the original `403 → 0` regression
+was "probably F15 itself" — that Windows had been choking on the `Null`/`Null`
+shape and that shifting bytes only moved where it choked. That is wrong. F15 is
+fixed, `ToXml` renders, and adding any trailing byte still breaks reading in
+exactly the same way. The two are independent.
+
+What still stands, unchanged by F15: the control is **unaligned and carries no
+EOF token** and Windows reads it; a single-record file with those same trailing
+bytes reads fine; the chunk hash tables are byte-identical between control and
+padded builds; the chunk header is consistent in both. And go-evtx's own strict
+decoder fully accepts the `both` variant — the shape 37 364 of 37 364 real
+records use.
+
+So Windows rejects, in a multi-record file, a shape it universally produces
+itself. The only structural difference left that depends on record count is the
+template model: go-evtx re-declares a full inline template definition in every
+record, where real Windows declares one per chunk and points later records back
+at it (545 definitions, 36 819 backward references, zero forward). W1 and W2 are
+therefore blocked behind that, not behind "an unexplained regression".
+
+The cheap next measurement, not yet run: a two-record fixture with trailing
+bytes. If two records suffice to break it, the bisection is trivial from there.
+
+## F17 attempted and reverted: the rule is about the TOKEN, not the length
+
+**Attempted.** A zero-length substitution value declares type NULL rather than
+its own type. The measurement behind it is sound and stands: across 333 100
+records of the derivation corpus, every one of the 1 686 434 zero-length
+descriptors declares `0x00`, and a zero-length String (`0x01`) occurs **zero**
+times. go-evtx wrote `{size 0, type String}` whenever a caller left
+`ProviderName`, `Computer` or `Channel` unset.
+
+**Reverted**, commit follows this note. CI run `31334777636` on the shipped
+fixture: `STAGE2 READ: FAILED after 0 records`, down from 403. The
+single-record fixture still passed.
+
+**Why it was wrong, from the census.** The rule is not "zero length implies
+NULL". It is a rule about which *token* references the value:
+
+| shape | occurrences in 27 M |
+|---|---|
+| `NormalSubstitution` (`0x0d`) + array `Null` | **0** |
+| `OptionalSubstitution` (`0x0e`) + array `Null` | 1 152 729 |
+
+A value that may be absent is referenced by an `OptionalSubstitution`, whose
+own token declares the field's real type (that is F15), and whose array entry
+is `Null` when the value is absent. A `NormalSubstitution` always carries a
+real typed value and never a `Null` array entry. F17 made the array entries
+`Null` while leaving their tokens at `0x0d` — inventing a third shape that
+does not exist, while trying to remove one that does not either.
+
+**The corrected design, not yet implemented.** Fields that can legitimately be
+empty — `ProviderName`, `Computer`, `Channel`, `ProviderGuid` and the twelve
+data fields — must be referenced by `OptionalSubstitution` with their real
+declared type, and their array entry must be `Null` when the caller supplies
+nothing. That is a change to `buildTemplateBody`, not just to
+`writeSubstitutionArray`.
+
+**Why this matters beyond tidiness.** It is what blocks W1 and W2. Measured on
+the VM: two 400-record files differing only in whether `ProviderName`,
+`Computer` and `Channel` were supplied — with them, padded records read fine
+(400 of 400); without them, failure on record 0. Seven other hypotheses were
+eliminated first, including the per-record template redeclaration (#45), which
+was the leading suspect and is now cleared.
+
 ## What is still unknown
 
 **The central open question, stated precisely.** `.NET`'s

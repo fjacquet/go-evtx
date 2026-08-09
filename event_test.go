@@ -96,38 +96,53 @@ func TestEvent_EventDataMarshalsAsArray(t *testing.T) {
 	}
 }
 
-// TestEventFromNode_RealFixtureUserData decodes testdata/system.evtx's first
-// record (ground-truthed by testdata/system-expected-windows.xml's RECORD 1,
-// EventRecordID 12049) and checks the assembled Event against it, field by
-// field against the golden file's own values — not merely "non-zero" — so a
-// transposed ProcessID/ThreadID or a "Guid"/"GUID" attribute-name typo would
-// fail here rather than pass silently (fix round 1, Finding 3).
+// The two tests below are grounded in testdata/win2025-system-expected.xml:
+// Windows' own EventLogRecord.ToXml() rendering of the first four records of
+// testdata/win2025-system.evtx, captured on the machine that produced the
+// file. They assert against Windows' rendering, never against this library's
+// own decode of the same bytes — a decoder checked against itself agrees with
+// itself.
 //
-// This record's <UserData> is a literal child of <Event>, but ITS content is
-// a nested BinXml-typed substitution wrapping <AutoBackup> — not literal
-// children (see TestDecodeRecordBinXML_RealFixture in binxml_decode_test.go,
-// and contentNode's doc comment in event.go). The task-6-brief.md version of
-// eventFromNode set Event.UserData to that empty <UserData> wrapper node
-// (Value set, no Children of its own) instead of following it to
-// <AutoBackup> — this test is what catches that and pins the fix.
+// They read through the public Reader and iterate to the record they need
+// rather than walking chunk offsets by hand. The previous versions walked
+// offsets into whatever file readFixtureChunk returned and asserted values
+// belonging to one specific log; when that log was deleted they skipped
+// silently for a whole release, then failed the moment a different fixture
+// appeared. Iterating makes the record they mean explicit.
+
+// nthEvent returns the n-th event (1-based) of the tracked fixture.
+func nthEvent(t *testing.T, n int) *Event {
+	t.Helper()
+	r, err := Open(fixturePath(t))
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	for i := 1; ; i++ {
+		ev, err := r.ReadEvent()
+		if err != nil {
+			t.Fatalf("reading event %d: %v", i, err)
+		}
+		if i == n {
+			return ev
+		}
+	}
+}
+
+// TestEventFromNode_RealFixtureUserData checks record 1, whose <UserData> is a
+// literal child of <Event> but whose CONTENT is a nested BinXml-typed
+// substitution wrapping <LogFileCleared> — not literal children. An earlier
+// eventFromNode set Event.UserData to the empty <UserData> wrapper (Value set,
+// no Children of its own) instead of following it through; this test is what
+// catches that.
+//
+// Every System field is checked against the golden file's own value rather
+// than merely for being non-zero, so a transposed ProcessID/ThreadID or a
+// Guid/GUID attribute-name typo fails here instead of passing quietly.
 func TestEventFromNode_RealFixtureUserData(t *testing.T) {
-	chunk := readFixtureChunk(t, 0)
-	recOff := evtxChunkHeaderSize
-	size := int(le32(chunk[recOff+4 : recOff+8]))
-	payloadOff := recOff + 24
-	payloadLen := size - 24 - 4
-
-	cache := newTemplateCache(chunk)
-	root, err := decodeRecordBinXML(cache, payloadOff, payloadLen)
-	if err != nil {
-		t.Fatalf("decodeRecordBinXML: %v", err)
-	}
-	ev, err := eventFromNode(root)
-	if err != nil {
-		t.Fatalf("eventFromNode: %v", err)
-	}
-
+	ev := nthEvent(t, 1)
 	sys := ev.System
+
 	if sys.Provider.Name != "Microsoft-Windows-Eventlog" {
 		t.Errorf("Provider.Name = %q", sys.Provider.Name)
 	}
@@ -135,22 +150,19 @@ func TestEventFromNode_RealFixtureUserData(t *testing.T) {
 		t.Errorf("Provider.GUID = %q", sys.Provider.GUID)
 	}
 	if sys.Provider.EventSourceName != "" {
-		t.Errorf("Provider.EventSourceName = %q, want empty — record 1's <Provider> carries no EventSourceName", sys.Provider.EventSourceName)
+		t.Errorf("Provider.EventSourceName = %q, want empty — record 1 declares none", sys.Provider.EventSourceName)
 	}
-	if sys.EventID != 105 {
-		t.Errorf("EventID = %d, want 105", sys.EventID)
+	if sys.EventID != 104 {
+		t.Errorf("EventID = %d, want 104", sys.EventID)
 	}
-	if sys.Qualifiers != 0 {
-		t.Errorf("Qualifiers = %d, want 0 (record 1's <EventID> carries no Qualifiers attribute)", sys.Qualifiers)
-	}
-	if sys.Version != 0 {
-		t.Errorf("Version = %d, want 0", sys.Version)
+	if sys.Version != 1 {
+		t.Errorf("Version = %d, want 1", sys.Version)
 	}
 	if sys.Level != 4 {
 		t.Errorf("Level = %d, want 4", sys.Level)
 	}
-	if sys.Task != 105 {
-		t.Errorf("Task = %d, want 105", sys.Task)
+	if sys.Task != 104 {
+		t.Errorf("Task = %d, want 104", sys.Task)
 	}
 	if sys.Opcode != 0 {
 		t.Errorf("Opcode = %d, want 0", sys.Opcode)
@@ -159,103 +171,85 @@ func TestEventFromNode_RealFixtureUserData(t *testing.T) {
 	if sys.Keywords != wantKeywords {
 		t.Errorf("Keywords = %#x, want %#x", sys.Keywords, wantKeywords)
 	}
-	wantTime, err := time.Parse(time.RFC3339Nano, "2012-03-14T04:17:43.3545627Z")
+	wantTime, err := time.Parse(time.RFC3339Nano, "2026-07-16T01:38:33.7110047Z")
 	if err != nil {
 		t.Fatalf("parsing want time: %v", err)
 	}
 	if !sys.TimeCreated.Equal(wantTime) {
 		t.Errorf("TimeCreated = %v, want %v", sys.TimeCreated, wantTime)
 	}
-	if sys.EventRecordID != 12049 {
-		t.Errorf("EventRecordID = %d, want 12049", sys.EventRecordID)
+	if sys.EventRecordID != 29910 {
+		t.Errorf("EventRecordID = %d, want 29910", sys.EventRecordID)
 	}
 	if sys.ActivityID != "" {
 		t.Errorf("ActivityID = %q, want empty — record 1's <Correlation/> is empty", sys.ActivityID)
 	}
-	if sys.ProcessID != 820 {
-		t.Errorf("ProcessID = %d, want 820", sys.ProcessID)
+	if sys.ProcessID != 1328 {
+		t.Errorf("ProcessID = %d, want 1328", sys.ProcessID)
 	}
-	if sys.ThreadID != 2868 {
-		t.Errorf("ThreadID = %d, want 2868", sys.ThreadID)
+	if sys.ThreadID != 4516 {
+		t.Errorf("ThreadID = %d, want 4516", sys.ThreadID)
 	}
 	if sys.Channel != "System" {
 		t.Errorf("Channel = %q, want %q", sys.Channel, "System")
 	}
-	if sys.Computer != "WKS-WIN764BITB.shieldbase.local" {
+	if sys.Computer != "EC2AMAZ-ETN574G" {
 		t.Errorf("Computer = %q", sys.Computer)
 	}
-	if sys.UserID != "" {
-		t.Errorf("UserID = %q, want empty — record 1's <Security/> is empty", sys.UserID)
+	if sys.UserID != "S-1-5-21-875595685-4085717449-396137586-500" {
+		t.Errorf("UserID = %q", sys.UserID)
 	}
+
 	if len(ev.EventData) != 0 {
-		t.Errorf("EventData = %+v, want none — record 1 uses UserData, not EventData", ev.EventData)
-	}
-	if !ev.Binary.IsAbsent() {
-		t.Errorf("Binary = %+v, want absent — record 1 has no <Binary>", ev.Binary)
+		t.Errorf("EventData has %d entries, want 0 — record 1 uses UserData", len(ev.EventData))
 	}
 	if ev.UserData == nil {
-		t.Fatal("UserData is nil")
+		t.Fatal("UserData is nil, want the <LogFileCleared> element")
 	}
-	if ev.UserData.Name != "AutoBackup" {
-		t.Fatalf("UserData.Name = %q, want %q — the <UserData> wrapper itself must be unwrapped", ev.UserData.Name, "AutoBackup")
+	// The wrapper must have been followed through to its real content.
+	if ev.UserData.Name != "LogFileCleared" {
+		t.Fatalf("UserData.Name = %q, want %q — the <UserData> wrapper was not followed to its content",
+			ev.UserData.Name, "LogFileCleared")
 	}
-	var channel, backupPath string
-	for _, c := range ev.UserData.Children {
-		switch c.Name {
-		case "Channel":
-			if c.Value != nil {
-				channel = c.Value.String()
-			}
-		case "BackupPath":
-			if c.Value != nil {
-				backupPath = c.Value.String()
-			}
+	want := []struct{ name, value string }{
+		{"SubjectUserName", "Administrator"},
+		{"SubjectDomainName", "EC2AMAZ-ETN574G"},
+		{"Channel", "System"},
+		{"BackupPath", ""},
+		{"ClientProcessId", "4040"},
+		{"ClientProcessStartKey", "26177172834092454"},
+	}
+	if len(ev.UserData.Children) != len(want) {
+		t.Fatalf("UserData has %d children, want %d", len(ev.UserData.Children), len(want))
+	}
+	for i, w := range want {
+		got := ev.UserData.Children[i]
+		if got.Name != w.name {
+			t.Errorf("UserData child %d name = %q, want %q", i, got.Name, w.name)
 		}
-	}
-	if channel != "System" {
-		t.Errorf("AutoBackup/Channel = %q, want %q", channel, "System")
-	}
-	const wantBackupPath = `C:\Windows\System32\Winevt\Logs\Archive-System-2012-03-14-04-17-39-932.evtx`
-	if backupPath != wantBackupPath {
-		t.Errorf("AutoBackup/BackupPath = %q, want %q", backupPath, wantBackupPath)
+		if got.Value == nil {
+			if w.value != "" {
+				t.Errorf("UserData child %d (%s) has no value, want %q", i, w.name, w.value)
+			}
+			continue
+		}
+		if got.Value.String() != w.value {
+			t.Errorf("UserData child %d (%s) = %q, want %q", i, w.name, got.Value.String(), w.value)
+		}
 	}
 }
 
-// TestEventFromNode_RealFixtureEventData decodes testdata/system.evtx's
-// second record (ground-truthed by RECORD 2 in
-// testdata/system-expected-windows.xml, EventRecordID 12050), and — like
-// TestEventFromNode_RealFixtureUserData — checks every System field against
-// the golden file's own values (fix round 1, Finding 3).
-//
-// This record's <EventData> is not a child element of <Event> at all — it IS
-// <Event>'s own bare substitution value (see setElementValue's doc comment in
-// binxml_decode.go), so root.child("EventData") finds nothing and
-// eventFromNode's fallback must resolve it through Event's own Value instead.
-// It also carries a trailing <Binary> element that is not a <Data>; fix round
-// 1's Finding 2 gives that its own field on Event rather than dropping it —
-// this test pins the fix and the <Provider EventSourceName='...'> Finding 1
-// added.
+// TestEventFromNode_RealFixtureEventData checks record 4, whose <EventData> is
+// not a child element of <Event> at all — it IS <Event>'s own bare
+// substitution value, so root.child("EventData") finds nothing and
+// eventFromNode must resolve it through Event's own Value instead. The record
+// also carries a trailing <Binary> that is not a <Data>, and a
+// <Provider EventSourceName='...'> attribute; both have their own field on
+// Event rather than being dropped.
 func TestEventFromNode_RealFixtureEventData(t *testing.T) {
-	chunk := readFixtureChunk(t, 0)
-	recOff := evtxChunkHeaderSize
-	size := int(le32(chunk[recOff+4 : recOff+8]))
-	recOff += size // skip record 1
-
-	size = int(le32(chunk[recOff+4 : recOff+8]))
-	payloadOff := recOff + 24
-	payloadLen := size - 24 - 4
-
-	cache := newTemplateCache(chunk)
-	root, err := decodeRecordBinXML(cache, payloadOff, payloadLen)
-	if err != nil {
-		t.Fatalf("decodeRecordBinXML: %v", err)
-	}
-	ev, err := eventFromNode(root)
-	if err != nil {
-		t.Fatalf("eventFromNode: %v", err)
-	}
-
+	ev := nthEvent(t, 4)
 	sys := ev.System
+
 	if sys.Provider.Name != "Service Control Manager" {
 		t.Errorf("Provider.Name = %q", sys.Provider.Name)
 	}
@@ -287,53 +281,56 @@ func TestEventFromNode_RealFixtureEventData(t *testing.T) {
 	if sys.Keywords != wantKeywords {
 		t.Errorf("Keywords = %#x, want %#x", sys.Keywords, wantKeywords)
 	}
-	wantTime, err := time.Parse(time.RFC3339Nano, "2012-03-14T04:17:38.2763402Z")
+	wantTime, err := time.Parse(time.RFC3339Nano, "2026-07-16T01:38:33.0418309Z")
 	if err != nil {
 		t.Fatalf("parsing want time: %v", err)
 	}
 	if !sys.TimeCreated.Equal(wantTime) {
 		t.Errorf("TimeCreated = %v, want %v", sys.TimeCreated, wantTime)
 	}
-	if sys.EventRecordID != 12050 {
-		t.Errorf("EventRecordID = %d, want 12050", sys.EventRecordID)
+	if sys.EventRecordID != 29913 {
+		t.Errorf("EventRecordID = %d, want 29913", sys.EventRecordID)
 	}
 	if sys.ActivityID != "" {
-		t.Errorf("ActivityID = %q, want empty — record 2's <Correlation/> is empty", sys.ActivityID)
+		t.Errorf("ActivityID = %q, want empty — record 4's <Correlation/> is empty", sys.ActivityID)
 	}
-	if sys.ProcessID != 548 {
-		t.Errorf("ProcessID = %d, want 548", sys.ProcessID)
+	if sys.ProcessID != 708 {
+		t.Errorf("ProcessID = %d, want 708", sys.ProcessID)
 	}
-	if sys.ThreadID != 1340 {
-		t.Errorf("ThreadID = %d, want 1340", sys.ThreadID)
+	if sys.ThreadID != 4968 {
+		t.Errorf("ThreadID = %d, want 4968", sys.ThreadID)
 	}
 	if sys.Channel != "System" {
 		t.Errorf("Channel = %q, want %q", sys.Channel, "System")
 	}
-	if sys.Computer != "WKS-WIN764BITB.shieldbase.local" {
+	if sys.Computer != "EC2AMAZ-ETN574G" {
 		t.Errorf("Computer = %q", sys.Computer)
 	}
 	if sys.UserID != "" {
-		t.Errorf("UserID = %q, want empty — record 2's <Security/> is empty", sys.UserID)
+		t.Errorf("UserID = %q, want empty — record 4 has no <Security UserID>", sys.UserID)
 	}
 	if ev.UserData != nil {
-		t.Errorf("UserData = %+v, want nil — record 2 uses EventData, not UserData", ev.UserData)
+		t.Errorf("UserData = %+v, want nil — record 4 uses EventData", ev.UserData)
 	}
+
 	if len(ev.EventData) != 2 {
-		t.Fatalf("EventData has %d entries, want 2 (the trailing <Binary> is not a <Data>): %+v", len(ev.EventData), ev.EventData)
+		t.Fatalf("EventData has %d entries, want 2 (the trailing <Binary> is not a <Data>): %+v",
+			len(ev.EventData), ev.EventData)
 	}
-	if ev.EventData[0].Name != "param1" || ev.EventData[0].Value.String() != "Windows Modules Installer" {
+	if ev.EventData[0].Name != "param1" || ev.EventData[0].Value.String() != "AppX Deployment Service (AppXSVC)" {
 		t.Errorf("EventData[0] = %+v", ev.EventData[0])
 	}
-	if ev.EventData[1].Name != "param2" || ev.EventData[1].Value.String() != "stopped" {
+	if ev.EventData[1].Name != "param2" || ev.EventData[1].Value.String() != "running" {
 		t.Errorf("EventData[1] = %+v", ev.EventData[1])
 	}
 	if ev.Binary.IsAbsent() {
 		t.Fatal("Binary is absent, want the trailing <Binary> element's value")
 	}
-	const wantBinaryHex = "540072007500730074006500640049006e007300740061006c006c00650072002f0031000000"
+	// "AppXSvc/4" as UTF-16LE with a terminator. ToXml() renders Binary as
+	// uppercase hex, this library's String() as lowercase — same bytes.
+	const wantBinaryHex = "41007000700058005300760063002f0034000000"
 	if got := strings.ToLower(ev.Binary.String()); got != wantBinaryHex {
-		t.Errorf("Binary = %s, want %s (case-insensitive; ToXml() renders Binary as uppercase hex, "+
-			"our own String() renders lowercase — same bytes)", got, wantBinaryHex)
+		t.Errorf("Binary = %s, want %s", got, wantBinaryHex)
 	}
 }
 
