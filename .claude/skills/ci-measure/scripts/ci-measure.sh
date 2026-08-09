@@ -47,7 +47,7 @@ done
 
 echo "--- measurements ---"
 gh run view "$run_id" --repo "$REPO" --log 2>/dev/null \
-  | grep -E 'STAGE1 OPEN:|STAGE2 READ:|PROP ToXml|GETWINEVENT|OK: [0-9]+ records|ObjectName count|wrote artifacts/' \
+  | grep -E 'STAGE1 OPEN:|STAGE2 READ:|PROP |GETWINEVENT|EXTSTATUS|WIN32ERROR|OK: [0-9]+ records|ObjectName count|wrote artifacts/|FAIL' \
   | grep -v 'Write-Host' \
   | sed 's/.*[0-9]Z //'
 
