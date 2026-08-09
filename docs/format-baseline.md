@@ -44,6 +44,7 @@ baseline the rest of the release compares against.**
 | 16 | `07f81f0` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to row 15 (Task 9a touched no fixture or `binxml.go`/`evtx.go` code; this row is a regression check, not a fix attempt — see "Task 9a" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 15 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two new fixtures measured alongside this one — see "Task 9a" below |
 | 17 | `92b5a3f` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-16 (Task 9b touched no fixture, `binxml.go`, or `evtx.go` code; this row is a regression check — three new hybrid fixtures measured alongside it, not fixture-generator changes — see "Task 9b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 16 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Three hybrid fixtures measured alongside this one — see "Task 9b" below |
 | 18 | `69ca68a` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-17, confirmed two ways (empty `git diff --stat` on `binxml.go`/`evtx.go`/`cmd/gen-fixture/main.go`, and a matching SHA-256 hash of the fixture bytes before/after this task's change — Task 9c touched no fixture or production encoder code; four new ladder-rung fixtures measured alongside it — see "Task 9c" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 17 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Four ladder-rung fixtures measured alongside this one — see "Task 9c" below |
+| 19 | `084ab01` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-18 (Task 9d touched no fixture or production encoder code — `binxml.go`/`evtx.go`/`binformat.go`/`binxml_reader.go`/`chunkhash.go`/`errors.go`/`cmd/gen-fixture/main.go` all empty in `git diff --stat`; two new secondary-rung fixtures measured alongside it — see "Task 9d" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 18 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two secondary-rung fixtures measured alongside this one, plus a decisive experiment that could not be constructed — see "Task 9d" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2513,3 +2514,180 @@ Full verbatim job output, method detail, and concerns (including F8's
 `xmlns` and the outer preamble being held fixed rather than re-varied by
 this task) are in
 `.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9c-report.md`.
+
+## Task 9d: the decisive all-literal experiment (not buildable), and two secondary rungs
+
+Row 19 above is this task's regression check (main fixture, unchanged — no
+code in `binxml.go`/`evtx.go`/`binformat.go`/`binxml_reader.go`/
+`chunkhash.go`/`errors.go`/`cmd/gen-fixture/main.go` touched, confirmed by
+an empty `git diff --stat`). Task 9c found no pass/fail boundary anywhere
+in a shrink ladder from `<System>` alone (18 substitutions) up to the full
+42-substitution control; the remaining shared surface was named as
+`<System>`'s own substitution-*value* encoding — types, widths, and the
+`OptionalSubstitution` mechanism itself.
+
+**The decisive experiment — a record with zero substitutions, every value
+written as a literal — could not be built**, and this is a structural fact
+about BinXML, not a gap in effort. MS-EVEN6's own ABNF grammar (fetched
+directly from `learn.microsoft.com/.../ms-even6/c73573ae-...`, "[MS-EVEN6]:
+BinXml") defines a literal value with exactly one production:
+
+```abnf
+ValueText = ValueTextToken StringType LengthPrefixedUnicodeString
+```
+
+`StringType` is hardcoded into the grammar, not a variable the encoder
+selects — there is no alternative `ValueText` production for any of the
+other 20+ `ValueType`s the same grammar defines (`Int8Type` through
+`HexInt64ArrayType`); those are reachable **only** through
+`TemplateInstanceData` (the substitution array), via
+`NormalSubstitution`/`OptionalSubstitution`, never via `ValueText`. Cross-
+checked against `libevtx`'s own independent documentation ("the value text
+... consists of ... `0x01` (StringType)") — same conclusion from a second,
+independently-authored source. Then **empirically confirmed against
+`testdata/system.evtx` itself**, per this task's own instruction to check
+the real file before writing a literal: a scratch (uncommitted,
+investigative) recursive-descent BinXML decoder walked two full,
+self-contained real templates in chunk 0 (record 0, `EventRecordID 12049`,
+plus its nested `<AutoBackup>` sub-template; and the record at
+chunk-relative offset 6984, `EventRecordID 12060`, plus its nested
+`<EventData>` sub-template — both boundaries self-validated by an exact
+match between the walked length and the template's own declared
+`data_length`, the same name_offset/attr_list_size genuineness check
+`datasize_test.go`/`attrlist_test.go` already use against production's own
+output). Result: **15/15 `ValueText` (literal) occurrences found are type
+`0x01` (StringType) — zero exceptions** — and **35/35 `Normal`/
+`OptionalSubstitution` tokens found cover every non-string typed field the
+real file has, never a literal**. Real Windows' own encoder, sampled
+across two event types and three template nesting levels (including a
+`BinXmlType`-substituted nested `TemplateInstance` — itself reached via
+substitution, not inlined, corroborating the grammar reading a second
+way), never once writes a literal for anything but a string.
+
+Every one of go-evtx's own typed-scalar fields — `EventID`, `Level`,
+`SystemTime`, `Version`, `Task`, `Opcode`, `Keywords`, `EventRecordID`,
+`EventID/@Qualifiers` — has no literal form to fall back to. Per this
+task's own explicit instruction ("if the all-literal variant cannot be
+built ... say so and explain why rather than approximating it"), no
+stringified-typed-values substitute was built.
+
+**What this eliminates:** not a fresh pass/fail measurement, but an entire
+category of hypothesis — "the encoder should not be using substitutions
+here" is incoherent for a typed-scalar-bearing record, since real
+Windows-authored files are structurally incapable of avoiding the
+mechanism for that content and render correctly anyway (and task 8c
+already confirms go-evtx's own substitution array is well-formed enough
+for `.NET`'s `EventLogReader.ReadEvent()` to read all 403 records without
+complaint). What remains live is narrower: not *whether* substitutions are
+used, but *which token* is used, and what else is wrong independent of
+substitutions entirely — exactly what this task's two secondary rungs
+test.
+
+**Secondary rung A (`VariantAllNormalSubstitution`, `binxml_variants.go`,
+new `cmd/gen-ladder-all-normal-sub` + `generate-ladder-all-normal-sub`/
+`get-winevent-ladder-all-normal-sub` jobs):** every `OptionalSubstitution`
+(`0x0E`) token `<System>` uses (task 8b/F12c, task 8c/F13a — 13
+occurrences) reverted to `NormalSubstitution` (`0x0D`), every tied
+`dependency_id` reset to the sentinel (`0xffff`) — the pre-F12c/F13a
+shape, at the control's own scale (`<System>` + 12 substituted-name `Data`
+pairs). Isolates `0x0E` as its own variable for the first time this
+release; every prior measurement changed it alongside something else.
+
+**Secondary rung B (`VariantNoXmlns`, new `cmd/gen-ladder-no-xmlns` +
+`generate-ladder-no-xmlns`/`python-evtx-ladder-no-xmlns`/
+`get-winevent-ladder-no-xmlns` jobs):** `<Event>`'s `xmlns` attribute (F8,
+task 8) removed entirely — a plain no-attributes element, not an emptied
+attribute list. Given its own fixture and its own jobs, with the Windows
+job depending only on the `generate` job (never on the `python-evtx` job),
+so the predicted Linux failure cannot skip or gate the independent Windows
+measurement — the same wiring mistake Task 1's own baseline harness made
+and fixed early in this release. New script
+`scripts/verify_python_evtx_no_xmlns.py` **asserts** the prediction
+(namespaced query finds 0 matches, plain query finds 1) rather than merely
+describing it.
+
+Both variants reuse `binxml.go`'s own low-level token writers via a
+function-value swap (`writeContentSub`/`writeAttrSub`/`depIDFor` in
+`writeVariantSystemBlock`) — not a parallel reimplementation.
+`binxml_variants_test.go` adds an **exact recursive-descent walker**
+(`walkVariantBody`) after the file's existing byte-scan structural-
+consistency test produced one coincidental false positive on
+`VariantNoXmlns`'s own payload (a stray `NameNode` byte sequence,
+misaligned by `xmlns`'s removal, happened to look like a plausible
+substitution token) — the new walker consumes exactly the fields each
+token format defines and cannot mistake payload bytes for a token it does
+not structurally parse as one.
+
+Commit `084ab01` (`test(format): task 9d - decisive all-literal experiment
+and two secondary rungs`), pushed to `feat/v0.7.0-format-correctness`
+(`82583a1..084ab01`).
+
+**Run selection, by head SHA:**
+
+```console
+$ git rev-parse HEAD
+084ab0198e25ccaad8d7653351832c2e85830d29
+```
+
+`Format Verify` run [`31291222895`](https://github.com/fjacquet/go-evtx/actions/runs/31291222895),
+`CI` run [`31291223118`](https://github.com/fjacquet/go-evtx/actions/runs/31291223118)
+— both confirmed at head_sha `084ab01` via the API. `CI`: **success**.
+`Format Verify`: overall **failure** (expected — every `get-winevent-*` job
+carrying a go-evtx-authored record fails by design; `get-winevent-splice`
+and `get-winevent-hybrid-preamble-ours`, the two jobs carrying real
+Windows-authored content, both still succeed, unchanged from prior rows).
+
+### Result: both secondary rungs fail identically; no new boundary
+
+```text
+ALLNORMALSUB STAGE1 OPEN: ok
+ALLNORMALSUB STAGE2 READ: ok, 1 records
+ALLNORMALSUB PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+ALLNORMALSUB GETWINEVENT default: FAILED - The data is invalid.
+ALLNORMALSUB GETWINEVENT -Oldest: FAILED - The data is invalid.
+
+NOXMLNS STAGE1 OPEN: ok
+NOXMLNS STAGE2 READ: ok, 1 records
+NOXMLNS PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+NOXMLNS GETWINEVENT default: FAILED - The data is invalid.
+NOXMLNS GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+`python-evtx-ladder-no-xmlns`, verbatim: `namespaced query (.//e:Data): 0
+match(es)` / `plain query (.//Data, no namespace): 1 match(es)` / `OK:
+fixture parses, plain query finds ObjectName, namespaced query finds
+nothing -- prediction confirmed`.
+
+**Rung A is a clean null result**: the `0x0E`/`0x0D` token distinction and
+the real `dependency_id` convention, isolated as their own variable for
+the first time, change nothing. **Rung B independently confirms F8's
+necessity from the removal direction** (python-evtx's namespaced query
+goes from 1 match to 0, mirroring task 8's original addition) but adds no
+new information about `Get-WinEvent`/`ToXml`, which was already known to
+fail both with and without `xmlns`.
+
+**No regression.** `generate`: `wrote artifacts/generated.evtx (403
+records, max ObjectName 31236 runes)` — byte-identical to row 18.
+`python-evtx-differential`: `OK: 403 records, all chunk checksums verify`
+— stayed green. `get-winevent`: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403
+records` (the release's hard-won win, held) / `PROP ToXml FAILED` / both
+`GETWINEVENT` orderings `FAILED` — `"The data is invalid."` — identical in
+every respect to row 18.
+
+**Where this leaves the search.** Combined with 17 prior confirmed-and-
+fixed divergences and task 9c's own ladder (no size boundary from
+`<System>` alone to the full control), the remaining candidate surface is
+now: something common to *every* rung ever measured, including the
+smallest — either an exact type/width mismatch inside `<System>`'s own
+substitution values not yet individually named, or the fact that **no
+go-evtx fixture in this entire release has ever produced a genuinely
+cache-referenced `TemplateInstance`** — every one of go-evtx's own records
+defines its template inline (self-referencing `template_offset`), where
+every real Windows chunk this task decoded shares one template definition
+across many records via a real offset back-reference. This was observed
+along the way, not tested; named here as the most concrete untried lead.
+
+Full verbatim job output, method detail (including the MS-EVEN6/libyal
+citations and the scratch decoder's own self-validation), and concerns are
+in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9d-report.md`.
