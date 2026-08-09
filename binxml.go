@@ -394,6 +394,28 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 	// 5. Substitution array.
 	writeSubstitutionArray(out, subs)
 
+	// 6. Fragment EOF token (W1), then zero padding so the on-disk record —
+	// 24-byte header + this payload + the 4-byte trailing size copy — is a
+	// multiple of 8 (W2/F2).
+	//
+	// Both are measured absolutes in real output: every one of 37 364 real
+	// records is 8-aligned in both size and offset, and every one carries 1
+	// to 8 trailing bytes after its substitution array, never zero.
+	//
+	// These were implemented and reverted twice before. What blocked them was
+	// not the trailing bytes themselves but F18: while go-evtx wrote a
+	// zero-length value as {size 0, type String}, Windows' reader rejected
+	// any record that also carried trailing bytes. With F18 in place all
+	// three ship together — measured on Windows, 400 records read, ToXml
+	// renders, and both Get-WinEvent orderings enumerate.
+	//
+	// The padding's content is this writer's own choice: real Windows padding
+	// is measured non-zero, and a conforming reader checks only its length.
+	out.WriteByte(0x00)
+	for (evtxRecordHeaderSize+out.Len()+4)%8 != 0 {
+		out.WriteByte(0x00)
+	}
+
 	return binXMLResult{payload: out.Bytes(), names: names, templates: templates}
 }
 
