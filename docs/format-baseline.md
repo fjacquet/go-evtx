@@ -36,6 +36,7 @@ baseline the rest of the release compares against.**
 | 10 | `3b3f575` | 403 records, 22 chunks, max ObjectName **31573** runes — NOT byte-identical to rows 6-9 (F8 adds 139 bytes to `<Event>`'s own encoding — the xmlns attribute plus its attr_list_size — pushing the fixture from 21 to 22 chunks and settling `largestAccepted()` lower; see "Task 8" below) | **PASS: `OK: 403 records, all chunk checksums verify`** | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-9 |
 | 11 | `deefe13` | 403 records, 26 chunks, max ObjectName **31248** runes — NOT byte-identical to row 10 (Task 8b/F12 adds 11 substitution slots and 9 `<System>` children to every record's encoding — see "Task 8b" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green — the regression guard this task's brief named held) | FAIL: **STAGE1 OPEN: ok** / **STAGE2 READ: FAILED after 0 records**, `"The data is invalid."` — identical stage split and wording to rows 5-10 |
 | 12 | `2e86005` | 403 records, 27 chunks, max ObjectName **31208** runes — NOT byte-identical to row 11 (Task 8c/F13 adds 2 substitution slots and `<Provider>`'s second attribute plus `<EventID>`'s new attribute to every record's encoding — see "Task 8c" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **BREAKTHROUGH: STAGE1 OPEN: ok / STAGE2 READ: ok, 403 records** — the first non-zero `STAGE2 READ` in this entire table. `Get-WinEvent`'s own older assertion (`$events = @(Get-WinEvent ...)`) still throws `"The data is invalid."` on the same file — see "Task 8c" below |
+| 13 | `72f63a0` | 403 records, 27 chunks, max ObjectName **31208** runes — byte-identical generator output to row 12 (`cmd/gen-fixture/main.go` untouched by this task or its intermediate commit `bdc3ec1`) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records` unchanged. **`GETWINEVENT default` and `GETWINEVENT -Oldest` BOTH FAILED, identical `"The data is invalid."`** — kills the reverse-iteration-metadata hypothesis outright, not just deprioritizes it. Follow-up probes in the same job: `LOGINFO` (`EventLogSession.GetLogInformation()`) ok, `records=403 oldest=1 full=False`; six typed record properties (`Id`, `Level`, `ProviderName`, `TimeCreated`, `RecordId`, `MachineName`) all read without throwing but print **empty**; **`PROP ToXml` FAILED with the identical `"The data is invalid."` string** — the same exception both `Get-WinEvent` orderings throw. Narrows the defect specifically to **XML rendering of a record's content**, not enumeration and not file-level metadata — see "Task 8d" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -1896,3 +1897,105 @@ combination of all three, applied on top of the fourteen prior fixes, is
 what produced the first non-zero `STAGE2 READ` in this release. Isolating
 which sub-fix (or combination) is load-bearing would require a splice
 experiment this task did not run.
+
+## Task 8d: `-Oldest` experiment, and where `Get-WinEvent` actually fails
+
+Full detail is in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-8d-report.md`;
+the essential facts are repeated here so this document stays
+self-contained, per the same convention row 12/"Task 8c" above follows.
+
+**Change.** `.github/workflows/format-verify.yml`'s `get-winevent` job,
+which already established (row 12) that `Get-WinEvent`'s own assertion
+still throws even though `EventLogReader.ReadEvent()` reads all 403
+records forward, gained two rounds of diagnostics, in two commits:
+
+- `bdc3ec1`: splits the existing `Get-WinEvent` assertion into two
+  independent orderings — default (newest-first) and `-Oldest` — each
+  reported on its own `GETWINEVENT` line, testing the leading hypothesis
+  that reverse-iteration metadata
+  (`LastEventRecordNumber`/`LastEventRecordDataOffset`/`LastChunkNumber`/
+  `NextRecordIdentifier`) was the defect.
+- `72f63a0`: adds two more non-fatal probes to the same job — `LOGINFO`
+  (`EventLogSession.GetLogInformation()`, log-header-level metadata
+  `EvtNext`/`ReadEvent()` never touches) and `PROP` (touches each of
+  `Id`/`Level`/`ProviderName`/`TimeCreated`/`RecordId`/`MachineName`/
+  `ToXml()` individually on the same record object `STAGE2` already
+  captured).
+
+Neither commit touches Go code, `go.mod`, or `cmd/gen-fixture/main.go` —
+confirmed by `git diff 2e86005 72f63a0 -- '*.go' go.mod
+cmd/gen-fixture/main.go` being empty — so both are directly comparable to
+row 12's fixture.
+
+**Run selection, by head SHA:**
+
+```console
+$ gh api repos/fjacquet/go-evtx/actions/runs/31286108697 --jq '.head_sha'   # Format Verify, bdc3ec1
+bdc3ec1811478c6bf1b3dfa5f97bc6c9bb964428
+$ gh api repos/fjacquet/go-evtx/actions/runs/31286256103 --jq '.head_sha'   # Format Verify, 72f63a0
+72f63a05efadab09d1ea33e629b0aa91ee08b060
+```
+
+**Fixture identity, confirmed from the `generate` job log at both
+heads:** `wrote artifacts/generated.evtx (403 records, max ObjectName
+31208 runes)`, 27 chunks — byte-identical to row 12.
+
+python-evtx differential — unchanged, still green:
+
+```text
+OK: 403 records, all chunk checksums verify
+```
+
+**`get-winevent` — verbatim, from run `31286256103` (head `72f63a0`)::**
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: ok, 403 records
+LOGINFO: ok - records=403 oldest=1 full=False
+PROP Id ok: 
+PROP Level ok: 
+PROP ProviderName ok: 
+PROP TimeCreated ok: 
+PROP RecordId ok: 
+PROP MachineName ok: 
+PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+GETWINEVENT default: FAILED - The data is invalid.
+GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+Reproduced identically (same wording, same fixture) at run `31286108697`
+(head `bdc3ec1`) for the `GETWINEVENT` lines, before the `LOGINFO`/`PROP`
+probes existed.
+
+### Reading this result
+
+**The `-Oldest` hypothesis is closed, not just deprioritized.** Both
+orderings produce the byte-identical exception type and message on the
+byte-identical file — reverse-iteration metadata was never the variable
+that mattered. This eliminates ordering direction as a candidate outright.
+
+**The extended `LOGINFO`/`PROP` probes narrow the defect further, past
+where row 12 left it.** Three facts, each measured directly, not inferred:
+
+1. `EventLogSession.GetLogInformation()` succeeds and reports the correct
+   record count — file-header-level metadata is not what throws.
+2. Six typed properties on the very `EventRecord` object `ReadEvent()`
+   already returned all read without throwing, but every one is **empty**
+   — including `ProviderName`, which the fixture's `<System><Provider
+   Name="...">` gives a real, non-empty value. Reported as observed, not
+   explained: consistent with (but not proof of) the property getters
+   silently swallowing an internal failure.
+3. **`EventRecord.ToXml()`, called directly on the same record object,
+   throws the identical `"The data is invalid."` string both
+   `Get-WinEvent` orderings throw.**
+
+**What this narrows.** `STAGE2 READ: ok, 403 records` proves only that the
+low-level record-fetch path (`EvtNext`) succeeds. It does not prove any
+record's content can be rendered. `ToXml()` throwing the exact string
+`Get-WinEvent` throws places the defect specifically in **XML rendering of
+a record's content** — BinXML template-to-XML resolution via the
+substitution array — not in enumeration and not in file-level metadata.
+This does not by itself identify which substitution-array content
+triggers the render failure; see "F14" below for the investigation that
+followed from this lead.
