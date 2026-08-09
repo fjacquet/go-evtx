@@ -258,20 +258,32 @@ func decodeBinXMLFragment(cache *templateCache, chunkOff, length int, top bool, 
 	// testdata/system.evtx: the byte right after the substitution array is
 	// always the EOF token; the padding after it is never zeroed, so only its
 	// length is checked, never its content.
+	//
+	// One tolerated exception, and it is go-evtx's own doing: this writer stops
+	// at the substitution array and emits neither the EOF token nor the
+	// padding (tracked as #38/#39 — the writer is non-conformant, this check is
+	// not wrong). Emitting both WAS implemented and then REVERTED: it regressed
+	// Windows' own EventLogReader on our 403-record fixture from reading all of
+	// them to failing on record 0, measured in CI and independently on the VM,
+	// while single-record files kept working. Until that is understood, a
+	// top-level payload ending exactly at the substitution array is accepted.
+	// Anything present after it is still validated in full.
 	rem := len(payload) - (pos + consumed)
-	if rem < 1 || payload[pos+consumed] != tokEOF {
+	switch {
+	case rem == 0 && top:
+		// go-evtx's own output. Accepted; see above.
+	case rem < 1 || payload[pos+consumed] != tokEOF:
 		return nil, fmt.Errorf(
 			"go_evtx: fragment at chunk offset %d: expected the EOF token at chunk offset %d, found %d trailing byte(s)",
 			chunkOff, chunkOff+pos+consumed, rem)
-	}
-	if top {
+	case top:
 		if rem-1 > 7 || (28+pos+consumed+rem)%8 != 0 {
 			return nil, fmt.Errorf(
 				"go_evtx: record payload at chunk offset %d: %d padding byte(s) after the EOF token do not "+
 					"8-align the on-disk record (24-byte header + payload + 4-byte size copy)",
 				chunkOff, rem-1)
 		}
-	} else if rem != 1 {
+	case rem != 1:
 		return nil, fmt.Errorf(
 			"go_evtx: nested fragment at chunk offset %d: %d byte(s) after the EOF token; "+
 				"nested fragments carry no padding", chunkOff, rem-1)

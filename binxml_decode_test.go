@@ -270,15 +270,14 @@ func TestDecodeRecordBinXML_NegativeCases(t *testing.T) {
 				return payload
 			},
 		},
-		{
-			name: "truncated right after the substitution array: no EOF token",
-			mutate: func(t *testing.T, payload []byte) []byte {
-				// buildSimpleRecord appends [EOF][4 bytes padding] after the
-				// substitution array; drop all 5 so consumption ends exactly at
-				// the array with nothing after it (C4's rem < 1 case).
-				return payload[:len(payload)-5]
-			},
-		},
+		// A top-level payload ending exactly at the substitution array used to
+		// be tested here as an error. It is now accepted: go-evtx's own writer
+		// produces exactly that shape, and making the writer conformant was
+		// implemented and then reverted because it regressed Windows' own
+		// EventLogReader from 403 records to failing on record 0. See the
+		// tolerance comment in decodeBinXMLFragment, and #38/#39. The rem < 1
+		// rejection still applies to every nested fragment, which the
+		// "nested fragment with trailing bytes" case below covers.
 		{
 			name: "EOF token present but wrong value",
 			mutate: func(t *testing.T, payload []byte) []byte {
