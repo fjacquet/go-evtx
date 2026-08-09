@@ -27,6 +27,8 @@ golangci-lint run
 
 This is a single-package Go library (`package evtx`) with zero external dependencies. It reads and writes Windows Event Log `.evtx` binary files without any Windows dependencies.
 
+**Format reference:** [`docs/evtx-format-notes.md`](docs/evtx-format-notes.md) is the durable record of what this project has verified about the EVTX/BinXML binary format — source assessments, measured vs. read-from-source claims for every field this codebase encodes, a table of every defect found and fixed in v0.7.0, and what remains unknown (notably the `ToXml`/`Get-WinEvent` vs. `EventLogReader.ReadEvent()` gap). Read it before changing anything in `binformat.go`, `binxml.go`, `binxml_reader.go`, or `chunkhash.go`.
+
 **File layout:**
 
 | File | Purpose |
