@@ -407,3 +407,313 @@ jobs:
               if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
               throw "Get-WinEvent ordering(s) failed on spliced fixture: $($failures -join '; ')"
           }
+
+  # ---------------------------------------------------------------------
+  # Task 9b hybrids: task-9a localised the defect to buildBinXML/
+  # buildTemplateBody's own encoding (binxml.go), but not to which byte(s).
+  # These three hybrids bisect by construction -- each is a payload built
+  # from the two CI-proven payloads task-9a already produced (the real
+  # testdata/system.evtx chunk 0 record 0 BinXML that Get-WinEvent accepts,
+  # and go-evtx's own minimal-fixture BinXML that it rejects), with one
+  # structural region swapped between them and every position-dependent
+  # offset explicitly recomputed (see each cmd/gen-hybrid-*/main.go's own
+  # doc comment for the exact offset-safety argument). Added beside the
+  # existing jobs, which are untouched.
+  #
+  # Hybrid 1 (preamble-ours) and Hybrid 2 (preamble-real): cut point 1, the
+  # brief's "fixed preamble" -- swap only the TemplateInstanceNode's
+  # template_id and the TemplateNode header's GUID (pure identity/cache
+  # metadata, referenced by nothing else in either payload, so this needs
+  # no offset rewriting at all -- see gen-hybrid-preamble-ours's doc
+  # comment). Hybrid 1 takes the real, already-passing record and swaps in
+  # go-evtx's own trivial ID values; Hybrid 2 takes go-evtx's own failing
+  # record and swaps in the real file's ID values. Symmetric, both cheap.
+  #
+  # Hybrid 3 (selfclose): cut point 3, "individual <System> children" --
+  # a structural walk of the real record found its <System> block has the
+  # SAME 14 children in the SAME order with the SAME declared substitution
+  # types as go-evtx's own, and exactly one measured divergence: 5
+  # attribute-only, no-content children (Provider, TimeCreated,
+  # Correlation, Execution, Security) close via CloseEmptyElementTag
+  # (0x03, no separate EndElementTag) in the real file, but via
+  # CloseStartElementTag (0x02) plus a separate EndElementTag in go-evtx's
+  # own output -- a fact attrlist_test.go's own comment already named
+  # ("go-evtx never emits the self-closing CloseEmptyElementTag") but never
+  # tested for effect. This hybrid rewrites only those 5 elements' closing
+  # bytes and recomputes every data_size/attr_list_size/name_offset/
+  # data_length field the 5-byte-shorter payload implies, self-validated
+  # by re-parsing before it is ever written to a file (see
+  # cmd/gen-hybrid-selfclose/main.go's doc comment for the full method).
+  # ---------------------------------------------------------------------
+  generate-hybrid-preamble-ours:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate hybrid (real body/subs, our preamble IDs)
+        run: |
+          mkdir -p artifacts-hybrid-preamble-ours
+          go run ./cmd/gen-hybrid-preamble-ours -out artifacts-hybrid-preamble-ours
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hybrid-preamble-ours-evtx
+          path: artifacts-hybrid-preamble-ours/
+          retention-days: 7
+
+  get-winevent-hybrid-preamble-ours:
+    needs: generate-hybrid-preamble-ours
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hybrid-preamble-ours-evtx
+          path: artifacts-hybrid-preamble-ours
+      - name: Parse hybrid (preamble-ours) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-hybrid-preamble-ours/hybrid-preamble-ours.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "H1-PREAMBLE-OURS STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "H1-PREAMBLE-OURS STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "H1-PREAMBLE-OURS STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "H1-PREAMBLE-OURS STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "H1-PREAMBLE-OURS PROP ToXml ok" }
+              catch { Write-Host "H1-PREAMBLE-OURS PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "H1-PREAMBLE-OURS PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "H1-PREAMBLE-OURS GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on hybrid-preamble-ours fixture: $($failures -join '; ')"
+          }
+
+  generate-hybrid-preamble-real:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate hybrid (our body/subs, real preamble IDs)
+        run: |
+          mkdir -p artifacts-hybrid-preamble-real
+          go run ./cmd/gen-hybrid-preamble-real -out artifacts-hybrid-preamble-real
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hybrid-preamble-real-evtx
+          path: artifacts-hybrid-preamble-real/
+          retention-days: 7
+
+  get-winevent-hybrid-preamble-real:
+    needs: generate-hybrid-preamble-real
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hybrid-preamble-real-evtx
+          path: artifacts-hybrid-preamble-real
+      - name: Parse hybrid (preamble-real) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-hybrid-preamble-real/hybrid-preamble-real.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "H2-PREAMBLE-REAL STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "H2-PREAMBLE-REAL STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "H2-PREAMBLE-REAL STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "H2-PREAMBLE-REAL STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "H2-PREAMBLE-REAL PROP ToXml ok" }
+              catch { Write-Host "H2-PREAMBLE-REAL PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "H2-PREAMBLE-REAL PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "H2-PREAMBLE-REAL GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on hybrid-preamble-real fixture: $($failures -join '; ')"
+          }
+
+  generate-hybrid-selfclose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate hybrid (5 self-closing elements, 0x03 not 0x02+0x04)
+        run: |
+          mkdir -p artifacts-hybrid-selfclose
+          go run ./cmd/gen-hybrid-selfclose -out artifacts-hybrid-selfclose
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hybrid-selfclose-evtx
+          path: artifacts-hybrid-selfclose/
+          retention-days: 7
+
+  get-winevent-hybrid-selfclose:
+    needs: generate-hybrid-selfclose
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hybrid-selfclose-evtx
+          path: artifacts-hybrid-selfclose
+      - name: Parse hybrid (selfclose) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-hybrid-selfclose/hybrid-selfclose.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "H3-SELFCLOSE STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "H3-SELFCLOSE STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "H3-SELFCLOSE STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "H3-SELFCLOSE STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "H3-SELFCLOSE PROP ToXml ok" }
+              catch { Write-Host "H3-SELFCLOSE PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "H3-SELFCLOSE PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "H3-SELFCLOSE GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "H3-SELFCLOSE GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "H3-SELFCLOSE GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "H3-SELFCLOSE GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on hybrid-selfclose fixture: $($failures -join '; ')"
+          }
