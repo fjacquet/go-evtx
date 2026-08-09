@@ -2,7 +2,11 @@
 //
 // <System> has a fixed schema and gets typed fields. <EventData> does not: its
 // <Data> children may be named or positional, names may repeat, and order
-// carries meaning — so it is an ordered slice, never a map.
+// carries meaning — so it is an ordered slice, never a map. <EventData> may
+// also end in a trailing <Binary> element that is not a <Data> at all
+// (testdata/system.evtx records 2-5); it gets its own field on Event rather
+// than being dropped. Anything inside <EventData> that is neither is skipped
+// deliberately — see the comment at that loop.
 //
 // Real Windows records (testdata/system.evtx, ground-truthed by
 // testdata/system-expected-windows.xml) wrap <EventData>/<UserData> in two
@@ -34,8 +38,9 @@ import (
 
 // Provider identifies the source of an event.
 type Provider struct {
-	Name string `json:"name,omitempty"`
-	GUID string `json:"guid,omitempty"`
+	Name            string `json:"name,omitempty"`
+	GUID            string `json:"guid,omitempty"`
+	EventSourceName string `json:"event_source_name,omitempty"`
 }
 
 // System is the fixed-schema <System> block.
@@ -70,11 +75,15 @@ type Event struct {
 	Timestamp time.Time `json:"timestamp"`
 	System    System    `json:"system"`
 	EventData []Data    `json:"event_data,omitempty"`
+	Binary    Value     `json:"binary,omitempty"` // <EventData>'s trailing <Binary>, when present
 	UserData  *Node     `json:"user_data,omitempty"`
 }
 
 // attr returns the named attribute's value, or the zero Value.
 func (n *Node) attr(name string) Value {
+	if n == nil {
+		return Value{}
+	}
 	for _, a := range n.Attributes {
 		if a.Name == name {
 			return a.Value
@@ -85,6 +94,9 @@ func (n *Node) attr(name string) Value {
 
 // child returns the first child with the given name, or nil.
 func (n *Node) child(name string) *Node {
+	if n == nil {
+		return nil
+	}
 	for i := range n.Children {
 		if n.Children[i].Name == name {
 			return &n.Children[i]
@@ -142,6 +154,7 @@ func eventFromNode(root *Node) (*Event, error) {
 		if p := sys.child("Provider"); p != nil {
 			ev.System.Provider.Name = p.attr("Name").String()
 			ev.System.Provider.GUID = p.attr("Guid").String()
+			ev.System.Provider.EventSourceName = p.attr("EventSourceName").String()
 		}
 		if e := sys.child("EventID"); e != nil {
 			ev.System.EventID = uint16(e.u64())
@@ -176,44 +189,71 @@ func eventFromNode(root *Node) (*Event, error) {
 		}
 	}
 
-	// EventData/UserData: try a literal child of <Event> first (go-evtx's own
-	// writer, and testdata/system.evtx record 1's <UserData>); fall back to
-	// <Event>'s own bare value when neither exists as a child element at all
-	// (testdata/system.evtx records 2-5's <EventData> — see the package doc
-	// comment above). contentNode resolves whichever shape was found through
-	// any nested BinXml substitution.
-	var edNode, udNode *Node
-	switch {
-	case root.child("EventData") != nil:
-		edNode = contentNode(root.child("EventData"))
-	case root.child("UserData") != nil:
-		udNode = contentNode(root.child("UserData"))
-	default:
-		if cn := contentNode(root); cn != root {
-			switch cn.Name {
-			case "EventData":
-				edNode = cn
-			case "UserData":
-				udNode = cn
-			}
-		}
-	}
+	edNode, udNode := resolveEventContent(root)
 
 	if edNode != nil {
 		for i := range edNode.Children {
 			c := &edNode.Children[i]
-			if c.Name != "Data" {
-				continue
+			switch c.Name {
+			case "Data":
+				d := Data{Name: c.attr("Name").String()}
+				if c.Value != nil {
+					d.Value = *c.Value
+				}
+				ev.EventData = append(ev.EventData, d)
+			case "Binary":
+				if c.Value != nil {
+					ev.Binary = *c.Value
+				}
+			default:
+				// Neither <Data> nor <Binary> — skipped deliberately: Event
+				// has no slot for it (Event.EventData []Data, per the
+				// design), and nothing else has been observed in the
+				// measured corpus. Not an oversight.
 			}
-			d := Data{Name: c.attr("Name").String()}
-			if c.Value != nil {
-				d.Value = *c.Value
-			}
-			ev.EventData = append(ev.EventData, d)
 		}
 	}
 	if udNode != nil {
 		ev.UserData = udNode
 	}
 	return ev, nil
+}
+
+// resolveEventContent finds root's <EventData>/<UserData> content, however it
+// is encoded — see the package doc comment above for the three shapes.
+// Either may be a literal child element of <Event>, or — no wrapping element
+// at all — <Event>'s own bare value. contentNode follows a further nested
+// BinXml substitution in either case.
+//
+// <EventData> has one fixed, known shape (<Data>/<Binary> children), so its
+// identity is checked after resolution: a literal <EventData> child whose own
+// Value resolved to something not itself named "EventData" is treated as no
+// EventData at all, rather than blindly reading child elements out of an
+// unrelated tree and calling whatever turned up "EventData" — the same check
+// the no-wrapping-element fallback below already applies. <UserData> carries
+// no such fixed shape — arbitrary XML is the entire point of it
+// (testdata/system.evtx wraps <AutoBackup>, sharing no name with <UserData>
+// at all), so once the literal <UserData> child itself is confirmed by name,
+// whatever it resolves to — <AutoBackup>, or itself when unresolved — is
+// trusted as its content; a name-equality check would reject the one real
+// case this decoder has measured.
+func resolveEventContent(root *Node) (edNode, udNode *Node) {
+	if ed := root.child("EventData"); ed != nil {
+		if cn := contentNode(ed); cn.Name == "EventData" {
+			edNode = cn
+		}
+		return edNode, nil
+	}
+	if ud := root.child("UserData"); ud != nil {
+		return nil, contentNode(ud)
+	}
+	if cn := contentNode(root); cn != root {
+		switch cn.Name {
+		case "EventData":
+			edNode = cn
+		case "UserData":
+			udNode = cn
+		}
+	}
+	return edNode, udNode
 }

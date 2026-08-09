@@ -2,7 +2,9 @@ package evtx
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 )
 
 func mustVal(t *testing.T, typ ValueType, data []byte) Value {
@@ -96,7 +98,10 @@ func TestEvent_EventDataMarshalsAsArray(t *testing.T) {
 
 // TestEventFromNode_RealFixtureUserData decodes testdata/system.evtx's first
 // record (ground-truthed by testdata/system-expected-windows.xml's RECORD 1,
-// EventRecordID 12049) and checks the assembled Event against it.
+// EventRecordID 12049) and checks the assembled Event against it, field by
+// field against the golden file's own values — not merely "non-zero" — so a
+// transposed ProcessID/ThreadID or a "Guid"/"GUID" attribute-name typo would
+// fail here rather than pass silently (fix round 1, Finding 3).
 //
 // This record's <UserData> is a literal child of <Event>, but ITS content is
 // a nested BinXml-typed substitution wrapping <AutoBackup> — not literal
@@ -122,23 +127,71 @@ func TestEventFromNode_RealFixtureUserData(t *testing.T) {
 		t.Fatalf("eventFromNode: %v", err)
 	}
 
-	if ev.System.Provider.Name != "Microsoft-Windows-Eventlog" {
-		t.Errorf("Provider.Name = %q", ev.System.Provider.Name)
+	sys := ev.System
+	if sys.Provider.Name != "Microsoft-Windows-Eventlog" {
+		t.Errorf("Provider.Name = %q", sys.Provider.Name)
 	}
-	if ev.System.EventID != 105 {
-		t.Errorf("EventID = %d, want 105", ev.System.EventID)
+	if sys.Provider.GUID != "{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}" {
+		t.Errorf("Provider.GUID = %q", sys.Provider.GUID)
 	}
-	if ev.System.Qualifiers != 0 {
-		t.Errorf("Qualifiers = %d, want 0 (record 1's <EventID> carries no Qualifiers attribute)", ev.System.Qualifiers)
+	if sys.Provider.EventSourceName != "" {
+		t.Errorf("Provider.EventSourceName = %q, want empty — record 1's <Provider> carries no EventSourceName", sys.Provider.EventSourceName)
 	}
-	if ev.System.Computer != "WKS-WIN764BITB.shieldbase.local" {
-		t.Errorf("Computer = %q", ev.System.Computer)
+	if sys.EventID != 105 {
+		t.Errorf("EventID = %d, want 105", sys.EventID)
 	}
-	if ev.System.EventRecordID != 12049 {
-		t.Errorf("EventRecordID = %d, want 12049", ev.System.EventRecordID)
+	if sys.Qualifiers != 0 {
+		t.Errorf("Qualifiers = %d, want 0 (record 1's <EventID> carries no Qualifiers attribute)", sys.Qualifiers)
+	}
+	if sys.Version != 0 {
+		t.Errorf("Version = %d, want 0", sys.Version)
+	}
+	if sys.Level != 4 {
+		t.Errorf("Level = %d, want 4", sys.Level)
+	}
+	if sys.Task != 105 {
+		t.Errorf("Task = %d, want 105", sys.Task)
+	}
+	if sys.Opcode != 0 {
+		t.Errorf("Opcode = %d, want 0", sys.Opcode)
+	}
+	const wantKeywords = uint64(0x8000000000000000)
+	if sys.Keywords != wantKeywords {
+		t.Errorf("Keywords = %#x, want %#x", sys.Keywords, wantKeywords)
+	}
+	wantTime, err := time.Parse(time.RFC3339Nano, "2012-03-14T04:17:43.3545627Z")
+	if err != nil {
+		t.Fatalf("parsing want time: %v", err)
+	}
+	if !sys.TimeCreated.Equal(wantTime) {
+		t.Errorf("TimeCreated = %v, want %v", sys.TimeCreated, wantTime)
+	}
+	if sys.EventRecordID != 12049 {
+		t.Errorf("EventRecordID = %d, want 12049", sys.EventRecordID)
+	}
+	if sys.ActivityID != "" {
+		t.Errorf("ActivityID = %q, want empty — record 1's <Correlation/> is empty", sys.ActivityID)
+	}
+	if sys.ProcessID != 820 {
+		t.Errorf("ProcessID = %d, want 820", sys.ProcessID)
+	}
+	if sys.ThreadID != 2868 {
+		t.Errorf("ThreadID = %d, want 2868", sys.ThreadID)
+	}
+	if sys.Channel != "System" {
+		t.Errorf("Channel = %q, want %q", sys.Channel, "System")
+	}
+	if sys.Computer != "WKS-WIN764BITB.shieldbase.local" {
+		t.Errorf("Computer = %q", sys.Computer)
+	}
+	if sys.UserID != "" {
+		t.Errorf("UserID = %q, want empty — record 1's <Security/> is empty", sys.UserID)
 	}
 	if len(ev.EventData) != 0 {
 		t.Errorf("EventData = %+v, want none — record 1 uses UserData, not EventData", ev.EventData)
+	}
+	if !ev.Binary.IsAbsent() {
+		t.Errorf("Binary = %+v, want absent — record 1 has no <Binary>", ev.Binary)
 	}
 	if ev.UserData == nil {
 		t.Fatal("UserData is nil")
@@ -170,15 +223,18 @@ func TestEventFromNode_RealFixtureUserData(t *testing.T) {
 
 // TestEventFromNode_RealFixtureEventData decodes testdata/system.evtx's
 // second record (ground-truthed by RECORD 2 in
-// testdata/system-expected-windows.xml, EventRecordID 12050).
+// testdata/system-expected-windows.xml, EventRecordID 12050), and — like
+// TestEventFromNode_RealFixtureUserData — checks every System field against
+// the golden file's own values (fix round 1, Finding 3).
 //
 // This record's <EventData> is not a child element of <Event> at all — it IS
 // <Event>'s own bare substitution value (see setElementValue's doc comment in
 // binxml_decode.go), so root.child("EventData") finds nothing and
 // eventFromNode's fallback must resolve it through Event's own Value instead.
-// It also carries a trailing <Binary> element that is not a <Data>; per the
-// design (Event.EventData []Data — docs/superpowers/specs/…-design.md),
-// that is intentionally not represented on Event.
+// It also carries a trailing <Binary> element that is not a <Data>; fix round
+// 1's Finding 2 gives that its own field on Event rather than dropping it —
+// this test pins the fix and the <Provider EventSourceName='...'> Finding 1
+// added.
 func TestEventFromNode_RealFixtureEventData(t *testing.T) {
 	chunk := readFixtureChunk(t, 0)
 	recOff := evtxChunkHeaderSize
@@ -199,17 +255,65 @@ func TestEventFromNode_RealFixtureEventData(t *testing.T) {
 		t.Fatalf("eventFromNode: %v", err)
 	}
 
-	if ev.System.Provider.Name != "Service Control Manager" {
-		t.Errorf("Provider.Name = %q", ev.System.Provider.Name)
+	sys := ev.System
+	if sys.Provider.Name != "Service Control Manager" {
+		t.Errorf("Provider.Name = %q", sys.Provider.Name)
 	}
-	if ev.System.EventID != 7036 {
-		t.Errorf("EventID = %d, want 7036", ev.System.EventID)
+	if sys.Provider.GUID != "{555908d1-a6d7-4695-8e1e-26931d2012f4}" {
+		t.Errorf("Provider.GUID = %q", sys.Provider.GUID)
 	}
-	if ev.System.Qualifiers != 16384 {
-		t.Errorf("Qualifiers = %d, want 16384", ev.System.Qualifiers)
+	if sys.Provider.EventSourceName != "Service Control Manager" {
+		t.Errorf("Provider.EventSourceName = %q, want %q", sys.Provider.EventSourceName, "Service Control Manager")
 	}
-	if ev.System.EventRecordID != 12050 {
-		t.Errorf("EventRecordID = %d, want 12050", ev.System.EventRecordID)
+	if sys.EventID != 7036 {
+		t.Errorf("EventID = %d, want 7036", sys.EventID)
+	}
+	if sys.Qualifiers != 16384 {
+		t.Errorf("Qualifiers = %d, want 16384", sys.Qualifiers)
+	}
+	if sys.Version != 0 {
+		t.Errorf("Version = %d, want 0", sys.Version)
+	}
+	if sys.Level != 4 {
+		t.Errorf("Level = %d, want 4", sys.Level)
+	}
+	if sys.Task != 0 {
+		t.Errorf("Task = %d, want 0", sys.Task)
+	}
+	if sys.Opcode != 0 {
+		t.Errorf("Opcode = %d, want 0", sys.Opcode)
+	}
+	const wantKeywords = uint64(0x8080000000000000)
+	if sys.Keywords != wantKeywords {
+		t.Errorf("Keywords = %#x, want %#x", sys.Keywords, wantKeywords)
+	}
+	wantTime, err := time.Parse(time.RFC3339Nano, "2012-03-14T04:17:38.2763402Z")
+	if err != nil {
+		t.Fatalf("parsing want time: %v", err)
+	}
+	if !sys.TimeCreated.Equal(wantTime) {
+		t.Errorf("TimeCreated = %v, want %v", sys.TimeCreated, wantTime)
+	}
+	if sys.EventRecordID != 12050 {
+		t.Errorf("EventRecordID = %d, want 12050", sys.EventRecordID)
+	}
+	if sys.ActivityID != "" {
+		t.Errorf("ActivityID = %q, want empty — record 2's <Correlation/> is empty", sys.ActivityID)
+	}
+	if sys.ProcessID != 548 {
+		t.Errorf("ProcessID = %d, want 548", sys.ProcessID)
+	}
+	if sys.ThreadID != 1340 {
+		t.Errorf("ThreadID = %d, want 1340", sys.ThreadID)
+	}
+	if sys.Channel != "System" {
+		t.Errorf("Channel = %q, want %q", sys.Channel, "System")
+	}
+	if sys.Computer != "WKS-WIN764BITB.shieldbase.local" {
+		t.Errorf("Computer = %q", sys.Computer)
+	}
+	if sys.UserID != "" {
+		t.Errorf("UserID = %q, want empty — record 2's <Security/> is empty", sys.UserID)
 	}
 	if ev.UserData != nil {
 		t.Errorf("UserData = %+v, want nil — record 2 uses EventData, not UserData", ev.UserData)
@@ -222,6 +326,14 @@ func TestEventFromNode_RealFixtureEventData(t *testing.T) {
 	}
 	if ev.EventData[1].Name != "param2" || ev.EventData[1].Value.String() != "stopped" {
 		t.Errorf("EventData[1] = %+v", ev.EventData[1])
+	}
+	if ev.Binary.IsAbsent() {
+		t.Fatal("Binary is absent, want the trailing <Binary> element's value")
+	}
+	const wantBinaryHex = "540072007500730074006500640049006e007300740061006c006c00650072002f0031000000"
+	if got := strings.ToLower(ev.Binary.String()); got != wantBinaryHex {
+		t.Errorf("Binary = %s, want %s (case-insensitive; ToXml() renders Binary as uppercase hex, "+
+			"our own String() renders lowercase — same bytes)", got, wantBinaryHex)
 	}
 }
 
