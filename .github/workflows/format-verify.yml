@@ -1021,3 +1021,251 @@ jobs:
               if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
               throw "Get-WinEvent ordering(s) failed on ladder rung 4 (literal-dataname) fixture: $($failures -join '; ')"
           }
+
+  # ---------------------------------------------------------------------
+  # Task 9d, secondary rungs. Task 9c's ladder found no size boundary: every
+  # rung from <System> alone up to the full 12-Data-pair control fails
+  # identically. This task's own decisive experiment -- an all-literal,
+  # zero-substitution record -- could not be built (see task-9d-report.md's
+  # "all-literal variant" section: MS-EVEN6's own ABNF grammar defines
+  # ValueText as ValueTextToken StringType LengthPrefixedUnicodeString, with
+  # no alternative production for a non-string literal, confirmed
+  # independently against testdata/system.evtx itself -- 15/15 real
+  # ValueText occurrences across two records and their nested UserData/
+  # EventData sub-templates are StringType, 0 exceptions). These two rungs
+  # are the batched secondary experiments the same task asked for instead,
+  # isolating two mechanisms that have been present in every measurement
+  # since they were adopted but never independently varied:
+  #
+  # Rung A (all-normal-sub): every OptionalSubstitution (0x0E) token
+  # binxml.go's <System> block uses (task 8b/F12c, task 8c/F13a) reverted to
+  # NormalSubstitution (0x0D), with dependency_id reset to the sentinel
+  # (0xffff) wherever it used to name a real index. Isolates whether 0x0E
+  # itself -- adopted from reading the real file, never tested on its own --
+  # is required.
+  #
+  # Rung B (no-xmlns): <Event>'s xmlns attribute (F8, task 8) removed
+  # entirely. Expected to break python-evtx's own namespaced XPath query
+  # (scripts/verify_python_evtx_no_xmlns.py asserts this prediction
+  # directly, rather than merely describing it) -- its own fixture and its
+  # own jobs, with get-winevent-ladder-no-xmlns depending only on
+  # generate-ladder-no-xmlns (never on the python job), so that expected
+  # Linux failure cannot skip or gate the independent Windows measurement --
+  # the same class of wiring defect Task 1's own baseline harness found and
+  # fixed early in this release.
+  #
+  # Both rungs are the control's own scale (System + EventData, 12
+  # substituted-name Data pairs -- production's own convention) so each
+  # differs from the other, and from the existing control (rung 3,
+  # generate-minimal/get-winevent-minimal), in exactly the one variable it
+  # is named for.
+  # ---------------------------------------------------------------------
+  generate-ladder-all-normal-sub:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate secondary rung A (0x0E -> 0x0D, dependency_id -> sentinel)
+        run: |
+          mkdir -p artifacts-ladder-all-normal-sub
+          go run ./cmd/gen-ladder-all-normal-sub -out artifacts-ladder-all-normal-sub
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-all-normal-sub-evtx
+          path: artifacts-ladder-all-normal-sub/
+          retention-days: 7
+
+  get-winevent-ladder-all-normal-sub:
+    needs: generate-ladder-all-normal-sub
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-all-normal-sub-evtx
+          path: artifacts-ladder-all-normal-sub
+      - name: Parse secondary rung A (all-normal-sub) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-all-normal-sub/ladder-all-normal-sub.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "ALLNORMALSUB STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "ALLNORMALSUB STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "ALLNORMALSUB STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "ALLNORMALSUB STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "ALLNORMALSUB PROP ToXml ok" }
+              catch { Write-Host "ALLNORMALSUB PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "ALLNORMALSUB PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "ALLNORMALSUB GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "ALLNORMALSUB GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "ALLNORMALSUB GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "ALLNORMALSUB GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on secondary rung A (all-normal-sub) fixture: $($failures -join '; ')"
+          }
+
+  generate-ladder-no-xmlns:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: go.mod }
+      - name: Generate secondary rung B (no xmlns attribute on Event)
+        run: |
+          mkdir -p artifacts-ladder-no-xmlns
+          go run ./cmd/gen-ladder-no-xmlns -out artifacts-ladder-no-xmlns
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ladder-no-xmlns-evtx
+          path: artifacts-ladder-no-xmlns/
+          retention-days: 7
+
+  # Independent of get-winevent-ladder-no-xmlns below: this job's own
+  # needs: is generate-ladder-no-xmlns only, exactly like that job's, so
+  # this job's PREDICTED failure (see scripts/verify_python_evtx_no_xmlns.py's
+  # own doc comment) can never skip or gate the Windows measurement -- the
+  # wiring mistake Task 1's own baseline harness made and fixed early in
+  # this release (progress.md: "get-winevent had needs:
+  # python-evtx-differential, so the expected Linux failure skipped the
+  # Windows job").
+  python-evtx-ladder-no-xmlns:
+    needs: generate-ladder-no-xmlns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-no-xmlns-evtx
+          path: artifacts-ladder-no-xmlns
+      - name: Parse secondary rung B (no-xmlns) with python-evtx
+        run: |
+          uv venv
+          # Pinned: see python-evtx-differential's own comment on why this
+          # version is not left floating.
+          uv pip install python-evtx==0.8.1
+          uv run python scripts/verify_python_evtx_no_xmlns.py artifacts-ladder-no-xmlns/ladder-no-xmlns.evtx
+
+  get-winevent-ladder-no-xmlns:
+    needs: generate-ladder-no-xmlns
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ladder-no-xmlns-evtx
+          path: artifacts-ladder-no-xmlns
+      - name: Parse secondary rung B (no-xmlns) with Get-WinEvent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'artifacts-ladder-no-xmlns/ladder-no-xmlns.evtx'
+
+          try {
+              $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new(
+                  [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+                      $path, [System.Diagnostics.Eventing.Reader.PathType]::FilePath))
+              Write-Host "NOXMLNS STAGE1 OPEN: ok"
+          } catch {
+              Write-Host "NOXMLNS STAGE1 OPEN: FAILED - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+              throw
+          }
+
+          $n = 0
+          $firstNative = $null
+          try {
+              while ($true) {
+                  $rec = $reader.ReadEvent()
+                  if ($null -eq $rec) { break }
+                  if ($n -eq 0) { $firstNative = $rec }
+                  $n++
+              }
+              Write-Host "NOXMLNS STAGE2 READ: ok, $n records"
+          } catch {
+              Write-Host "NOXMLNS STAGE2 READ: FAILED after $n records - $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+          }
+
+          if ($null -ne $firstNative) {
+              try   { $null = $firstNative.ToXml(); Write-Host "NOXMLNS PROP ToXml ok" }
+              catch { Write-Host "NOXMLNS PROP ToXml FAILED - $($_.Exception.Message)" }
+          } else {
+              Write-Host "NOXMLNS PROP ToXml: skipped - no record captured from the raw reader"
+          }
+
+          $errDefault = $null
+          try {
+              $events = @(Get-WinEvent -Path $path -ErrorAction Stop)
+              Write-Host "NOXMLNS GETWINEVENT default: ok, $($events.Count) records"
+          } catch {
+              $errDefault = $_
+              Write-Host "NOXMLNS GETWINEVENT default: FAILED - $($_.Exception.Message)"
+          }
+
+          $errOldest = $null
+          try {
+              $oldest = @(Get-WinEvent -Path $path -Oldest -ErrorAction Stop)
+              Write-Host "NOXMLNS GETWINEVENT -Oldest: ok, $($oldest.Count) records"
+          } catch {
+              $errOldest = $_
+              Write-Host "NOXMLNS GETWINEVENT -Oldest: FAILED - $($_.Exception.Message)"
+          }
+
+          if ($null -ne $errDefault -or $null -ne $errOldest) {
+              $failures = @()
+              if ($null -ne $errDefault) { $failures += "default: $($errDefault.Exception.Message)" }
+              if ($null -ne $errOldest) { $failures += "-Oldest: $($errOldest.Exception.Message)" }
+              throw "Get-WinEvent ordering(s) failed on secondary rung B (no-xmlns) fixture: $($failures -join '; ')"
+          }

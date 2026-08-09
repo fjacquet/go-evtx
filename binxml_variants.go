@@ -65,6 +65,33 @@ const (
 	// attribute NAMES are the template's own fixed shape; only values vary.
 	// Ladder rung 4.
 	VariantEventDataLiteralNames
+
+	// VariantAllNormalSubstitution (task 9d, secondary rung 1) is the
+	// control's own shape (System + EventData with all 12 substituted-name
+	// Data pairs — identical to VariantEventDataLiteralNames's sibling with
+	// substituted names, i.e. production's own convention) with every
+	// OptionalSubstitution (0x0E) token binxml.go's <System> block uses
+	// replaced by NormalSubstitution (0x0D), and every element/attribute
+	// dependency_id that named a real substitution index (F12c/F13a) reset
+	// to depIDNotSet (0xffff) instead. 0x0E was adopted from reading the
+	// real file (task 8b/8c) but has never itself been isolated as the
+	// variable under test — every measurement since has changed 0x0E
+	// alongside something else. This is the pre-F12c/F13a shape.
+	VariantAllNormalSubstitution
+
+	// VariantNoXmlns (task 9d, secondary rung 2) is the control's own shape
+	// (same as VariantAllNormalSubstitution's EventData/System scale, but
+	// <System> keeps production's own OptionalSubstitution convention
+	// unchanged) with <Event>'s xmlns attribute (F8) removed entirely —
+	// <Event> becomes a plain no-attributes element (token 0x01, no
+	// attribute list at all), not merely an empty one. F8 (xmlns) was
+	// established necessary for python-evtx (task 8) but a prior hybrid
+	// (task 9b H1, real body+subs + our preamble) only arguably cleared the
+	// preamble; xmlns itself has never been independently varied. Expected
+	// to break python-evtx's own namespaced XPath query — this variant gets
+	// its own fixture/jobs specifically so that expected Linux failure does
+	// not gate or obscure its independent Windows result.
+	VariantNoXmlns
 )
 
 // Substitution indices <System> alone needs, when it is not sharing index
@@ -173,14 +200,27 @@ func buildVariantTemplateBody(baseOffset uint32, names *[]chunkRef, variant Vari
 	b.WriteByte(0x01)
 	b.WriteByte(0x00)
 
-	// <Event xmlns="...">
+	// <Event xmlns="...">, or (VariantNoXmlns) plain <Event> with no
+	// attribute list at all — not merely an xmlns-less attribute list, since
+	// <Event> has no other attribute to keep the list non-empty.
 	var attrListPos uint32
-	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Event", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeLiteral(b, "xmlns", eventNamespaceURI, baseOffset, names)
-	patches = closeAttrList(b, attrListPos, patches)
-	b.WriteByte(binXMLCloseElement)
+	if variant == VariantNoXmlns {
+		dataSizeStack = pushOpenElement(b, "Event", false, depIDNotSet, baseOffset, names, dataSizeStack)
+		b.WriteByte(binXMLCloseElement)
+	} else {
+		dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Event", depIDNotSet, baseOffset, names, dataSizeStack)
+		writeAttributeLiteral(b, "xmlns", eventNamespaceURI, baseOffset, names)
+		patches = closeAttrList(b, attrListPos, patches)
+		b.WriteByte(binXMLCloseElement)
+	}
 
-	dataSizeStack, patches = writeVariantSystemBlock(b, baseOffset, names, dataSizeStack, patches)
+	// useOptional selects production's own OptionalSubstitution (0x0E) +
+	// real dependency_id convention (F12c/F13a) for every variant except
+	// VariantAllNormalSubstitution, which reverts <System> to the
+	// pre-F12c/F13a shape (NormalSubstitution + depIDNotSet everywhere) as
+	// its own single variable under test.
+	useOptional := variant != VariantAllNormalSubstitution
+	dataSizeStack, patches = writeVariantSystemBlock(b, baseOffset, names, dataSizeStack, patches, useOptional)
 
 	switch variant {
 	case VariantSystemOnly:
@@ -189,6 +229,10 @@ func buildVariantTemplateBody(baseOffset uint32, names *[]chunkRef, variant Vari
 		dataSizeStack, patches = writeVariantEventData(b, baseOffset, names, dataSizeStack, patches, 1, true)
 	case VariantEventDataLiteralNames:
 		dataSizeStack, patches = writeVariantEventData(b, baseOffset, names, dataSizeStack, patches, 12, false)
+	case VariantAllNormalSubstitution, VariantNoXmlns:
+		// Both are control-scale: System + EventData, all 12 Data pairs,
+		// substituted names — production's own convention.
+		dataSizeStack, patches = writeVariantEventData(b, baseOffset, names, dataSizeStack, patches, 12, true)
 	}
 
 	// </Event>
@@ -210,14 +254,42 @@ func buildVariantTemplateBody(baseOffset uint32, names *[]chunkRef, variant Vari
 
 // writeVariantSystemBlock writes <System>...</System> with the SAME 14
 // children, in the SAME order, using the SAME element shapes (which are
-// plain, which carry attributes, which are OptionalSubstitution vs.
-// NormalSubstitution, which dependency_id ties to their own content) as
-// buildTemplateBody's own <System> (binxml.go) — only the substitution
-// indices differ (the v* constants above, 0-17, instead of the sub*
-// constants interleaved with Data at 5-28). Every call below goes through
-// the same low-level token writers buildTemplateBody itself uses.
-func writeVariantSystemBlock(b *bytes.Buffer, baseOffset uint32, names *[]chunkRef, dataSizeStack []uint32, patches []fieldPatch) ([]uint32, []fieldPatch) {
+// plain, which carry attributes) as buildTemplateBody's own <System>
+// (binxml.go) — only the substitution indices differ (the v* constants
+// above, 0-17, instead of the sub* constants interleaved with Data at
+// 5-28). Every call below goes through the same low-level token writers
+// buildTemplateBody itself uses.
+//
+// useOptional selects, for exactly the 8 elements/attributes production
+// (F12c/F13a) ties to their own content substitution index:
+//   - true  (every variant except VariantAllNormalSubstitution): the real
+//     file's own convention — OptionalSubstitution (0x0E) content, and the
+//     owning element's dependency_id equal to that same index.
+//   - false (VariantAllNormalSubstitution, task 9d secondary rung 1): the
+//     pre-F12c/F13a shape — NormalSubstitution (0x0D) content, and
+//     dependency_id fixed at depIDNotSet, regardless of index.
+//
+// Channel/Computer/TimeCreated (already NormalSubstitution in production,
+// never OptionalSubstitution) and Provider (never had a dependency_id tied
+// to its own content) are unaffected by useOptional — matching production
+// exactly in every variant.
+func writeVariantSystemBlock(b *bytes.Buffer, baseOffset uint32, names *[]chunkRef, dataSizeStack []uint32, patches []fieldPatch, useOptional bool) ([]uint32, []fieldPatch) {
 	var attrListPos uint32
+
+	// writeContentSub/writeAttrSub select which token writer this call gets;
+	// depIDFor selects which dependency_id an owning element gets. Both
+	// pairs share their non-variant sibling's exact signature (see
+	// writeSubstitution/writeOptionalSubstitution and
+	// writeAttributeSub/writeAttributeOptional in binxml.go), so this is a
+	// straight function-value swap, not a second code path.
+	writeContentSub := writeOptionalSubstitution
+	writeAttrSub := writeAttributeOptional
+	depIDFor := func(idx uint16) uint16 { return idx }
+	if !useOptional {
+		writeContentSub = writeSubstitution
+		writeAttrSub = writeAttributeSub
+		depIDFor = func(uint16) uint16 { return depIDNotSet }
+	}
 
 	//   <System>
 	dataSizeStack = pushOpenElement(b, "System", false, depIDNotSet, baseOffset, names, dataSizeStack)
@@ -232,41 +304,41 @@ func writeVariantSystemBlock(b *bytes.Buffer, baseOffset uint32, names *[]chunkR
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <EventID Qualifiers="%17">%1</EventID>
-	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", vEventID, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "Qualifiers", vEventIDQualifiers, binXMLTypeUint16, false, baseOffset, names)
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "EventID", depIDFor(vEventID), baseOffset, names, dataSizeStack)
+	writeAttrSub(b, "Qualifiers", vEventIDQualifiers, binXMLTypeUint16, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vEventID, binXMLTypeUint16)
+	writeContentSub(b, vEventID, binXMLTypeUint16)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Version>%5</Version>
-	dataSizeStack = pushOpenElement(b, "Version", false, vVersion, baseOffset, names, dataSizeStack)
+	dataSizeStack = pushOpenElement(b, "Version", false, depIDFor(vVersion), baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vVersion, binXMLTypeUint8)
+	writeContentSub(b, vVersion, binXMLTypeUint8)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Level>%2</Level>
-	dataSizeStack = pushOpenElement(b, "Level", false, vLevel, baseOffset, names, dataSizeStack)
+	dataSizeStack = pushOpenElement(b, "Level", false, depIDFor(vLevel), baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vLevel, binXMLTypeUint8)
+	writeContentSub(b, vLevel, binXMLTypeUint8)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Task>%6</Task>
-	dataSizeStack = pushOpenElement(b, "Task", false, vTask, baseOffset, names, dataSizeStack)
+	dataSizeStack = pushOpenElement(b, "Task", false, depIDFor(vTask), baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vTask, binXMLTypeUint16)
+	writeContentSub(b, vTask, binXMLTypeUint16)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Opcode>%7</Opcode>
-	dataSizeStack = pushOpenElement(b, "Opcode", false, vOpcode, baseOffset, names, dataSizeStack)
+	dataSizeStack = pushOpenElement(b, "Opcode", false, depIDFor(vOpcode), baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vOpcode, binXMLTypeUint8)
+	writeContentSub(b, vOpcode, binXMLTypeUint8)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Keywords>%8</Keywords>
-	dataSizeStack = pushOpenElement(b, "Keywords", false, vKeywords, baseOffset, names, dataSizeStack)
+	dataSizeStack = pushOpenElement(b, "Keywords", false, depIDFor(vKeywords), baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vKeywords, binXMLTypeHexInt64)
+	writeContentSub(b, vKeywords, binXMLTypeHexInt64)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <TimeCreated SystemTime="%3"/>
@@ -277,23 +349,23 @@ func writeVariantSystemBlock(b *bytes.Buffer, baseOffset uint32, names *[]chunkR
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <EventRecordID>%9</EventRecordID>
-	dataSizeStack = pushOpenElement(b, "EventRecordID", false, vEventRecordID, baseOffset, names, dataSizeStack)
+	dataSizeStack = pushOpenElement(b, "EventRecordID", false, depIDFor(vEventRecordID), baseOffset, names, dataSizeStack)
 	b.WriteByte(binXMLCloseElement)
-	writeOptionalSubstitution(b, vEventRecordID, binXMLTypeUint64)
+	writeContentSub(b, vEventRecordID, binXMLTypeUint64)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Correlation ActivityID="%10" RelatedActivityID="%11"/>
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Correlation", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "ActivityID", vActivityID, binXMLTypeNull, true, baseOffset, names)
-	writeAttributeOptional(b, "RelatedActivityID", vRelatedActivityID, binXMLTypeNull, false, baseOffset, names)
+	writeAttrSub(b, "ActivityID", vActivityID, binXMLTypeNull, true, baseOffset, names)
+	writeAttrSub(b, "RelatedActivityID", vRelatedActivityID, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//     <Execution ProcessID="%12" ThreadID="%13"/>
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Execution", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "ProcessID", vProcessID, binXMLTypeNull, true, baseOffset, names)
-	writeAttributeOptional(b, "ThreadID", vThreadID, binXMLTypeNull, false, baseOffset, names)
+	writeAttrSub(b, "ProcessID", vProcessID, binXMLTypeNull, true, baseOffset, names)
+	writeAttrSub(b, "ThreadID", vThreadID, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
@@ -312,7 +384,7 @@ func writeVariantSystemBlock(b *bytes.Buffer, baseOffset uint32, names *[]chunkR
 
 	//     <Security UserID="%15"/>
 	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Security", depIDNotSet, baseOffset, names, dataSizeStack)
-	writeAttributeOptional(b, "UserID", vSecurityUserID, binXMLTypeNull, false, baseOffset, names)
+	writeAttrSub(b, "UserID", vSecurityUserID, binXMLTypeNull, false, baseOffset, names)
 	patches = closeAttrList(b, attrListPos, patches)
 	b.WriteByte(binXMLCloseElement)
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
@@ -372,6 +444,13 @@ func variantSubstitutions(variant Variant, eventID int, recordID uint64, fields 
 		subs = append(subs, dataPairSubstitutions(fields, 1, true)...)
 	case VariantEventDataLiteralNames:
 		subs = append(subs, dataPairSubstitutions(fields, 12, false)...)
+	case VariantAllNormalSubstitution, VariantNoXmlns:
+		// Control-scale: all 12 Data pairs, substituted names — production's
+		// own convention. The substitution array's own VALUES are unaffected
+		// by 0x0D-vs-0x0E (that distinction lives only in the template
+		// body's token stream) or by xmlns's presence, so this is identical
+		// to VariantEventDataLiteralNames's sibling with names substituted.
+		subs = append(subs, dataPairSubstitutions(fields, 12, true)...)
 	}
 	return subs
 }

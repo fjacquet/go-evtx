@@ -63,6 +63,8 @@ func TestBuildVariantBinXML_RoundTripsThroughContainer(t *testing.T) {
 		{"SystemOnly", VariantSystemOnly},
 		{"EventDataOnePair", VariantEventDataOnePair},
 		{"EventDataLiteralNames", VariantEventDataLiteralNames},
+		{"AllNormalSubstitution", VariantAllNormalSubstitution},
+		{"NoXmlns", VariantNoXmlns},
 	}
 
 	for _, tc := range variants {
@@ -120,6 +122,8 @@ func TestBuildVariantBinXML_StructuralConsistency(t *testing.T) {
 		{"SystemOnly", VariantSystemOnly, vSystemSubCount, vSystemSubCount - 1},
 		{"EventDataOnePair", VariantEventDataOnePair, vSystemSubCount + 2, vSystemSubCount + 1},
 		{"EventDataLiteralNames", VariantEventDataLiteralNames, vSystemSubCount + 12, vSystemSubCount + 11},
+		{"AllNormalSubstitution", VariantAllNormalSubstitution, vSystemSubCount + 24, vSystemSubCount + 23},
+		{"NoXmlns", VariantNoXmlns, vSystemSubCount + 24, vSystemSubCount + 23},
 	}
 
 	for _, tc := range cases {
@@ -294,6 +298,214 @@ func TestBuildVariantBinXML_LiteralNamesAreLiteral(t *testing.T) {
 		if !bytes.Contains(body, utf16leBytes(name)) {
 			t.Errorf("template body does not contain literal UTF-16LE %q", name)
 		}
+	}
+}
+
+// TestBuildVariantBinXML_AllNormalSubstitutionUsesNoOptionalToken confirms
+// VariantAllNormalSubstitution (task 9d secondary rung 1) really contains
+// ZERO OptionalSubstitution (0x0E) tokens and that every one of the 42
+// substitution indices is referenced via NormalSubstitution (0x0D) instead
+// — not merely that *some* tokens changed. Counts are cross-checked against
+// VariantNoXmlns, which keeps production's own convention unchanged (13
+// OptionalSubstitution / 29 NormalSubstitution, matching binxml.go's own
+// documented F12c/F13a count) at the identical System+12-Data-pair scale,
+// so this test also pins that baseline count rather than asserting it once
+// with no comparison.
+func TestBuildVariantBinXML_AllNormalSubstitutionUsesNoOptionalToken(t *testing.T) {
+	const binXMLChunkOffset = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+	const wantTotalSubs = vSystemSubCount + 24 // 18 System + 12 Data pairs * 2
+	const wantOptional = 13                    // EventID+Qualifiers, Version, Level, Task, Opcode, Keywords,
+	// EventRecordID, ActivityID, RelatedActivityID, ProcessID, ThreadID, UserID
+
+	allNormal := BuildVariantBinXML(VariantAllNormalSubstitution, 4663, 1, variantTestFields(), binXMLChunkOffset)
+	wAllNormal := walkVariantBody(t, allNormal, binXMLChunkOffset)
+	if wAllNormal.optionalSubs != 0 {
+		t.Errorf("VariantAllNormalSubstitution: found %d OptionalSubstitution tokens, want 0", wAllNormal.optionalSubs)
+	}
+	if wAllNormal.normalSubs != wantTotalSubs {
+		t.Errorf("VariantAllNormalSubstitution: found %d NormalSubstitution tokens, want %d", wAllNormal.normalSubs, wantTotalSubs)
+	}
+	for _, dep := range wAllNormal.elementDepIDs {
+		if dep != depIDNotSet {
+			t.Errorf("VariantAllNormalSubstitution: element dependency_id = 0x%04x, want depIDNotSet (0xffff)", dep)
+		}
+	}
+
+	// Baseline for comparison: production's own convention (kept unchanged
+	// by VariantNoXmlns, which only removes xmlns) at the identical scale.
+	baseline := BuildVariantBinXML(VariantNoXmlns, 4663, 1, variantTestFields(), binXMLChunkOffset)
+	wBaseline := walkVariantBody(t, baseline, binXMLChunkOffset)
+	if wBaseline.optionalSubs != wantOptional {
+		t.Errorf("VariantNoXmlns (production convention baseline): found %d OptionalSubstitution tokens, want %d", wBaseline.optionalSubs, wantOptional)
+	}
+	if wBaseline.normalSubs != wantTotalSubs-wantOptional {
+		t.Errorf("VariantNoXmlns (production convention baseline): found %d NormalSubstitution tokens, want %d", wBaseline.normalSubs, wantTotalSubs-wantOptional)
+	}
+	nonSentinel := 0
+	for _, dep := range wBaseline.elementDepIDs {
+		if dep != depIDNotSet {
+			nonSentinel++
+		}
+	}
+	if nonSentinel != 7 { // EventID, Version, Level, Task, Opcode, Keywords, EventRecordID
+		t.Errorf("VariantNoXmlns: %d elements carry a non-sentinel dependency_id, want 7", nonSentinel)
+	}
+
+	t.Logf("VariantAllNormalSubstitution: %d elements, all depIDNotSet; %d NormalSubstitution, %d OptionalSubstitution",
+		len(wAllNormal.elementDepIDs), wAllNormal.normalSubs, wAllNormal.optionalSubs)
+}
+
+// variantWalkResult is what walkVariantBody reports about one payload.
+type variantWalkResult struct {
+	normalSubs    int
+	optionalSubs  int
+	elementDepIDs []uint16 // dependency_id of every OpenStartElement(Attrs) token, in document order
+}
+
+// walkVariantBody is an exact (not heuristic) recursive-descent decoder for
+// the specific, self-contained shapes buildVariantTemplateBody produces —
+// the same technique (token-by-token, following each name_offset/
+// attr_list_size/data_size field rather than scanning for byte patterns)
+// used to independently re-verify testdata/system.evtx's own real BinXML
+// during this task's investigation. Unlike the byte-scan
+// TestBuildVariantBinXML_StructuralConsistency already uses elsewhere in
+// this file (which is deliberately tolerant of rare coincidental matches,
+// per its own comment), this walker cannot mistake payload bytes for a
+// token it does not actually parse as one — every step consumes exactly the
+// fields the token format defines, so a false positive is structurally
+// impossible, not just unlikely. Panics on any token this file's own
+// variant builders never emit (CDATA/PI/CharRef/EntityRef/nested
+// BinXmlType) — none of those occur in any variant this file defines, so a
+// panic here means the walker itself is wrong, not the payload.
+func walkVariantBody(t *testing.T, payload []byte, binXMLChunkOffset uint32) variantWalkResult {
+	t.Helper()
+	dataLength := int(binary.LittleEndian.Uint32(payload[34:38]))
+	bodyEnd := preambleSize + dataLength
+	base := binXMLChunkOffset
+
+	var res variantWalkResult
+
+	u16 := func(off int) uint16 { return binary.LittleEndian.Uint16(payload[off:]) }
+	u32 := func(off int) uint32 { return binary.LittleEndian.Uint32(payload[off:]) }
+	nameLen := func(nameOff int) int { // total inline NameNode byte length
+		cc := int(u16(nameOff + 6))
+		return 10 + cc*2
+	}
+
+	var walkElement func(pos int) int
+	walkElement = func(pos int) int {
+		tok := payload[pos]
+		if tok != binXMLOpenElement && tok != binXMLOpenElementAttrs {
+			t.Fatalf("walkVariantBody: expected OpenStartElement at %d, got 0x%02x", pos, tok)
+		}
+		hasAttrs := tok == binXMLOpenElementAttrs
+		p := pos + 1
+		dep := u16(p)
+		res.elementDepIDs = append(res.elementDepIDs, dep)
+		p += 2 + 4 // dependency_id, data_size (unused here, content is walked structurally instead)
+		nameOffset := int(u32(p))
+		p += 4
+		if nameOffset == int(base)+p {
+			p += nameLen(p)
+		}
+
+		if hasAttrs {
+			attrListSize := int(u32(p))
+			p += 4
+			attrEnd := p + attrListSize
+			for p < attrEnd {
+				atok := payload[p]
+				if atok != binXMLAttribute && atok != binXMLAttributeMore {
+					t.Fatalf("walkVariantBody: expected Attribute at %d, got 0x%02x", p, atok)
+				}
+				p++
+				anameOff := int(u32(p))
+				p += 4
+				if anameOff == int(base)+p {
+					p += nameLen(p)
+				}
+				vtok := payload[p]
+				switch vtok {
+				case binXMLValueText:
+					p++ // token
+					p++ // type (always StringType in this file's own literal writer)
+					cc := int(u16(p))
+					p += 2 + cc*2
+				case binXMLNormalSubstitution, binXMLOptionalSubstitution:
+					if vtok == binXMLNormalSubstitution {
+						res.normalSubs++
+					} else {
+						res.optionalSubs++
+					}
+					p += 4 // token(1) + index(2) + type(1)
+				default:
+					t.Fatalf("walkVariantBody: unexpected attribute-value token 0x%02x at %d", vtok, p)
+				}
+			}
+			if p != attrEnd {
+				t.Fatalf("walkVariantBody: attribute list ended at %d, declared end %d", p, attrEnd)
+			}
+		}
+
+		closeTok := payload[p]
+		p++
+		if closeTok != binXMLCloseElement {
+			t.Fatalf("walkVariantBody: expected CloseStartElementTag (0x02) at %d, got 0x%02x — this file's own variants never emit CloseEmptyElementTag (0x03)", p-1, closeTok)
+		}
+		for {
+			t2 := payload[p]
+			switch t2 {
+			case binXMLEndElement:
+				return p + 1
+			case binXMLOpenElement, binXMLOpenElementAttrs:
+				p = walkElement(p)
+			case binXMLValueText:
+				p++
+				p++ // type
+				cc := int(u16(p))
+				p += 2 + cc*2
+			case binXMLNormalSubstitution, binXMLOptionalSubstitution:
+				if t2 == binXMLNormalSubstitution {
+					res.normalSubs++
+				} else {
+					res.optionalSubs++
+				}
+				p += 4
+			default:
+				t.Fatalf("walkVariantBody: unexpected content token 0x%02x at %d", t2, p)
+			}
+		}
+	}
+
+	rootStart := preambleSize + fragHeaderSize
+	end := walkElement(rootStart)
+	if end != bodyEnd-1 { // bodyEnd-1: EndOfStream (0x00) still follows at bodyEnd-1
+		t.Fatalf("walkVariantBody: root element ended at %d, want %d (declared body end - EOF byte)", end, bodyEnd-1)
+	}
+	if payload[end] != 0x00 {
+		t.Fatalf("walkVariantBody: byte at %d = 0x%02x, want EndOfStream 0x00", end, payload[end])
+	}
+	return res
+}
+
+// TestBuildVariantBinXML_NoXmlnsHasNoXmlnsAttribute confirms VariantNoXmlns
+// really removes the xmlns attribute (and its whole attribute list) from
+// <Event>, rather than merely emptying it: the UTF-16LE encoding of
+// "xmlns" does not occur anywhere in the payload, and <Event>'s own opening
+// token is the no-attributes form (0x01), not 0x41.
+func TestBuildVariantBinXML_NoXmlnsHasNoXmlnsAttribute(t *testing.T) {
+	const binXMLChunkOffset = uint32(evtxRecordsStart + evtxRecordHeaderSize)
+	payload := BuildVariantBinXML(VariantNoXmlns, 4663, 1, variantTestFields(), binXMLChunkOffset)
+
+	if bytes.Contains(payload, utf16leBytes("xmlns")) {
+		t.Error("VariantNoXmlns payload unexpectedly contains the UTF-16LE encoding of \"xmlns\"")
+	}
+
+	// <Event>'s OpenStartElementToken is the very first byte of the template
+	// body, right after the nested FragmentHeader (see buildVariantTemplateBody).
+	eventTokenPos := preambleSize + fragHeaderSize
+	if payload[eventTokenPos] != binXMLOpenElement {
+		t.Errorf("<Event> token = 0x%02x, want 0x%02x (OpenStartElementToken, no attrs)", payload[eventTokenPos], binXMLOpenElement)
 	}
 }
 
