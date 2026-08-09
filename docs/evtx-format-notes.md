@@ -935,6 +935,41 @@ locally, in under a second. The order that follows: **the corpus derives, the
 specification names, the VM confirms, CI records.** The VM's role is to close
 a hypothesis, not to search for one.
 
+## W1/W2 re-measured after F15: still rejected, and the reason is not F15
+
+Measured 2026-08-09 on the Windows VM, after `ToXml` began rendering.
+
+| variant | `STAGE2 READ` |
+|---|---|
+| control (v0.7.0 encoder, unaligned, no EOF token) | ok, 403 records |
+| + fragment EOF token only | FAILED after 0 records |
+| + 8-byte alignment only | FAILED after 0 records |
+| + both | FAILED after 0 records |
+
+**This corrects a hypothesis recorded earlier the same day.** After F15 it was
+written here, and in the v0.7.1 backlog, that the original `403 → 0` regression
+was "probably F15 itself" — that Windows had been choking on the `Null`/`Null`
+shape and that shifting bytes only moved where it choked. That is wrong. F15 is
+fixed, `ToXml` renders, and adding any trailing byte still breaks reading in
+exactly the same way. The two are independent.
+
+What still stands, unchanged by F15: the control is **unaligned and carries no
+EOF token** and Windows reads it; a single-record file with those same trailing
+bytes reads fine; the chunk hash tables are byte-identical between control and
+padded builds; the chunk header is consistent in both. And go-evtx's own strict
+decoder fully accepts the `both` variant — the shape 37 364 of 37 364 real
+records use.
+
+So Windows rejects, in a multi-record file, a shape it universally produces
+itself. The only structural difference left that depends on record count is the
+template model: go-evtx re-declares a full inline template definition in every
+record, where real Windows declares one per chunk and points later records back
+at it (545 definitions, 36 819 backward references, zero forward). W1 and W2 are
+therefore blocked behind that, not behind "an unexplained regression".
+
+The cheap next measurement, not yet run: a two-record fixture with trailing
+bytes. If two records suffice to break it, the bisection is trivial from there.
+
 ## What is still unknown
 
 **The central open question, stated precisely.** `.NET`'s
