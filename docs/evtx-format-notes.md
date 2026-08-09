@@ -372,6 +372,66 @@ That was too quick: it is a two-variable experiment (declared version × table
 rule) in which only one cell is known. It is still worth running, but as a
 deliberate probe with that caveat recorded, not as a likely fix.
 
+### A real record's substitution array, beside ours (2026-08-09)
+
+**[measured]** Both dumped through the same walker, from `testdata/system.evtx`
+chunk 0 record 0 and from `cmd/gen-fixture-minimal`'s output.
+
+| | Real record | go-evtx |
+|---|---|---|
+| substitutions | 20 | 42 |
+| template body | 1385 B | 1978 B |
+| value types present | `0x04 0x06 0x00 0x15 0x11 0x08 0x0a 0x21` | `0x01 0x04 0x06 0x11 0x15 0x0a 0x00` |
+| `String` (`0x01`) substitutions | **none** | many |
+| zero-size substitutions | all typed `0x00` | eleven typed `0x01`, five `0x00`, one `0x06` |
+| nested `BinXml` (`0x21`) | 1, the last entry | none |
+
+Three divergences follow, in descending order of how well evidenced they are.
+
+**No String substitution appears anywhere in a real `<System>`.** The real
+record renders `Provider/@Name`, `Channel` and `Computer` from literal
+`ValueText` in the template body. go-evtx makes all four (plus
+`Provider/@Guid`) substitutions — a deliberate, documented choice, because
+those values vary per caller. Untested against Windows.
+
+**The nested fragment is a whole template instance.** Substitution 19 of the
+real record is 597 bytes beginning `0f 01 01 00 0c 01 …` — its own fragment
+header followed by its own template instance, resolving to a definition
+elsewhere in the chunk. Windows therefore uses a two-level structure: an outer
+template for `<Event>`/`<System>`, with the event payload as a nested template
+instance. go-evtx emits one flat template. Rendering the real record confirms
+the payload element is **`<UserData>`**, not `<EventData>`.
+
+**Zero-length `String` substitutions — tested and refuted as the cause.** Real
+Windows never emits one; every zero-size value there is typed `0x00`. go-evtx
+emitted eleven, for empty data-field values plus `Channel` and `ProviderGuid`.
+A fixture with every field populated, leaving no zero-size `String` at all,
+still fails: `PROP ToXml: FAILED - The data is invalid.`, unchanged. **Not the
+defect.** Worth keeping in the record precisely because it looked compelling.
+
+### The local Windows oracle (2026-08-09)
+
+An EC2 Windows Server 2025 instance reachable over SSH now reproduces the CI
+verdict in seconds rather than five minutes, and it is faithful in **both**
+directions — which is the property that makes it usable:
+
+| Fixture | `ToXml` | `Get-WinEvent` |
+|---|---|---|
+| `gen-fixture-minimal` output | FAILED, `The data is invalid.` | FAILED |
+| `gen-splice-fixture` (real record, our container) | ok, 858 chars | ok, 1 record |
+
+Setup and its traps are in `docs/windows-vm-setup.md`.
+
+**It does not replace CI.** A row in `docs/format-baseline.md` must still cite a
+CI run selected by `head_sha`. The VM shortens the loop between ideas; it does
+not establish the record.
+
+**`wevtutil` adds no diagnostic.** `wevtutil qe` on a rejected file reports only
+`Failed to render events. Error=13` — the same generic `ERROR_INVALID_DATA`
+that `EvtGetExtendedStatus` already returned empty for. `wevtutil gli` reads the
+same file's metadata without complaint, which is one more independent
+confirmation that the container is sound.
+
 ### BinXML: fragment header, template instance, template definition
 
 **[measured against `testdata/system.evtx`, cross-checked read: MS-EVEN6 /
