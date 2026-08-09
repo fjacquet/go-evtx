@@ -522,6 +522,66 @@ not expressible in the format at all — real Windows-authored files cannot
 avoid it either, and still render correctly, which is itself informative (it
 rules out "stop using substitutions here" as a category of fix — see below).
 
+### Declared type vs. actual width: audited (1 of 42 disagreed), fix attempted and reverted (F16)
+
+**[measured]** Task 9f audited all 42 of go-evtx's substitutions —
+comparing the type declared in the template token, the type declared in
+the value-spec descriptor, the byte width actually written, and the width
+the normative type table above requires — and cross-checked the result
+against a fresh, independent decode of `testdata/system.evtx`'s own record
+0 substitution array (20 entries, done without reusing any earlier task's
+byte-level claims). Two findings:
+
+1. **Every one of the real file's 20 substitution entries, across all
+   three records sampled, is width-consistent with its own declared type,
+   without exception** — nine `NullType` entries at size 0, every
+   fixed-width entry (`UInt8`/`UInt16`/`UInt32`/`UInt64`/`FileTime`/
+   `HexInt64`) at exactly its required width. This is a general structural
+   rule, not specific to any one field: real Windows never emits a
+   fixed-width-typed substitution whose data doesn't fill that width.
+2. **go-evtx violated that rule in exactly one of its 42 substitutions**:
+   sub 41 (`EventID/@Qualifiers`) declared `UNSIGNED_WORD` (a 2-byte
+   fixed-width type, per F13c) but was written with zero-length data.
+
+**F16 tried the obvious correction — widen the data to 2 bytes, leave the
+type unchanged — and it regressed `STAGE2 READ`**, from all 403 records to
+failing after 0, the identical failure shape F14's *type*-change attempt
+(Task 8e) already produced. Committed as `92a946a`, measured directly
+against CI (`get-winevent` job, run `31295743089`, head SHA confirmed
+matching), and reverted immediately at `4c31d77` per this release's own
+"regress the hard-won win, revert first" rule. **The audit finding stands
+— it is real and independently measured — but the obvious fix for it is
+now eliminated, not merely untried**, alongside F14's type-change attempt.
+
+Three independent perturbations of this one substitution have now all
+regressed some Windows-side signal: changing the type to `NullType` (F14
+Attempt 2), reclassifying it alongside five other fields to their
+schema-normative types (F14 Attempt 1), and widening its data while
+keeping the type (F16). The only configuration Windows has ever accepted
+in full is the original: `UNSIGNED_WORD`, zero-length. **The leading
+hypothesis this leaves**: `OptionalSubstitution`'s (`0x0E`) NULL-conditional
+"value absent" semantics may be signalled by a substitution's *size* being
+0, independent of its declared *type* — a fixed-width type carrying
+zero-length data may be the format's actual, correct encoding for "this
+field has a schema type, but this event doesn't populate it," and both
+"change the type" and "fill the width" break that contract in different
+ways. Untested: whether the other four `NullType`/`OptionalSubstitution`
+fields (`Correlation/@ActivityID`/`@RelatedActivityID`,
+`Execution/@ProcessID`/`@ThreadID`, `Security/@UserID`) would show the same
+pattern if ever given a real, non-zero-length value of their own declared
+type instead of `NullType` — not run this task, remains open.
+
+The six fields the task brief flagged as never-audited against MS-EVEN6's
+schema types (`Provider/@Guid` → `GuidType`, `Correlation/@ActivityID` and
+`@RelatedActivityID` → `GuidType`, `Security/@UserID` → `SidType`,
+`Execution/@ProcessID` and `@ThreadID` → `UInt32Type`) were all found
+internally self-consistent as go-evtx actually declares them —
+`NullType` for the four fields with no data source, `StringType` for
+`Provider/@Guid` (go-evtx's `WriteRecord` API takes a GUID as a
+caller-supplied string, not raw bytes) — even though none of them match
+what a populated real record would declare for the same conceptual field.
+Full table: `task-9f-report.md`.
+
 ## Everything this release fixed, in one table
 
 Every row was measured against `testdata/system.evtx` before being coded,
@@ -569,6 +629,15 @@ own doc comment above the `binXMLType*` constants and in `CLAUDE.md`'s
 substitution index map section — read those before touching any of the six
 NULL-valued `<System>`/`<EventID>` attribute fields again, since the
 evidence there is genuinely contradictory (see "Evidence discipline" below).
+
+**F16 is not in this table either, for the same reason.** Task 9f audited
+all 42 substitutions' declared type against actual byte width, found one
+disagreement (sub 41, `EventID/@Qualifiers`), and fixed it (widen the data
+to match the declared type's required width) — but that fix regressed
+`STAGE2 READ` and was reverted (commit `4c31d77`, after `92a946a`). Net
+code change: none. See "Declared type vs. actual width" above and
+`task-9f-report.md` for the full audit table and the size-not-type
+hypothesis the regression leaves open.
 
 ## What is still unknown
 
@@ -661,13 +730,20 @@ metadata.
   it declared `0x00` (`NullType`) there instead — but changing go-evtx to
   match that re-parse **regressed** `STAGE2 READ` from 403 records to
   failing on record 0. go-evtx currently ships with `Qualifiers` declared
-  `UInt16Type`, chosen because CI accepts it, not because either hex-level
-  reading has been confirmed to be the accurate one. See `binxml.go`'s doc
-  comment above the `binXMLType*` constants for the full, unreconciled
-  account. The likeliest reconciliation, itself unchecked: the Step 1
-  table's *index* assignments — not only some of its *type* claims — may
-  themselves be unreliable, and no task has independently re-derived them
-  from scratch.
+  `UInt16Type` at size 0, chosen because CI accepts it, not because either
+  hex-level reading has been confirmed to be the accurate one. Task 9f
+  (F16) added a third, orthogonal data point: keeping the type
+  (`UInt16Type`) but widening the data to a real 2 bytes **also**
+  regressed `STAGE2 READ`, the identical failure shape. Every perturbation
+  of this one field tried so far — change the type, or fill the width —
+  has regressed something; only the original (`UInt16Type`, zero-length)
+  survives. See `binxml.go`'s doc comment above the `binXMLType*` constants
+  for the full, unreconciled account, including F16's size-not-type
+  hypothesis (`OptionalSubstitution`'s NULL-conditional omission may key
+  on size==0 regardless of declared type). The likeliest reconciliation,
+  itself unchecked: the Step 1 table's *index* assignments — not only some
+  of its *type* claims — may themselves be unreliable, and no task has
+  independently re-derived them from scratch.
 - **No go-evtx fixture in this entire release has ever produced a
   genuinely cache-referenced `TemplateInstance`.** Every record go-evtx
   writes defines its own template inline (a self-referencing

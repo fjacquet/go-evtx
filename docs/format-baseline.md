@@ -46,6 +46,8 @@ baseline the rest of the release compares against.**
 | 18 | `69ca68a` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-17, confirmed two ways (empty `git diff --stat` on `binxml.go`/`evtx.go`/`cmd/gen-fixture/main.go`, and a matching SHA-256 hash of the fixture bytes before/after this task's change — Task 9c touched no fixture or production encoder code; four new ladder-rung fixtures measured alongside it — see "Task 9c" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 17 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Four ladder-rung fixtures measured alongside this one — see "Task 9c" below |
 | 19 | `084ab01` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-18 (Task 9d touched no fixture or production encoder code — `binxml.go`/`evtx.go`/`binformat.go`/`binxml_reader.go`/`chunkhash.go`/`errors.go`/`cmd/gen-fixture/main.go` all empty in `git diff --stat`; two new secondary-rung fixtures measured alongside it — see "Task 9d" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 18 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two secondary-rung fixtures measured alongside this one, plus a decisive experiment that could not be constructed — see "Task 9d" below |
 | 20 | `489ecd3` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to rows 15-19 (Task 9e touched no fixture or production encoder code — `binxml.go`/`evtx.go`/`binformat.go`/`binxml_reader.go`/`chunkhash.go`/`errors.go`/`cmd/gen-fixture/main.go` all empty in `git diff --stat`; SHA-256 of `generated.evtx` confirmed identical before/after; two new value-type-experiment fixtures measured alongside it — see "Task 9e" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | Identical to row 19 in every respect: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win held; no regression.** Two value-type variants measured alongside this one — see "Task 9e" below |
+| 21a | `92a946a` | 403 records, 27 chunks, max ObjectName **31235** runes — NOT byte-identical to rows 15-20 (F16 widens substitution 41's value data from 0 to 2 bytes on every record, shifting the binary-searched near-maximum `ObjectName` down by exactly one rune; SHA-256 of `generated.evtx` confirmed different — see "Task 9f" below) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green — python-evtx's own size tolerance absorbed the +2-byte change without complaint) | **REGRESSION: `STAGE1 OPEN: ok` / `STAGE2 READ: FAILED after 0 records` — `"The data is invalid."`.** The identical failure shape rows 5-9 and Task 8e's F14 Attempt 2 both produced — a strictly earlier failure than every row since row 12 (`2e86005`), which had held for 9 consecutive rows. **Reverted immediately** — see "Task 9f" below |
+| 21 | `4c31d77` | 403 records, 27 chunks, max ObjectName **31236** runes — byte-identical generator output to row 20 (`git revert 92a946a`, confirmed: `testdata/binxml-golden.bin` back to 2623 bytes, `git diff --stat` against row 20's tree empty for `binxml.go`/`evtx.go`/`cmd/gen-fixture/main.go`) | **PASS: `OK: 403 records, all chunk checksums verify`** (stayed green) | **Restored exactly to row 20's result**: `STAGE1 OPEN: ok` / `STAGE2 READ: ok, 403 records`, `PROP ToXml`/`GETWINEVENT default`/`GETWINEVENT -Oldest` all FAILED with `"The data is invalid."`. **The release's hard-won win is confirmed protected after the revert.** See "Task 9f" below |
 
 CI runs: [`31263194648`](https://github.com/fjacquet/go-evtx/actions/runs/31263194648) (row 1), [`31267775745`](https://github.com/fjacquet/go-evtx/actions/runs/31267775745) (row 2, re-confirmed stable via `gh run rerun --failed` reusing the identical uploaded artifact — see "Message stability" below), [`31268668199`](https://github.com/fjacquet/go-evtx/actions/runs/31268668199) (row 3, head `173fcf2`, after Task 3's F3/F4/F5 header fixes — see "After Task 3" below; independently re-confirmed by [`31268734614`](https://github.com/fjacquet/go-evtx/actions/runs/31268734614), head `c13b724`, the very next push), [`31270735835`](https://github.com/fjacquet/go-evtx/actions/runs/31270735835) (row 4, head `3c9e825`, after Task 6's F1 hash-table fix — see "After Task 6" below), [`31272448023`](https://github.com/fjacquet/go-evtx/actions/runs/31272448023) (row 5, head `ff33b7e`, harness stage split only — see "Task 7 Part A" below), [`31272639129`](https://github.com/fjacquet/go-evtx/actions/runs/31272639129) (row 6, head `62de633`, after Task 7 Part B's B1/B2/B3 fixes — see "Task 7 Part B" below), [`31273985286`](https://github.com/fjacquet/go-evtx/actions/runs/31273985286) (row 7, head `4510103`, after Task 7c's dependency_id sentinel fix — see "Task 7c" below), [`31275896296`](https://github.com/fjacquet/go-evtx/actions/runs/31275896296) (row 8, head `9b8e974`, after Task 7e's data_size fix — see "Task 7e" below), [`31276703107`](https://github.com/fjacquet/go-evtx/actions/runs/31276703107) (row 9, head `7631f93`, after Task 7f's attr_list_size reordering fix — see "Task 7f" below), [`31277415872`](https://github.com/fjacquet/go-evtx/actions/runs/31277415872) (row 10, head `3b3f575`, after Task 8's xmlns namespace fix — see "Task 8" below), [`31278789309`](https://github.com/fjacquet/go-evtx/actions/runs/31278789309) (row 11, head `deefe13`, after Task 8b's System/value-type/OptionalSubstitution fix — see "Task 8b" below), [`31285813636`](https://github.com/fjacquet/go-evtx/actions/runs/31285813636) (row 12, head `2e86005`, after Task 8c's F13 fix — see "Task 8c" below; standard `CI` workflow confirmed green at the same head in run [`31285813757`](https://github.com/fjacquet/go-evtx/actions/runs/31285813757)).
 
@@ -2860,3 +2862,126 @@ task did not reach either answer, only the boundary between "matters for
 Full verbatim job output and the complete field-by-field type table for
 both variants are in
 `.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9e-report.md`.
+
+## Task 9f: audit all 42 substitutions' declared type vs. actual width (F16, attempted and reverted)
+
+Task 9e narrowed the value-type regression to a 10-substitution subset but
+never asked the orthogonal question this task took as its own brief:
+independent of *which* type each substitution declares, does the type it
+declares match the *width* of the data actually written? Read `binxml.go`
+directly (`buildTemplateBody`'s template-token types,
+`collectSubstitutionsFromFields`'s value-spec-descriptor types and actual
+byte widths) for all 42 substitutions — no code run, a direct source
+transcription — and cross-checked against a fresh, independent decode of
+`testdata/system.evtx` chunk 0's first three records (a throwaway decoder,
+`cmd/decode-tmp/main.go`, not committed).
+
+**Audit verdict: 41 of 42 rows agree; exactly one disagrees.** Substitution
+41 (`EventID/@Qualifiers`) declares `UNSIGNED_WORD` (a 2-byte fixed-width
+type, per F13c) in both the template token and the value-spec descriptor,
+but was written with zero-length data. Every other row — including the six
+fields the task brief specifically flagged as never cross-checked against
+MS-EVEN6's schema types (`Provider/@Guid`, `Correlation/@ActivityID`/
+`@RelatedActivityID`, `Security/@UserID`, `Execution/@ProcessID`/
+`@ThreadID`) — is internally self-consistent as go-evtx actually declares
+it (`NullType` or `StringType`, not the schema-normative
+`GuidType`/`SidType`/`UInt32Type` a populated real record would use, but
+consistent with go-evtx's own choice of type for each).
+
+The independent real-file decode corroborates the same rule from the other
+direction: **every one of the real file's 20 substitution entries, across
+all three records sampled, is width-consistent with its own declared type
+without exception** — nine `NullType` entries at size 0, every fixed-width
+entry at exactly its required width. go-evtx's sub 41 was the sole
+violation of that rule, on either side of the comparison.
+
+**F16 fixed the width, not the type** — `substitutionEntry{binXMLTypeUint16,
+uint16LEBytes(0)}` instead of `substitutionEntry{binXMLTypeUint16, nil}` —
+deliberately distinct from Task 8e's F14, which changed the *type* to
+`NullType` and regressed `STAGE2 READ`. Commit `92a946a`, pushed.
+
+### Result: row 21a — the fix regressed `STAGE2 READ`
+
+`Format Verify` run
+[`31295743089`](https://github.com/fjacquet/go-evtx/actions/runs/31295743089),
+head SHA confirmed matching `92a946ace223940055bde1c24cc397e55ff02f35`.
+`get-winevent` job (the production fixture, not a ladder/hybrid/variant
+job):
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: FAILED after 0 records - System.Management.Automation.MethodInvocationException: Exception calling "ReadEvent" with "0" argument(s): "The data is invalid."
+```
+
+`python-evtx-differential` on the same run: `OK: 403 records, all chunk
+checksums verify` (stayed green — python-evtx's own size tolerance
+absorbed the +2-byte change, exactly as F14's own doc comment predicted it
+would). Standalone `CI` workflow (build/vet/lint/test): **success** at the
+same head — the regression is specific to `.NET`'s
+`EventLogReader.ReadEvent()`.
+
+**Reverted immediately** — `git revert 92a946a` → commit `4c31d77`,
+pushed. Local re-verification: `testdata/binxml-golden.bin` back to 2623
+bytes, `go build ./...`/`GOOS=windows go build ./...`/`go vet ./...`
+clean, `golangci-lint run` `0 issues.`, `go test -race ./... -count=1`
+all pass.
+
+### Result: row 21 — the revert is confirmed clean
+
+`Format Verify` run
+[`31295868149`](https://github.com/fjacquet/go-evtx/actions/runs/31295868149),
+head SHA confirmed matching `4c31d775bcf036dade0e5dee66e91a93cd714d56`.
+`get-winevent` job:
+
+```text
+STAGE1 OPEN: ok
+STAGE2 READ: ok, 403 records
+LOGINFO: ok - records=403 oldest=1 full=False
+PROP Id/Level/ProviderName/TimeCreated/RecordId/MachineName: all ok (empty, as every row since 13)
+PROP ToXml FAILED - Exception calling "ToXml" with "0" argument(s): "The data is invalid."
+GETWINEVENT default: FAILED - The data is invalid.
+GETWINEVENT -Oldest: FAILED - The data is invalid.
+```
+
+Byte-for-byte the same result as row 20. `python-evtx-differential`:
+`OK: 403 records, all chunk checksums verify`. Standalone `CI`: success.
+**The release's hard-won `STAGE2 READ` win is confirmed protected after
+the revert; the `ToXml` defect this release has never resolved is
+unchanged.**
+
+### The size-not-type hypothesis this leaves
+
+Three independent perturbations of substitution 41 have now all regressed
+some Windows-side signal — F14 Attempt 1 (Task 8e: reclassify 5 other NULL
+fields to their schema types), F14 Attempt 2 (Task 8e: Qualifiers'
+type → `NullType`), and F16 (this task: Qualifiers' width `0` → `2`, type
+unchanged). The only configuration Windows has ever accepted in full is
+the original: `UNSIGNED_WORD`, zero-length. Leading hypothesis, untested:
+`OptionalSubstitution`'s NULL-conditional omission may be signalled by a
+substitution's *size* being 0, independent of its declared *type* — a
+fixed-width type carrying zero-length data may be the format's actual,
+correct encoding for "this field has a schema type, but this event
+doesn't populate it," and both changing the type and filling the width
+break that contract in different ways. See `docs/evtx-format-notes.md`'s
+"Declared type vs. actual width" section and `task-9f-report.md` for the
+full account.
+
+## Task 9f's concerns
+
+1. **The fix regressed the release's one hard-won win and was reverted —
+   reported first**, per the task's own explicit instruction. The central
+   `ToXml` defect remains completely unresolved after this task.
+2. **The audit finding itself stands**: 41 of 42 substitutions are
+   internally self-consistent; the one exception is now a defect with an
+   eliminated "obvious" fix, not an untried one.
+3. **No regression on the main fixture past the revert** — row 21 restores
+   row 20 exactly, confirmed above.
+4. **The size-not-type hypothesis was not tested directly** — the
+   concrete next step it points to (give one of the other four
+   `NullType`/`OptionalSubstitution` fields a real, non-zero-length value
+   of its own schema type and check whether `STAGE2 READ` regresses the
+   same way) was not run this task.
+
+Full verbatim job output, the complete 42-row audit table, and the
+side-by-side real-file decode are in
+`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-9f-report.md`.

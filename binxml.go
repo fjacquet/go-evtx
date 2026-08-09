@@ -108,6 +108,37 @@ const (
 // which explanation is right — that byte-level finding (about real Windows
 // output) stands on its own, independent of what go-evtx's own encoder
 // needs to satisfy .NET's reader.
+//
+// F16 (v0.7.0, Task 9f): a full audit of all 42 substitutions' declared
+// type vs. actual byte width (task-9f-report.md) found exactly one
+// disagreement — sub 41 (Qualifiers) declared UNSIGNED_WORD (a fixed
+// 2-byte type) but written with zero-length data — and tried a THIRD
+// option distinct from Attempts 1/2 above: widen the data to a real 2-byte
+// zero, leaving the type as UNSIGNED_WORD (not touching the type this
+// time, only the width). CI evidence (commit 92a946a, reverted at
+// 4c31d77): this ALSO regressed Get-WinEvent's STAGE2 READ, from all 403
+// records to failing after 0 — the identical failure shape Attempt 2 above
+// produced by changing the type. Reverted immediately, restoring
+// byte-for-byte parity with F12b/F13c/F14's own final state (data length 0
+// again). Three independent perturbations of this one substitution —
+// type→NullType (Attempt 2), width→2 with type unchanged (F16), and the
+// original type→NullType+other-five-fields→typed (Attempt 1) — have now
+// ALL regressed some Windows-side signal. The only configuration Windows
+// accepts in full, across every experiment run on this field so far, is
+// the original: UNSIGNED_WORD, zero-length. The leading hypothesis this
+// leaves for a future task: OptionalSubstitution's (0x0E) NULL-conditional
+// "value absent" semantics may be signalled by a substitution's *size*
+// being 0, independent of its declared *type* — i.e. a fixed-width type
+// carrying zero-length data may be the format's actual, correct way to
+// encode "this optional field's schema type is X, but this event doesn't
+// populate it," and both "make it smaller" (impossible, already 0) and
+// "make it match its type's width" (F16) break that contract in different
+// ways. Untested: whether this same 0-width-regardless-of-type pattern
+// holds for the OTHER four NULL-typed OptionalSubstitution fields
+// (Correlation/@ActivityID/@RelatedActivityID, Execution/@ProcessID/
+// @ThreadID, Security/@UserID) if they were ever given a real,
+// non-zero-length value of their own declared type instead of NullType —
+// that experiment was not run this task and remains open.
 
 // depIDNotSet is the "not set" sentinel for an OpenStartElementTag's
 // dependency_id field (libyal EVTX docs: "-1 (0xffff) => not set"). An

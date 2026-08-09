@@ -28,8 +28,18 @@
 // regress from reading all 403 records to failing on record 0 — reverted
 // back to UNSIGNED_WORD on that stronger, directly measured signal. See the
 // F14 doc comment in binxml.go, by the type constants, for the full,
-// unresolved story. TestBuildTemplateBody_EventIDQualifiersIsNullOptional
-// below asserts UNSIGNED_WORD again, matching F13c's original.
+// unresolved story.
+//
+// F16 (Task 9f) later tried a third variant — same type (UNSIGNED_WORD),
+// but widening the value data from 0 to a real 2 bytes, to match that
+// type's required width per a full 42-substitution audit. This ALSO
+// regressed STAGE2 READ, the same failure shape F14 produced by changing
+// the type. Reverted (commit 4c31d77, after 92a946a). See the F16 addendum
+// to the F14 doc comment in binxml.go for the full story and the
+// size-not-type hypothesis it leaves open.
+// TestBuildTemplateBody_EventIDQualifiersIsNullOptional below asserts
+// UNSIGNED_WORD at length 0 again, matching F13c's original — the only
+// configuration of this field Windows has ever accepted in full.
 package evtx
 
 import (
