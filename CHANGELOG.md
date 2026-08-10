@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `binxml.go` split into three files — 1174 lines to 431, with the `<Event>`
+  template body in `binxml_template.go` and the token writers in
+  `binxml_tokens.go`. No behaviour change: `testdata/binxml-golden.bin` matches
+  byte for byte, so the encoder emits exactly what it did before. The
+  F14/F15/F16 narrative moved to `docs/evtx-format-notes.md`.
+
+  Nothing for a consumer to act on. It is here because the split is what makes
+  the remaining format work reviewable: every format fix lands in the template
+  file, and the token writers have no reason to change when an event's shape
+  does.
+
 ## [0.7.1] - 2026-08-09
 
 The writer now emits what Windows emits. 0.7.0 made `ToXml()` render; this
