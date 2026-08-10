@@ -8,9 +8,24 @@ before:
     - go vet ./...
 
 builds:
-  # go-evtx is a library — no binary to build.
-  # GoReleaser creates the GitHub release with changelog; consumers use go get.
-  - skip: true
+  # The library itself ships through the module proxy, not as an artefact.
+  # cmd/evtx is the one binary: naming its main package explicitly is also what
+  # keeps the two fixture generators in cmd/ out of the release.
+  - id: evtx
+    main: ./cmd/evtx
+    binary: evtx
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: evtx
+    ids: [evtx]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: 'checksums.txt'
 
 changelog:
   use: github

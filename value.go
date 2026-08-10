@@ -276,7 +276,7 @@ func decodeValue(t ValueType, data []byte) (Value, error) {
 		return Value{Type: t, raw: b}, nil
 	case ValAnsiString:
 		return Value{}, fmt.Errorf("go_evtx: AnsiString is not supported: the format " +
-			"carries no codepage, and it occurs zero times across the measured corpus")
+			"carries no codepage, so any decoding would be a guess")
 	case ValSysTime:
 		// Win32 SYSTEMTIME: wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute,
 		// wSecond, wMilliseconds — eight little-endian uint16. wDayOfWeek is

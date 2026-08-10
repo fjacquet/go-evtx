@@ -264,9 +264,12 @@ func TestDecodeValue_Sid(t *testing.T) {
 }
 
 func TestDecodeValue_FileTime(t *testing.T) {
-	// 2020-01-01T00:00:00Z. A 1601-era FILETIME would overflow int64 inside
-	// fromFILETIME; real records carry modern timestamps, and the overflow is
-	// tracked separately as a robustness gap in binformat.go.
+	// 2020-01-01T00:00:00Z, a value typical of a real record. A 1601-era
+	// FILETIME used to overflow int64 inside fromFILETIME; it no longer does —
+	// the conversion now splits seconds from the sub-second remainder and
+	// covers the whole FILETIME domain, so 1601 decodes like any other
+	// timestamp. binformat_test.go's round-trip table pins both ends of that
+	// range.
 	v, err := decodeValue(ValFileTime, []byte{0x00, 0x00, 0x05, 0x69, 0x36, 0xc0, 0xd5, 0x01})
 	if err != nil {
 		t.Fatalf("decodeValue: %v", err)

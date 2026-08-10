@@ -31,12 +31,23 @@ import (
 // ErrNoMoreRecords is returned by ReadRaw and ReadEvent when all records have been read.
 var ErrNoMoreRecords = errors.New("go_evtx: no more records")
 
+// FileInfo describes the container, not its contents: the facts carried by
+// the 4096-byte file header, which Open reads once. Windows writes format 3.1
+// and 3.2; go-evtx writes 3.1.
+type FileInfo struct {
+	Major, Minor uint16 // format version
+	Chunks       int
+	Dirty        bool // written to but not cleanly closed
+	Full         bool // reached its configured size limit
+}
+
 // Reader reads EVTX event records sequentially from a file.
 // All exported methods are safe for concurrent use.
 type Reader struct {
 	mu        sync.Mutex // guards all fields below; Reader is safe for concurrent use
 	f         *os.File
 	numChunks int
+	info      FileInfo // immutable after Open; guarded by mu like every other field
 	chunkIdx  int
 	buf       []byte // current chunk (evtxChunkSize bytes)
 	recOff    int    // byte offset within buf of the next record to read
@@ -67,11 +78,19 @@ func Open(path string) (*Reader, error) {
 	}
 
 	numChunks := int(binary.LittleEndian.Uint16(hdr[42:44]))
+	flags := binary.LittleEndian.Uint32(hdr[120:124])
 	r := &Reader{
 		f:         f,
 		numChunks: numChunks,
 		chunkIdx:  -1,
 		buf:       make([]byte, evtxChunkSize),
+		info: FileInfo{
+			Minor:  binary.LittleEndian.Uint16(hdr[36:38]),
+			Major:  binary.LittleEndian.Uint16(hdr[38:40]),
+			Chunks: numChunks,
+			Dirty:  flags&evtxFlagDirty != 0,
+			Full:   flags&evtxFlagFull != 0,
+		},
 	}
 	if err := r.loadChunk(0); err != nil {
 		_ = f.Close()
@@ -105,6 +124,26 @@ func (r *Reader) loadChunk(idx int) error {
 	return nil
 }
 
+// abandonChunkLocked gives up on the remainder of the current chunk, so that
+// the next call to nextRecord loads the following chunk — or reports the end
+// of the stream when there is none.
+//
+// Every framing field (signature, size) is what tells the reader where the
+// *next* record begins. Once one of them is wrong, no offset in the rest of
+// the chunk can be trusted, and there is nothing to resynchronise on: the
+// only choices are to abandon the chunk or to guess. Returning the error
+// without moving is not among them — nextRecord used to do exactly that, and
+// every caller looping until ErrNoMoreRecords span forever on the same bytes.
+//
+// An empty window (both offsets zero) is used rather than recOff = freeOff
+// because freeOff is itself read from the chunk header and may be the corrupt
+// value in question.
+//
+// CALLER MUST HOLD r.mu.
+func (r *Reader) abandonChunkLocked() {
+	r.recOff, r.freeOff = 0, 0
+}
+
 // nextRecord advances to and parses the next event record header.
 // Returns the raw BinXML payload (without the 24-byte record header or the
 // trailing size copy) and payloadChunkOffset, the chunk-relative byte offset
@@ -124,18 +163,24 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, paylo
 		}
 
 		if r.recOff+24 > len(r.buf) {
-			return 0, 0, nil, 0, fmt.Errorf("go_evtx: truncated record at offset %d", r.recOff)
+			off := r.recOff
+			r.abandonChunkLocked()
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: truncated record at offset %d", off)
 		}
 		rec := r.buf[r.recOff:]
 
 		sig := binary.LittleEndian.Uint32(rec[0:4])
 		if sig != evtxRecordSignature {
-			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, r.recOff)
+			off := r.recOff
+			r.abandonChunkLocked()
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, off)
 		}
 
 		size := int(binary.LittleEndian.Uint32(rec[4:8]))
 		if size < 28 || r.recOff+size > len(r.buf) {
-			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, r.recOff)
+			off := r.recOff
+			r.abandonChunkLocked()
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, off)
 		}
 
 		recordID = binary.LittleEndian.Uint64(rec[8:16])
@@ -158,6 +203,8 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, paylo
 // guarantee comes from nextRecord, which copies the payload out of r.buf
 // before returning it rather than aliasing the shared chunk buffer — do not
 // remove that copy without preserving this guarantee some other way.
+// A framing error abandons the remainder of the containing chunk; see
+// ReadEvent's doc comment for the full behaviour, which ReadRaw shares.
 func (r *Reader) ReadRaw() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -168,10 +215,25 @@ func (r *Reader) ReadRaw() ([]byte, error) {
 // ReadEvent reads and decodes the next event record.
 // Returns ErrNoMoreRecords when all records have been read.
 //
-// A decode failure is returned for that record alone: record framing comes
-// from the 24-byte record header, independently of the BinXML payload, so the
-// Reader stays positioned on the next record and the caller chooses whether to
-// stop or skip. No partial Event is ever returned.
+// Two kinds of failure are returned, and they leave the Reader in different
+// places. No partial Event is ever returned by either.
+//
+// A *decode* failure — the 24-byte record header parsed, but its BinXML
+// payload did not — is returned for that record alone. Framing comes from the
+// record header independently of the payload, so the Reader stays positioned
+// on the next record: the caller chooses whether to stop or to skip, and a
+// loop that skips reads every remaining record.
+//
+// A *framing* failure — a bad signature, an impossible size, a record header
+// running past the end of the chunk — is returned once, and the rest of that
+// chunk is abandoned, because the fields that say where the next record begins
+// are the ones that cannot be trusted. The following call resumes at the next
+// chunk, or returns ErrNoMoreRecords when this was the last one. Records after
+// the corrupt point in that chunk are therefore not reported; a loop that
+// skips still terminates.
+//
+// ReadRaw shares both behaviours: they belong to record framing, not to
+// decoding.
 func (r *Reader) ReadEvent() (*Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -195,6 +257,14 @@ func (r *Reader) ReadEvent() (*Event, error) {
 	ev.RecordID = recordID
 	ev.Timestamp = timestamp
 	return ev, nil
+}
+
+// FileInfo returns the container facts read from the file header at Open.
+// Safe for concurrent use, like every other exported Reader method.
+func (r *Reader) FileInfo() FileInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.info
 }
 
 // Close closes the underlying file.
