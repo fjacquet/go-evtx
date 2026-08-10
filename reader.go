@@ -31,12 +31,23 @@ import (
 // ErrNoMoreRecords is returned by ReadRaw and ReadEvent when all records have been read.
 var ErrNoMoreRecords = errors.New("go_evtx: no more records")
 
+// FileInfo describes the container, not its contents: the facts carried by
+// the 4096-byte file header, which Open reads once. Windows writes format 3.1
+// and 3.2; go-evtx writes 3.1.
+type FileInfo struct {
+	Major, Minor uint16 // format version
+	Chunks       int
+	Dirty        bool // written to but not cleanly closed
+	Full         bool // reached its configured size limit
+}
+
 // Reader reads EVTX event records sequentially from a file.
 // All exported methods are safe for concurrent use.
 type Reader struct {
 	mu        sync.Mutex // guards all fields below; Reader is safe for concurrent use
 	f         *os.File
 	numChunks int
+	info      FileInfo // immutable after Open; guarded by mu like every other field
 	chunkIdx  int
 	buf       []byte // current chunk (evtxChunkSize bytes)
 	recOff    int    // byte offset within buf of the next record to read
@@ -67,11 +78,19 @@ func Open(path string) (*Reader, error) {
 	}
 
 	numChunks := int(binary.LittleEndian.Uint16(hdr[42:44]))
+	flags := binary.LittleEndian.Uint32(hdr[120:124])
 	r := &Reader{
 		f:         f,
 		numChunks: numChunks,
 		chunkIdx:  -1,
 		buf:       make([]byte, evtxChunkSize),
+		info: FileInfo{
+			Minor:  binary.LittleEndian.Uint16(hdr[36:38]),
+			Major:  binary.LittleEndian.Uint16(hdr[38:40]),
+			Chunks: numChunks,
+			Dirty:  flags&evtxFlagDirty != 0,
+			Full:   flags&evtxFlagFull != 0,
+		},
 	}
 	if err := r.loadChunk(0); err != nil {
 		_ = f.Close()
@@ -195,6 +214,14 @@ func (r *Reader) ReadEvent() (*Event, error) {
 	ev.RecordID = recordID
 	ev.Timestamp = timestamp
 	return ev, nil
+}
+
+// FileInfo returns the container facts read from the file header at Open.
+// Safe for concurrent use, like every other exported Reader method.
+func (r *Reader) FileInfo() FileInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.info
 }
 
 // Close closes the underlying file.

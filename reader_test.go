@@ -357,3 +357,46 @@ func TestReadEvent_ZeroTimestampDecodes(t *testing.T) {
 			ev.Timestamp.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
 	}
 }
+
+// TestReader_FileInfo pins the container facts a consumer cannot otherwise
+// reach: the format version in particular, which Open reads and used to
+// discard. go-evtx writes 3.1; Windows Server 2025 writes 3.2, and telling
+// them apart is the first thing anyone asks of an unfamiliar file.
+func TestReader_FileInfo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "info.evtx")
+	w, err := New(path, RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := w.WriteRecord(4663, map[string]string{
+			"ProviderName": "Microsoft-Windows-Security-Auditing",
+			"Computer":     "TESTHOST",
+		}); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	fi := r.FileInfo()
+	if fi.Major != 3 || fi.Minor != 1 {
+		t.Errorf("format = %d.%d, want 3.1", fi.Major, fi.Minor)
+	}
+	if fi.Chunks != 1 {
+		t.Errorf("Chunks = %d, want 1", fi.Chunks)
+	}
+	if fi.Dirty {
+		t.Error("Dirty = true on a cleanly closed file")
+	}
+	if fi.Full {
+		t.Error("Full = true on a file that never reached a size limit")
+	}
+}
