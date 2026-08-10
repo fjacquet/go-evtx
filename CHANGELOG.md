@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-10
+
+### Added
+
+- `evtx` command line binary with `dump` and `info`, shipped as a release
+  artefact for linux/darwin/windows on amd64 and arm64. Install with
+  `go install github.com/fjacquet/go-evtx/cmd/evtx@latest`. `dump` writes
+  NDJSON in a faithful shape (the library's own `Event`) or a flat shape;
+  exit code 2 when records were skipped, `--allow-errors` to suppress it.
+  `info` reports the file header and a full decode pass with failures grouped
+  by cause.
+- `Reader.FileInfo` returning the format version, chunk count and the
+  dirty/full flags.
+
+### Fixed
+
+- FILETIME conversion covers the format's whole range. FILETIME 0 is
+  1601-01-01T00:00:00Z and Windows writes it for an unset timestamp; both
+  conversions routed the epoch offset through `int64` nanoseconds, which spans
+  only 1678–2262, so `ReadEvent` rejected records outside that range.
+  `ReadEvent` failures across the local corpus fell from 206 records across
+  178 of 285 files to 26 records across 4 files — the remaining 26 all being
+  the unsupported `AnsiString` type, a separate and unrelated limitation.
+
 ## [0.7.4] - 2026-08-10
 
 ### Fixed
@@ -389,7 +413,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/fjacquet/go-evtx/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/fjacquet/go-evtx/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/fjacquet/go-evtx/compare/v0.7.1...v0.7.2
