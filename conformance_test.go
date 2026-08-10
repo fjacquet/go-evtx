@@ -225,3 +225,56 @@ func countZeroLengthDescriptors(t *testing.T, chunk []byte, recOff, size int) in
 	}
 	return zero
 }
+
+// TestConformance_TemplateDeclaredOncePerChunk pins F19. Real Windows declares
+// a template definition once and points every later instance in the chunk
+// backward at it: 545 definitions across the derivation corpus against 36 819
+// backward references, and not one forward reference. go-evtx inlined a full
+// copy in every record until v0.7.3, which cost 46% of the file.
+func TestConformance_TemplateDeclaredOncePerChunk(t *testing.T) {
+	raw, err := os.ReadFile(writeConformanceFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := int(binary.LittleEndian.Uint16(raw[42:44]))
+
+	inline, backward := 0, 0
+	for ci := 0; ci < chunks; ci++ {
+		start := int(evtxFileHeaderSize) + ci*int(evtxChunkSize)
+		chunk := raw[start : start+int(evtxChunkSize)]
+		cache := newTemplateCache(chunk)
+		free := int(binary.LittleEndian.Uint32(chunk[48:52]))
+
+		perChunkInline := 0
+		off := int(evtxChunkHeaderSize)
+		for off+24 <= free {
+			size := int(binary.LittleEndian.Uint32(chunk[off+4:]))
+			if size < 28 || off+size > len(chunk) {
+				break
+			}
+			rf := recordFact{}
+			fragScan(cache, off+24, size-28, &rf)
+			if !rf.HasDef {
+				t.Fatalf("chunk %d record at %d: no template instance found", ci, off)
+			}
+			switch {
+			case rf.Inline:
+				perChunkInline++
+				inline++
+			case rf.DefOff < off:
+				backward++
+			default:
+				t.Errorf("chunk %d record at %d: template offset %d points forward — "+
+					"zero forward references occur in the derivation corpus", ci, off, rf.DefOff)
+			}
+			off += size
+		}
+		if perChunkInline != 1 {
+			t.Errorf("chunk %d declares %d template definitions, want exactly 1", ci, perChunkInline)
+		}
+	}
+	if backward == 0 {
+		t.Fatal("no record referenced a shared definition — the fixture must put several records in a chunk")
+	}
+	t.Logf("%d inline definitions, %d backward references across %d chunks", inline, backward, chunks)
+}
