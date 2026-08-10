@@ -1012,6 +1012,142 @@ the VM: two 400-record files differing only in whether `ProviderName`,
 eliminated first, including the per-record template redeclaration (#45), which
 was the leading suspect and is now cleared.
 
+## The substitution-type investigation, F14 through F16
+
+Moved here verbatim from `binxml.go`, where it had grown to 125 lines of
+comment above four constants. It is the record of how the declared-type
+question was got wrong twice before F15 settled it, and it is worth keeping —
+but it is history, not an explanation of the code beneath it, and it was
+crowding out the code.
+
+`binxml.go` keeps a short pointer to this section.
+
+F15 (the shape census): an OptionalSubstitution's TOKEN declares the field's
+own type; its entry in the SUBSTITUTION ARRAY declares NULL when the value
+is absent. The two are different fields at opposite ends of the record, and
+conflating them is what left F14 unresolved.
+
+Measured over 320 398 real records — 27 million shape observations, and
+testdata/system.evtx contributes none of them:
+
+//	token Guid        + array Null   566 046
+//	token Sid         + array Null   308 235
+//	token UInt16      + array Null   226 089
+//	token Binary      + array Null    35 905
+//	token StringArray + array Null    15 624
+//	token UInt32      + array Null       415
+//	token UInt64      + array Null       415
+//	token Null        + array Null         0   <-- what go-evtx wrote
+
+Zero occurrences of Null/Null in the whole corpus; go-evtx emitted 2015 of
+them in its own 403-record fixture, five per record.
+
+This also explains F14's two false starts. Its attempt 1 put Guid/Sid/UInt32
+in the ARRAY at size 0, which python-evtx rightly refuses — a GUID is a
+fixed 16 bytes. Its verification then re-parsed a real record, found 0x00,
+and concluded the types were wrong; it was reading the array. And it
+explains why EventID/@Qualifiers had to stay UNSIGNED_WORD: token UInt16
+with array Null is the 226 089-occurrence shape, and reverting the token to
+Null regressed STAGE2 READ.
+
+**RESOLVED by F15 above — read that first.** F14 was measuring the
+substitution ARRAY while reasoning about the template TOKEN. Everything
+below is kept because its measurements are correct and its dead ends are
+worth not repeating; only its conclusion ("unresolved") is superseded.
+
+F14 (v0.7.0, Task 8e): two false starts and where they landed, kept here
+rather than silently squashed, per this release's own "record null
+results" discipline. Net effect on the encoder, after both corrections:
+none — every byte this function and buildTemplateBody write is identical
+to what F12b/F13c already wrote. The value was in what got measured along
+the way, not in a code change.
+
+task-8b-report.md's Step 1 table claims Correlation/@ActivityID and
+@RelatedActivityID are typed GUID (0x0f), Security/@UserID is typed SID
+(0x13), and EventID/@Qualifiers is typed UNSIGNED_WORD (0x06) — all at
+size 0 — and F13c (Task 8c) built Qualifiers to match.
+
+Attempt 1: believed the table and reclassified the other five NULL fields
+(which F12b had left as a generic binXMLTypeNull) to match it too. Broke
+python-evtx's own regression guard immediately, on record 0:
+`Evtx.Nodes.RootNode.substitutions()` computes each fixed-width type's
+length independent of the declared size (`GuidTypeNode.tag_length() ==
+16`, unconditionally) and raises `ParseException("Invalid substitution
+value size")` when `abs(declared_size - type_length) > 4` — 16 vs. a
+declared 0 fails outright.
+
+Verified the table three independent ways before writing more code: (1) a
+byte-for-byte raw parse of testdata/system.evtx's own record 0 (the exact
+record the table cites, EventRecordID 12049), reading the substitution
+array's spec bytes directly with no decoding library involved, found
+substitution indices 4, 7, 12, and 18 — the positions the table names for
+Qualifiers/ActivityID/UserID/RelatedActivityID — are ALL declared type
+0x00 (size 0) in the real file, not GUID/SID/UNSIGNED_WORD; every other
+row in the same table checks out exactly as stated. (2) `python-evtx==0.8.1`
+parses that same real record without error, which would be impossible if
+its ActivityID really were GUID-typed at size 0. (3)
+`UnsignedWordTypeNode.tag_length()` is a fixed 2, within the library's
+abs()<=4 tolerance of a declared 0 — why Qualifiers/UInt16/size-0 (F13c)
+never broke python-evtx even though it was, per (1), also apparently
+wrong.
+
+Attempt 2: reverted all six fields (the original five, plus Qualifiers) to
+binXMLTypeNull, matching (1)-(3) above. python-evtx's crash was fixed —
+but `Get-WinEvent`'s STAGE2 READ (Task 8c's own breakthrough,
+`EventLogReader.ReadEvent()` reading all 403 records) regressed to failing
+on record 0, an unambiguous, directly-measured Windows-side signal.
+Isolated with a third data point (`eecb372`: the five fields GUID/SID/
+UINT32-typed, Qualifiers left at UNSIGNED_WORD — STAGE2 READ failed after
+384 records, a third distinct failure mode): the ONLY one of these three
+combinations Windows accepts in full is the original — five fields NULL,
+Qualifiers UNSIGNED_WORD. Reverted Qualifiers back to UNSIGNED_WORD on
+that evidence, restoring byte-for-byte parity with F12b/F13c.
+
+The two lines of evidence are not reconciled. Either this task's
+identification of "Qualifiers = substitution index 4 in the real file's
+own numbering" doesn't actually hold — the Step 1 table's index
+assignments, not just (as (1)-(3) initially suggested) some of its types,
+may themselves be unreliable, and this task did not independently
+re-derive them, only re-checked the types at the indices the table
+already named — or Windows' acceptance of a record ties to this declared
+type through a mechanism this investigation did not identify. See
+task-8e-report.md's "Concerns" section. task-8b-report.md carries its own
+correction note for the four-position type discrepancy regardless of
+which explanation is right — that byte-level finding (about real Windows
+output) stands on its own, independent of what go-evtx's own encoder
+needs to satisfy .NET's reader.
+
+F16 (v0.7.0, Task 9f): a full audit of all 42 substitutions' declared
+type vs. actual byte width (task-9f-report.md) found exactly one
+disagreement — sub 41 (Qualifiers) declared UNSIGNED_WORD (a fixed
+2-byte type) but written with zero-length data — and tried a THIRD
+option distinct from Attempts 1/2 above: widen the data to a real 2-byte
+zero, leaving the type as UNSIGNED_WORD (not touching the type this
+time, only the width). CI evidence (commit 92a946a, reverted at
+4c31d77): this ALSO regressed Get-WinEvent's STAGE2 READ, from all 403
+records to failing after 0 — the identical failure shape Attempt 2 above
+produced by changing the type. Reverted immediately, restoring
+byte-for-byte parity with F12b/F13c/F14's own final state (data length 0
+again). Three independent perturbations of this one substitution —
+type→NullType (Attempt 2), width→2 with type unchanged (F16), and the
+original type→NullType+other-five-fields→typed (Attempt 1) — have now
+ALL regressed some Windows-side signal. The only configuration Windows
+accepts in full, across every experiment run on this field so far, is
+the original: UNSIGNED_WORD, zero-length. The leading hypothesis this
+leaves for a future task: OptionalSubstitution's (0x0E) NULL-conditional
+"value absent" semantics may be signalled by a substitution's *size*
+being 0, independent of its declared *type* — i.e. a fixed-width type
+carrying zero-length data may be the format's actual, correct way to
+encode "this optional field's schema type is X, but this event doesn't
+populate it," and both "make it smaller" (impossible, already 0) and
+"make it match its type's width" (F16) break that contract in different
+ways. Untested: whether this same 0-width-regardless-of-type pattern
+holds for the OTHER four NULL-typed OptionalSubstitution fields
+(Correlation/@ActivityID/@RelatedActivityID, Execution/@ProcessID/
+@ThreadID, Security/@UserID) if they were ever given a real,
+non-zero-length value of their own declared type instead of NullType —
+that experiment was not run this task and remains open.
+
 ## What is still unknown
 
 **The central open question, stated precisely.** `.NET`'s

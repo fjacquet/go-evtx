@@ -37,7 +37,9 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `errors.go` | Sentinel errors (`ErrClosed`, `ErrRecordTooLarge`) and capacity limits (`maxChunkPayload`, `maxRecordPayload`) |
 | `reader.go` | Reader API: `Reader`, `Record`, `Open()`, `ReadRecord()`, `ReadRaw()`, `Close()`, `ErrNoMoreRecords` |
 | `binformat.go` | Binary format helpers: file/chunk headers, event record wrapper, CRC32, `toFILETIME`/`fromFILETIME`, UTF-16LE encoding |
-| `binxml.go` | BinXML encoder: template body, substitution array, token writers, `fieldPatch` back-patching for `data_size`/`attr_list_size` |
+| `binxml.go` | BinXML encoder, record assembly: `buildBinXML`, the substitution array, the substitution index map |
+| `binxml_template.go` | The `<Event>` template body — which element gets which token, in which order, with which substitution index. **This is the file a format fix touches.** `fieldPatch` back-patching for `data_size`/`attr_list_size` lives here |
+| `binxml_tokens.go` | The token writers and little-endian helpers. Knows nothing about `<System>`; writes one token as the format defines it |
 | `binxml_reader.go` | BinXML decoder: `decodeBinXML()`, substitution array parser, UTF-16LE decoder |
 | `chunkhash.go` | Per-chunk hash tables: `sdbmHash` (UTF-16 code units), `guidHash`, bucket rules, `fillHashTables` |
 | `corpus_scan_test.go` | Corpus fact dumper: one JSON Lines fact per file, chunk and record. Never string values |
