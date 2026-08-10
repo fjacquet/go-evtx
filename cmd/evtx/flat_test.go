@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	evtx "github.com/fjacquet/go-evtx"
@@ -176,6 +178,37 @@ func TestFlatten_GeneratedKeyAvoidsReserved(t *testing.T) {
 	}
 	if _, ok := flat["data_0_record_id_2"]; !ok {
 		t.Errorf("generated key collided with a reserved key; got keys %v", keysOf(flat))
+	}
+}
+
+// TestFlatten_LargeKeywordsKeepsEveryDigit pins the precision of a uint64 that
+// exceeds float64's 53-bit mantissa. It asserts on the marshalled bytes rather
+// than on a re-parsed value, because parsing the output back through the same
+// lossy path would hide the very defect this guards.
+//
+// 0x8000000000000000 is not a contrived value: the top Keywords bit is set on
+// nearly every real Windows event. Before the fix, flatten decoded System into
+// a map[string]any, which turns each JSON number into a float64, and the mask
+// came back out as 9223372036854776000 — a silently wrong value in the shape
+// meant for ingestion. No test caught it because every fixture this package
+// writes carries Keywords 0.
+func TestFlatten_LargeKeywordsKeepsEveryDigit(t *testing.T) {
+	const (
+		keywords = uint64(0x8000000000000000)
+		exact    = "9223372036854775808"
+	)
+	ev := &evtx.Event{System: evtx.System{Keywords: keywords}}
+
+	flat, _, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
+	b, err := json.Marshal(flat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if want := `"keywords":` + exact; !strings.Contains(string(b), want) {
+		t.Errorf("flat output does not carry %s exactly.\ngot: %s", want, b)
 	}
 }
 

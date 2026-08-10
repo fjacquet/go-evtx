@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-10
+
+### Fixed
+
+- **`evtx dump --shape=flat` rounded any integer above 2^53.** `Keywords`
+  `0x8000000000000000` was written as `9223372036854776000` instead of
+  `9223372036854775808`. The top `Keywords` bit is set on nearly every real
+  Windows event, so this affected almost every record — in the shape intended
+  for ingestion, where the value is a bitmask and a rounded one is simply
+  wrong.
+
+  The flat projection lifted `System` by marshalling it and decoding into a
+  `map[string]any`, and Go decodes every JSON number in an `any` as a
+  `float64`, whose 53-bit mantissa cannot hold a `uint64` that large. It now
+  decodes with `UseNumber`, so the original digits survive and re-marshal
+  verbatim.
+
+  The faithful shape was never affected: it marshals `Event` directly and
+  never round-trips through `float64`.
+
+  Found by running the released binary against a real Windows Server 2025
+  file. No test could have caught it: every fixture this repository writes
+  carries `Keywords` 0. The regression test now asserts on the marshalled
+  bytes, since re-parsing the output would hide the defect it guards.
+
 ## [0.8.1] - 2026-08-10
 
 Review findings from the v0.8.0 pull request, fixed after merge. The first of
@@ -484,7 +509,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/fjacquet/go-evtx/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/fjacquet/go-evtx/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/fjacquet/go-evtx/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...v0.7.4
