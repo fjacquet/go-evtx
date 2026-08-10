@@ -18,9 +18,14 @@ import (
 	"strings"
 )
 
-// version is replaced at release time by GoReleaser's default ldflags,
-// which inject -X main.version=<tag>.
-var version = "dev"
+// Injected at release time by GoReleaser's default ldflags. They keep their
+// placeholder values in a `go install` or `go build` binary, which is correct:
+// such a build has no release identity to report.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -40,7 +45,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "info":
 		return runInfo(args[1:], stdout, stderr)
 	case "version", "--version", "-version":
-		_, _ = fmt.Fprintln(stdout, version)
+		_, _ = fmt.Fprintf(stdout, "evtx %s (commit %s, built %s)\n", version, commit, date)
 		return 0
 	case "help", "--help", "-h":
 		usage(stdout)

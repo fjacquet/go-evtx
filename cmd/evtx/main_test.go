@@ -71,3 +71,13 @@ func TestRun_NoArgs(t *testing.T) {
 		t.Errorf("run(nil) = %d, want 1", code)
 	}
 }
+
+func TestRun_Version(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"version"}, &out, &errb); code != 0 {
+		t.Fatalf("run(version) = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "evtx ") {
+		t.Errorf("stdout = %q, want it to name the binary and its version", out.String())
+	}
+}
