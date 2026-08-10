@@ -31,6 +31,24 @@ import (
 // ErrNoMoreRecords is returned by ReadRaw and ReadEvent when all records have been read.
 var ErrNoMoreRecords = errors.New("go_evtx: no more records")
 
+// ErrChunkUnreadable wraps every failure to load a chunk that is not simply the
+// end of the file: a short or failing read, or a chunk whose magic is wrong.
+//
+// It exists because these used to be reported as ErrNoMoreRecords, so a file
+// truncated part-way — or one whose fifth chunk of eleven is corrupt — looked
+// to every caller like a clean end of stream. Silent truncation of the read is
+// the worst class of defect this project has, so the two are now distinct: a
+// genuine end of stream is ErrNoMoreRecords, and anything else reaches the
+// caller as itself, matching errors.Is(err, ErrChunkUnreadable).
+//
+// The Reader does not recover from it. The chunk that failed cannot be skipped
+// past — its bytes are what would say where the next one begins — so the stream
+// ends there: the call that reports it returns the error, and every call after
+// it returns ErrNoMoreRecords. A caller looping until ErrNoMoreRecords still
+// terminates, and one that inspects each error learns the file was not
+// finished.
+var ErrChunkUnreadable = errors.New("go_evtx: chunk unreadable")
+
 // FileInfo describes the container, not its contents: the facts carried by
 // the 4096-byte file header, which Open reads once. Windows writes format 3.1
 // and 3.2; go-evtx writes 3.1.
@@ -108,10 +126,10 @@ func (r *Reader) loadChunk(idx int) error {
 	}
 	fileOffset := int64(evtxFileHeaderSize) + int64(idx)*int64(evtxChunkSize)
 	if _, err := r.f.ReadAt(r.buf, fileOffset); err != nil {
-		return fmt.Errorf("go_evtx: read chunk %d: %w", idx, err)
+		return fmt.Errorf("%w: read chunk %d: %w", ErrChunkUnreadable, idx, err)
 	}
 	if string(r.buf[0:8]) != evtxChunkMagic {
-		return fmt.Errorf("go_evtx: invalid chunk magic at index %d", idx)
+		return fmt.Errorf("%w: invalid chunk magic at index %d", ErrChunkUnreadable, idx)
 	}
 	r.chunkIdx = idx
 	// r.buf was just refilled in place; any template definitions cached
@@ -144,6 +162,21 @@ func (r *Reader) abandonChunkLocked() {
 	r.recOff, r.freeOff = 0, 0
 }
 
+// endStreamLocked ends the stream for good: every later call reports
+// ErrNoMoreRecords. It is used when a chunk could not be loaded, which is not
+// something the Reader can step over — the failed chunk's own bytes are what
+// would say where the next record begins, and the chunk after it can only be
+// found by trusting the very layout that just proved untrustworthy. Retrying
+// the same failing index on the next call would spin, which is the bug
+// abandonChunkLocked exists to prevent, so the position is moved past the last
+// chunk instead.
+//
+// CALLER MUST HOLD r.mu.
+func (r *Reader) endStreamLocked() {
+	r.abandonChunkLocked()
+	r.chunkIdx = r.numChunks
+}
+
 // nextRecord advances to and parses the next event record header.
 // Returns the raw BinXML payload (without the 24-byte record header or the
 // trailing size copy) and payloadChunkOffset, the chunk-relative byte offset
@@ -155,9 +188,17 @@ func (r *Reader) abandonChunkLocked() {
 func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, payloadChunkOffset int, err error) {
 	for {
 		if r.recOff >= r.freeOff {
-			// Exhausted this chunk; try the next one.
+			// Exhausted this chunk; try the next one. Only the absence of a
+			// next chunk is the end of the stream — a read failure or a bad
+			// chunk magic is a real failure and is returned as itself, because
+			// collapsing the two reported a file the reader never finished as
+			// a clean finish.
 			if loadErr := r.loadChunk(r.chunkIdx + 1); loadErr != nil {
-				return 0, 0, nil, 0, ErrNoMoreRecords
+				if errors.Is(loadErr, ErrNoMoreRecords) {
+					return 0, 0, nil, 0, ErrNoMoreRecords
+				}
+				r.endStreamLocked()
+				return 0, 0, nil, 0, loadErr
 			}
 			continue
 		}
@@ -176,8 +217,15 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, paylo
 			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, off)
 		}
 
+		// The record must fit inside the records region, not merely inside the
+		// chunk: freeOff is where the records end and the chunk's padding
+		// begins, so a size that stays under 65536 but runs past freeOff would
+		// otherwise have padding read as payload and could yield a fabricated
+		// event instead of a framing error. Both bounds are checked, not just
+		// the tighter one — freeOff is itself read from the chunk header and
+		// may be the corrupt value in question.
 		size := int(binary.LittleEndian.Uint32(rec[4:8]))
-		if size < 28 || r.recOff+size > len(r.buf) {
+		if size < 28 || r.recOff+size > len(r.buf) || r.recOff+size > r.freeOff {
 			off := r.recOff
 			r.abandonChunkLocked()
 			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, off)
@@ -232,7 +280,13 @@ func (r *Reader) ReadRaw() ([]byte, error) {
 // the corrupt point in that chunk are therefore not reported; a loop that
 // skips still terminates.
 //
-// ReadRaw shares both behaviours: they belong to record framing, not to
+// A *chunk-load* failure — the next chunk could not be read, or does not carry
+// a chunk signature — is returned once, wrapping ErrChunkUnreadable, and ends
+// the stream: every later call returns ErrNoMoreRecords. It is distinct from
+// ErrNoMoreRecords precisely so that a truncated or damaged file is not
+// mistaken for a file that was read to the end.
+//
+// ReadRaw shares all three behaviours: they belong to record framing, not to
 // decoding.
 func (r *Reader) ReadEvent() (*Event, error) {
 	r.mu.Lock()

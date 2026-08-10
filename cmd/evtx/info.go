@@ -39,9 +39,19 @@ func runInfo(args []string, stdout, stderr io.Writer) int {
 	// project used to miss its own defects.
 	total, failed := 0, 0
 	causes := map[string]int{}
+	var fatal error
 	for {
 		_, err := r.ReadEvent()
 		if errors.Is(err, evtx.ErrNoMoreRecords) {
+			break
+		}
+		// A chunk that cannot be loaded is not a decode failure to be tallied:
+		// it means the pass never reached the end of the file, so "N failures"
+		// would be a count over records that were never read. Reported as
+		// itself, and the command exits non-zero — the input could not be
+		// read.
+		if errors.Is(err, evtx.ErrChunkUnreadable) {
+			fatal = err
 			break
 		}
 		total++
@@ -59,6 +69,14 @@ func runInfo(args []string, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "decode     %d/%d records, %d failures\n", total-failed, total, failed)
 	for _, c := range sortedCauses(causes) {
 		_, _ = fmt.Fprintf(stdout, "           %6d  %s\n", causes[c], c)
+	}
+	if fatal != nil {
+		// Printed after the report rather than instead of it: the header facts
+		// and the records that did decode are still true and still useful, and
+		// the line below is what stops them being read as the whole file.
+		_, _ = fmt.Fprintf(stdout, "read       incomplete after %d records\n", total)
+		_, _ = fmt.Fprintf(stderr, "evtx info: %v\n", fatal)
+		return 1
 	}
 	return 0
 }

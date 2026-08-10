@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-10
+
+Review findings from the v0.8.0 pull request, fixed after merge. The first of
+them is the kind of defect this project treats as its worst: a read that
+stopped early and reported success.
+
+v0.8.0 itself shipped as a module version but without binaries — its release
+workflow failed on a goreleaser config key that the version CI pins does not
+accept, so no archives were built. That is fixed on this release's branch, and
+the config is now validated against both the pinned version and the current
+one before a tag is cut.
+
+### Added
+
+- `ErrChunkUnreadable`, a sentinel wrapping every failure to load a chunk that
+  is not simply the end of the file. `errors.Is(err, evtx.ErrChunkUnreadable)`
+  is how a caller now tells "the file ended" from "the file stopped".
+
+### Fixed
+
+- **A chunk that could not be read was reported as a clean end of stream.**
+  `Reader` collapsed a failing read, and a chunk with no signature, into
+  `ErrNoMoreRecords` — the same value a fully-read file returns. A file
+  truncated part-way, or whose fifth chunk of eleven was corrupt, therefore
+  looked finished: `evtx dump` exited 0 over a partial dump and `evtx info`
+  printed "0 failures" for a file it never reached the end of. The genuine end
+  of stream is still `ErrNoMoreRecords`; anything else now reaches the caller
+  as itself, wrapping `ErrChunkUnreadable`. The failed chunk cannot be stepped
+  over — its own bytes are what would say where the next one begins — so the
+  stream ends there and every later call returns `ErrNoMoreRecords`, keeping
+  the guarantee that a loop reading until `ErrNoMoreRecords` terminates.
+- **A record could be declared longer than the records region.** `Reader`
+  checked a record's declared size against the chunk buffer but not against
+  `FreeSpaceOffset`, where the records end and the chunk's padding begins. A
+  corrupt size that stayed under 65536 but ran past that offset was accepted,
+  so padding was decoded as payload and a fabricated event could be returned
+  in place of a framing error. Both bounds are now checked — `FreeSpaceOffset`
+  is itself read from the chunk header and may be the corrupt value, so the
+  buffer-length guard stays.
+- **`evtx dump --out` naming the input file destroyed it.** `os.Create`
+  truncates, so `evtx dump --in f.evtx --out f.evtx` emptied the file it was
+  still reading. Rejected now with exit 1, comparing the two paths by file
+  identity rather than by string, so a relative and an absolute spelling of the
+  same file are both caught.
+- **`dump --shape=flat` dropped the whole `System` block when marshalling it
+  failed.** The error was discarded and the projection carried on, so the
+  record went out with no provider, channel, event ID or timestamp fields and
+  nothing on either stream to say so. It is now reported like any other failure
+  on one record: a line on stderr, that record left out, exit 2.
+- **`evtx info` merged genuinely different causes in its tally.** Every run of
+  digits in an error message was replaced before grouping, so two causes
+  differing only by a numeric value — two unsupported type codes, say — became
+  one line and one of them vanished behind the other's count. Only the position
+  fields the library attaches (chunk, record, offset) are erased now; a number
+  that is part of what went wrong is part of the cause.
+
+### Changed
+
+- Both commands exit 1 when the input cannot be read to the end, rather than
+  reporting a clean pass over the records they did read. `dump` still writes
+  those records and `info` still prints its report, followed by a
+  `read incomplete after N records` line. `--allow-errors` does not suppress
+  this: it means "some records were skipped is acceptable", never "the file was
+  not finished is acceptable".
+- `docs/user-guide.md` now distinguishes the three ways a read can fail — a
+  decode failure continues to the next record, a framing failure abandons the
+  rest of the chunk, a chunk-load failure ends the stream — where it previously
+  described the first as though it applied to all of them. It also no longer
+  says `dump` normalises error messages the way `info` does; `dump` writes each
+  error as the library phrased it, and only `info` groups.
+
 ## [0.8.0] - 2026-08-10
 
 ### Added
@@ -413,7 +484,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/fjacquet/go-evtx/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/fjacquet/go-evtx/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/fjacquet/go-evtx/compare/v0.7.2...v0.7.3

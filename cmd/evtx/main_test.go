@@ -55,6 +55,29 @@ func TestNormaliseCause(t *testing.T) {
 	}
 }
 
+// TestNormaliseCause_KeepsMeaningfulNumbers is the other half of the rule:
+// every run of digits used to be replaced, so two causes differing only by a
+// numeric value — two unsupported value types, say — merged into one line of
+// the tally and one of them disappeared behind the other's count.
+func TestNormaliseCause_KeepsMeaningfulNumbers(t *testing.T) {
+	a := errors.New("go_evtx: chunk 0, record 2: go_evtx: unsupported value type 0x15")
+	b := errors.New("go_evtx: chunk 0, record 3: go_evtx: unsupported value type 0x21")
+	if normaliseCause(a) == normaliseCause(b) {
+		t.Errorf("two distinct causes merged into %q", normaliseCause(a))
+	}
+}
+
+// TestNormaliseCause_MergesFramingPositions: a framing error carries its
+// position in the same string as its cause, so that position is erased too.
+func TestNormaliseCause_MergesFramingPositions(t *testing.T) {
+	a := errors.New("go_evtx: invalid record size 40 at chunk offset 512")
+	b := errors.New("go_evtx: invalid record size 40 at chunk offset 4096")
+	if normaliseCause(a) != normaliseCause(b) {
+		t.Errorf("same cause at two offsets did not merge:\n  %q\n  %q",
+			normaliseCause(a), normaliseCause(b))
+	}
+}
+
 func TestRun_UnknownSubcommand(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run([]string{"frobnicate"}, &out, &errb); code != 1 {

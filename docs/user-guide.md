@@ -67,12 +67,30 @@ func main() {
 ```
 
 `ReadEvent` returns `evtx.ErrNoMoreRecords` once every record has been
-read — that is the loop's normal exit, not a failure. Any other error is
-attached to the single record it came from; the reader stays positioned on
-the next record, so a `log.Printf` and `continue` (as above) is enough to
-walk past a record the decoder cannot handle rather than aborting the whole
-file. `FileInfo()` reads the file header directly — no decode pass is
-required to see the format version, chunk count, or the dirty/full flags.
+read — that is the loop's normal exit, not a failure. Other errors come in
+two kinds, and they leave the reader in different places.
+
+A **decode** failure — the record header parsed, its BinXML payload did not
+— is attached to the single record it came from; the reader stays positioned
+on the next record, so a `log.Printf` and `continue` (as above) walks past a
+record the decoder cannot handle and still reads every remaining one.
+
+A **framing** failure — a bad record signature, an impossible size, a record
+running past the end of the records region — is reported once and the rest
+of that chunk is abandoned, because the fields that say where the next
+record begins are the ones that cannot be trusted. The loop resumes at the
+next chunk. Records after the corrupt point in that chunk are not reported;
+the same `continue` still terminates.
+
+A third kind ends the loop rather than continuing it: an error matching
+`errors.Is(err, evtx.ErrChunkUnreadable)` means a chunk could not be loaded
+at all — a truncated file, a failing read, a chunk with no signature. The
+stream ends there and every later call returns `ErrNoMoreRecords`, so a
+`continue` loop still terminates, but it has *not* read the file to the end.
+Check for it if the difference between "finished" and "stopped" matters.
+
+`FileInfo()` reads the file header directly — no decode pass is required to
+see the format version, chunk count, or the dirty/full flags.
 
 ## 3. Write records
 
@@ -198,7 +216,13 @@ $ evtx dump security.evtx
 ### `evtx info`
 
 Reports the file header and the result of a full decode pass, with failures
-grouped by cause (the same reduction `dump`'s stderr uses, but tallied):
+grouped by cause. The grouping is `info`'s alone: `dump` writes each error to
+stderr as the library phrased it, one line per skipped record, while `info`
+strips the position each error carries — its chunk, record and offset — so
+that failures of the same kind are counted together instead of printed
+separately. Numbers that are part of the cause rather than the position, such
+as an unsupported type code, are kept, so two different causes never merge
+into one line:
 
 ```bash
 $ evtx info security.evtx
@@ -222,8 +246,21 @@ decode     1813/1818 records, 5 failures
 
 | Command | 0 | 1 | 2 |
 |---|---|---|---|
-| `dump` | every record decoded | usage error, or the input could not be opened | at least one record was skipped (suppress with `--allow-errors`) |
-| `info` | always, unless the input can't be opened | input could not be opened | — |
+| `dump` | every record decoded | usage error, or the input could not be read | at least one record was skipped (suppress with `--allow-errors`) |
+| `info` | always, unless the input can't be read | input could not be read | — |
+
+"Could not be read" covers a file that fails part-way as well as one that
+fails to open: if a chunk cannot be loaded, the file has not been read to the
+end, and both commands say so and exit 1 rather than reporting a clean pass
+over the records they did get. `--allow-errors` does not suppress this — it
+means "some records were skipped is acceptable", never "the file was not
+finished is acceptable". `dump` still writes the records it read before the
+failure, and `info` still prints the header and the tally, followed by a
+`read incomplete after N records` line.
+
+Also rejected with exit 1: `--out` naming the input file. `os.Create`
+truncates, so it would destroy the file being read. Both paths are compared
+by identity, so a relative and an absolute spelling of one file are caught.
 
 ### A `jq` one-liner
 

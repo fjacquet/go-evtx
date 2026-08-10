@@ -14,7 +14,10 @@ func TestFlatten_PlainNameStaysItself(t *testing.T) {
 			{Name: "ObjectName"},
 		},
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 0 {
 		t.Errorf("relocated = %d, want 0", relocated)
 	}
@@ -40,7 +43,10 @@ func TestFlatten_CollisionWithSystemIsRenamed(t *testing.T) {
 			{Name: "computer"},
 		},
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 1 {
 		t.Errorf("relocated = %d, want 1", relocated)
 	}
@@ -60,7 +66,10 @@ func TestFlatten_UnnamedEntryUsesItsIndex(t *testing.T) {
 			{Name: "Third"},
 		},
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 1 {
 		t.Errorf("relocated = %d, want 1", relocated)
 	}
@@ -76,7 +85,10 @@ func TestFlatten_RepeatedNameKeepsBoth(t *testing.T) {
 			{Name: "Param"},
 		},
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 1 {
 		t.Errorf("relocated = %d, want 1", relocated)
 	}
@@ -98,7 +110,10 @@ func TestFlatten_ReservedSetIgnoresOmitempty(t *testing.T) {
 		System:    evtx.System{}, // task is zero, so omitempty drops it
 		EventData: []evtx.Data{{Name: "task"}},
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 1 {
 		t.Errorf("relocated = %d, want 1 — 'task' is a System key whether or not this record carries one", relocated)
 	}
@@ -125,7 +140,10 @@ func TestFlatten_GeneratedKeyDoesNotOverwrite(t *testing.T) {
 			{Name: ""}, // index 3, generates data_3
 		},
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 1 {
 		t.Errorf("relocated = %d, want 1 (only the unnamed entry is renamed)", relocated)
 	}
@@ -149,7 +167,10 @@ func TestFlatten_GeneratedKeyAvoidsReserved(t *testing.T) {
 		reservedKeys["data_0_record_id"] = true
 		defer delete(reservedKeys, "data_0_record_id")
 	}
-	flat, relocated := flatten(ev)
+	flat, relocated, err := flatten(ev)
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
 	if relocated != 1 {
 		t.Errorf("relocated = %d, want 1", relocated)
 	}
