@@ -257,7 +257,7 @@ in what got measured, not in a code change.
 
 *Attempt 1.* The note above led directly to code: reclassified F12b's five
 NULL fields (34/35/36/37/39) from `binXMLTypeNull` (`0x00`) to their
-field's own real type (GUID, SID, UINT32), trusting task-8b-report.md's
+field's own real type (GUID, SID, UINT32), trusting docs/reports/task-8b-report.md's
 Step 1 table's claim that the real file encodes them that way. Broke
 `python-evtx`'s own regression guard (`Evtx.Nodes.RootNode.substitutions()`
 computes a fixed-width type's length independent of the declared size and
@@ -292,5 +292,5 @@ the real file's own numbering" doesn't hold — the Step 1 table's index
 assignments, not just some of its types, may themselves be unreliable, and
 this task did not independently re-derive them — or Windows' acceptance
 ties to this declared type through a mechanism not yet identified.
-task-8b-report.md and task-8c-report.md each carry their own correction
-note; task-8e-report.md has the full investigation.
+docs/reports/task-8b-report.md and docs/reports/task-8c-report.md each carry their own correction
+note; docs/reports/task-8e-report.md has the full investigation.
