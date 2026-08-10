@@ -20,8 +20,59 @@ package evtx
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"strconv"
 	"time"
 )
+
+// numericSystemFields are the fields-map keys that feed a numeric <System>
+// child, each with the bit width its substitution slot is declared at.
+//
+// Until v0.7.4 all five were written as a literal zero and these keys were
+// read by nothing (issue #13). The template already declared the right type
+// for each slot, so honouring them changes substitution values only — no
+// template change, and none of the format risk that carries.
+var numericSystemFields = []struct {
+	key  string
+	bits int
+}{
+	{"Level", 8},
+	{"Version", 8},
+	{"Task", 16},
+	{"Opcode", 8},
+	{"Keywords", 64},
+}
+
+// parseSystemUint reads one numeric fields-map value. An absent or empty value
+// is zero and not an error: zero is a legitimate value for all five of these
+// elements, and it is what every record written before v0.7.4 carried.
+//
+// Base 0 so that Keywords can be written as 0x80000000000000 — the form
+// Windows itself displays and the form a caller copies out of Event Viewer —
+// as well as in decimal.
+func parseSystemUint(fields map[string]string, key string, bits int) (uint64, error) {
+	s := fields[key]
+	if s == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseUint(s, 0, bits)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s=%q is not a %d-bit unsigned integer", ErrInvalidFieldValue, key, s, bits)
+	}
+	return v, nil
+}
+
+// validateSystemFields reports the first numeric fields-map value that cannot
+// be encoded. WriteRecord calls it before anything is written, so a rejected
+// record leaves the writer exactly as it was.
+func validateSystemFields(fields map[string]string) error {
+	for _, f := range numericSystemFields {
+		if _, err := parseSystemUint(fields, f.key, f.bits); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // BinXML token type constants (per libevtx / MS-EVEN6 specification).
 const (
@@ -337,7 +388,7 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 //
 // Sub 0: ProviderName (STRING) from fields["ProviderName"]
 // Sub 1: EventID (UINT16) from eventID parameter
-// Sub 2: Level (UINT8) = 0                                    — F12a: was UINT16
+// Sub 2: Level (UINT8) from fields["Level"]                    — F12a: was UINT16
 // Sub 3: SystemTime (FILETIME) from fields["TimeCreated"] parsed as RFC3339Nano; fallback time.Now()
 // Sub 4: Computer (STRING) from fields["Computer"]
 // Subs 5..28: 12 data field name+value pairs from fields map (see dataFieldNames)
@@ -355,14 +406,25 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 		systemTime = time.Now()
 	}
 
+	// The five numeric <System> children a caller may supply. WriteRecord has
+	// already rejected an unparseable value through validateSystemFields, so
+	// these errors are unreachable from the public API; an in-package caller
+	// that reaches buildBinXML directly with a bad value gets the field's
+	// zero, which is what this encoder wrote for every caller before v0.7.4.
+	level, _ := parseSystemUint(fields, "Level", 8)
+	fieldVersion, _ := parseSystemUint(fields, "Version", 8)
+	task, _ := parseSystemUint(fields, "Task", 16)
+	opcode, _ := parseSystemUint(fields, "Opcode", 8)
+	keywords, _ := parseSystemUint(fields, "Keywords", 64)
+
 	subs := make([]substitutionEntry, 0, totalSubstitutions)
 
 	// Sub 0: ProviderName (STRING)
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderName"])})
 	// Sub 1: EventID (UINT16)
 	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(uint16(eventID))})
-	// Sub 2: Level (UINT8) — F12a
-	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{0}})
+	// Sub 2: Level (UINT8) — F12a; sourced from fields since v0.7.4
+	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{uint8(level)}})
 	// Sub 3: SystemTime (FILETIME)
 	subs = append(subs, substitutionEntry{binXMLTypeFiletime, uint64LEBytes(toFILETIME(systemTime))})
 	// Sub 4: Computer (STRING)
@@ -375,9 +437,14 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	}
 
 	// Sub 29..39 (F12b): the nine added System children. Version/Task/Opcode/
-	// Keywords have no caller-supplied source, so they carry a typed zero
-	// rather than invented data — matching Version's own real value (0) in
-	// the sampled testdata/system.evtx record. EventRecordID uses the
+	// Keywords carried a typed zero until v0.7.4, when issue #13 pointed out
+	// that a caller passing Level=4 or Keywords=0x80000000000000 had those
+	// keys accepted and dropped in silence, while Channel in the same call was
+	// honoured. Event Viewer resolves a zero Level to "Information" and a zero
+	// Keywords to "None" from its own defaults, so the symptom was a plausible
+	// wrong value rather than a visibly missing one. They now come from the
+	// fields map, and still default to zero, which is Version's own real value
+	// in the sampled testdata/system.evtx record. EventRecordID uses the
 	// writer's real record ID. Correlation/Execution/Security's attributes
 	// have no source either; each is NULL (value-spec size 0, type
 	// binXMLTypeNull/0x00) — reproducing exactly how the real file itself
@@ -388,10 +455,10 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// types instead — see the F14 doc comment by the type constants for the
 	// full story and how the correction was verified three independent
 	// ways). Channel follows Computer's existing pattern.
-	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{0}})                           // 29 Version
-	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(0)})                   // 30 Task
-	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{0}})                           // 31 Opcode
-	subs = append(subs, substitutionEntry{binXMLTypeHexInt64, uint64LEBytes(0)})                 // 32 Keywords
+	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{uint8(fieldVersion)}})         // 29 Version
+	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(uint16(task))})        // 30 Task
+	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{uint8(opcode)}})               // 31 Opcode
+	subs = append(subs, substitutionEntry{binXMLTypeHexInt64, uint64LEBytes(keywords)})          // 32 Keywords
 	subs = append(subs, substitutionEntry{binXMLTypeUint64, uint64LEBytes(recordID)})            // 33 EventRecordID
 	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 34 Correlation/@ActivityID
 	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 35 Correlation/@RelatedActivityID

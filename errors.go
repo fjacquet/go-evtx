@@ -29,6 +29,26 @@ var ErrRecordTooLarge = errors.New("go_evtx: record exceeds chunk capacity")
 // the cause was found. An error here is the diagnostic that was missing.
 var ErrMissingProviderName = errors.New("go_evtx: ProviderName must not be empty")
 
+// ErrInvalidFieldValue is returned by WriteRecord when a fields-map key that
+// feeds a numeric <System> child — "Level", "Version", "Task", "Opcode" or
+// "Keywords" — holds a value that does not parse as an unsigned integer of
+// that field's width.
+//
+// An error rather than a substituted zero, because the quiet zero is what
+// issue #13 was about. Those five elements carried a literal 0 and their map
+// keys were dropped without a word, while "Channel" in the same call was
+// honoured — so the keys looked supported precisely because nothing rejected
+// them.
+//
+// The symptom is a wrong value, not a missing one: Event Viewer resolves
+// Level 0 to "Information" and Keywords 0 to "None" from its own defaults, so
+// an event a caller marked Level=2 (Error) displayed as Information with
+// nothing anywhere indicating a value had been discarded.
+//
+// Same stance as ErrMissingProviderName: report at the point of the mistake,
+// rather than write a file whose defect only surfaces on a Windows host.
+var ErrInvalidFieldValue = errors.New("go_evtx: invalid field value")
+
 // ErrTooManyChunks is returned when a file has reached the maximum number of
 // chunks a uint16 chunk counter can address. Continuing would wrap the counter
 // and overwrite chunk 0. Rotate, or set MaxFileSizeMB so rotation happens

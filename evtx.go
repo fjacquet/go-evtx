@@ -319,9 +319,21 @@ func (w *Writer) WriteRaw(payload []byte) error {
 // fields is a map of field names to values.
 //
 // Reserved field keys:
-//   - "ProviderName"  — event provider (STRING); defaults to empty
+//   - "ProviderName"  — event provider (STRING); must not be empty
+//   - "ProviderGuid"  — provider GUID (STRING); defaults to empty
 //   - "Computer"      — computer name (STRING); defaults to empty
+//   - "Channel"       — channel name (STRING); defaults to empty
 //   - "TimeCreated"   — RFC3339Nano timestamp; defaults to time.Now()
+//
+// Numeric <System> keys. Each is parsed as an unsigned integer of the width
+// shown, in decimal or with an 0x prefix, and defaults to 0. A value that does
+// not fit returns ErrInvalidFieldValue and writes nothing:
+//   - "Level"    — uint8;  4 is what Windows renders as "Information"
+//   - "Version"  — uint8
+//   - "Task"     — uint16; its display name needs a provider manifest on the
+//     reading host, which no value written here can supply
+//   - "Opcode"   — uint8
+//   - "Keywords" — uint64; 0x80000000000000 renders as "Classic"
 //
 // Data field keys (12 fields, in order):
 //   - SubjectUserSid, SubjectUserName, SubjectDomainName, SubjectLogonId
@@ -353,6 +365,15 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	// it learns its field map is wrong.
 	if fields["ProviderName"] == "" {
 		return ErrMissingProviderName
+	}
+
+	// Level, Version, Task, Opcode and Keywords are encoded as fixed-width
+	// unsigned integers. A value that will not fit is rejected here, before
+	// anything is written, so the caller learns at the point of the mistake
+	// rather than from a blank column in Event Viewer. See
+	// ErrInvalidFieldValue and issue #13.
+	if err := validateSystemFields(fields); err != nil {
+		return err
 	}
 
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
