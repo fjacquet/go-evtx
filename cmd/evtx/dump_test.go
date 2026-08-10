@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,14 +216,18 @@ func writeFramingCorruptFixture(t *testing.T, records int) string {
 // TestRunDump_FramingErrorTerminates bounds the run rather than trusting it:
 // the bug this guards against produced megabytes of identical stderr lines
 // without ever returning, so an unbounded assertion would hang CI instead of
-// failing it.
+// failing it. errb is capped at syncBufferBudget: if the reader ever regresses
+// to spinning on the same framing error again, the buffer stops allocating
+// almost immediately instead of growing to the multi-gigabyte size (3.2 GB,
+// observed) that made the earlier, unbounded version of this test expensive
+// to fail.
 func TestRunDump_FramingErrorTerminates(t *testing.T) {
 	path := writeFramingCorruptFixture(t, 3)
 
 	// Both buffers are mutex-guarded: runDump writes them from another
 	// goroutine, and the timeout branch reads one while it is still running.
 	done := make(chan int, 1)
-	out, errb := &syncBuffer{}, &syncBuffer{}
+	out, errb := &syncBuffer{}, &syncBuffer{max: syncBufferBudget}
 	go func() { done <- runDump([]string{"--in", path}, out, errb) }()
 
 	select {
@@ -233,20 +238,35 @@ func TestRunDump_FramingErrorTerminates(t *testing.T) {
 		if n := strings.Count(errb.String(), "invalid record signature"); n != 1 {
 			t.Errorf("the framing error was reported %d times, want exactly 1; stderr: %q", n, errb.String())
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatalf("runDump did not terminate on a framing-corrupt file (stderr grew to %d bytes)", errb.Len())
+	case <-time.After(3 * time.Second):
+		t.Fatalf("runDump did not terminate on a framing-corrupt file (stderr grew to %d bytes, capped at %d)", errb.Len(), syncBufferBudget)
 	}
 }
 
-// syncBuffer is a bytes.Buffer usable from two goroutines at once.
+// syncBufferBudget is far more than the handful of lines the passing case
+// produces, but small enough that a spinning runDump cannot exhaust memory
+// before the test's own timeout fires.
+const syncBufferBudget = 256 * 1024
+
+// errSyncBufferFull is returned by syncBuffer.Write once its budget is spent.
+var errSyncBufferFull = errors.New("syncBuffer: write budget exhausted")
+
+// syncBuffer is a bytes.Buffer usable from two goroutines at once. When max is
+// non-zero, writes that would grow the buffer past max are rejected instead
+// of allocated, bounding memory for callers (such as a spinning runDump) that
+// never stop writing.
 type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu  sync.Mutex
+	b   bytes.Buffer
+	max int
 }
 
 func (s *syncBuffer) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.max > 0 && s.b.Len() >= s.max {
+		return 0, errSyncBufferFull
+	}
 	return s.b.Write(p)
 }
 

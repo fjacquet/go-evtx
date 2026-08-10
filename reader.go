@@ -203,6 +203,8 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, paylo
 // guarantee comes from nextRecord, which copies the payload out of r.buf
 // before returning it rather than aliasing the shared chunk buffer — do not
 // remove that copy without preserving this guarantee some other way.
+// A framing error abandons the remainder of the containing chunk; see
+// ReadEvent's doc comment for the full behaviour, which ReadRaw shares.
 func (r *Reader) ReadRaw() ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

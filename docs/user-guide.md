@@ -253,11 +253,12 @@ $ evtx dump security.evtx | jq -s 'map(.system.event_id) | unique'
   This is a caller contract; nothing at runtime enforces it.
 - **The reader validates structure, not checksums.** It checks the file magic,
   the chunk magic, record signatures and record sizes, and it stops there —
-  the CRC32s the writer computes over each chunk and each record are never
-  recomputed on the way back in. A payload whose bits have been flipped but
-  which still parses is returned as if it were valid, with no complaint. Do
-  not read §7's "checksum-invisible" as implying that checksums are otherwise
-  verified: on the read path none of them are.
+  the CRC32s the writer computes (the file header's own CRC, each chunk
+  header's CRC, and one CRC over a chunk's whole records region — there is no
+  per-record CRC) are never recomputed on the way back in. A payload whose
+  bits have been flipped but which still parses is returned as if it were
+  valid, with no complaint. Do not read §7's "checksum-invisible" as implying
+  that checksums are otherwise verified: on the read path none of them are.
 
 ## 7. Errors you will actually meet
 

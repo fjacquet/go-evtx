@@ -98,7 +98,7 @@
 | `AnsiString` (type 0x02) is not decoded | 26 records across 4 of 285 corpus files fail to decode | Deliberate: the format carries no codepage, so any decoding would be a guess |
 | The 3.2 template bucket rule is unknown | None. go-evtx writes 3.1, and the reader resolves templates by offset, never by bucket | Documented gap |
 | `WriteRecord` and `WriteRaw` must not be mixed in one session | Caller contract, not enforced at runtime | Open |
-| The reader verifies no checksum: it validates magic, record signatures and sizes, never the chunk or record CRC32 the writer computes | A corrupted payload that still parses is returned as if valid, with no complaint. Structural corruption is caught; silent bit rot is not | Open; turning verification on is its own release |
+| The reader verifies no checksum: it validates magic, record signatures and sizes, never the file header, chunk header, or per-chunk records-region CRC32 the writer computes (there is no per-record CRC) | A corrupted payload that still parses is returned as if valid, with no complaint. Structural corruption is caught; silent bit rot is not | Open; turning verification on is its own release |
 
 ---
 
