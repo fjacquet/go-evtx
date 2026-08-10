@@ -16,7 +16,7 @@ import (
 // reported key.
 func TestBuildBinXML_ReportsNameOffsets(t *testing.T) {
 	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
-	res := buildBinXML(4663, 1, testFields(), base)
+	res := buildBinXML(4663, 1, testFields(), base, 0)
 
 	if len(res.names) == 0 {
 		t.Fatal("buildBinXML reported no NameNodes")
@@ -55,7 +55,7 @@ func TestBuildBinXML_ReportsNameOffsets(t *testing.T) {
 // holds the 0x0C TemplateInstance token.
 func TestBuildBinXML_TemplateSelfPointer(t *testing.T) {
 	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
-	res := buildBinXML(4663, 1, testFields(), base)
+	res := buildBinXML(4663, 1, testFields(), base, 0)
 
 	ref := res.templates[0]
 	rel := int(ref.offset) - int(base)
@@ -103,7 +103,7 @@ func TestBuildBinXML_PayloadUnchangedByCollection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize), 0)
 	if !bytes.Equal(res.payload, want) {
 		t.Errorf("payload changed: got %d bytes, want %d", len(res.payload), len(want))
 		for i := 0; i < len(want) && i < len(res.payload); i++ {

@@ -94,6 +94,14 @@ type Writer struct {
 	// keeps empty tables, exactly as before v0.7.0.
 	chunkNames     []chunkRef
 	chunkTemplates []chunkRef
+	// chunkTemplateOffset is the chunk-relative offset of the template
+	// definition already written into the pending chunk, or 0 when the chunk
+	// holds none yet. The next record points its instance at it instead of
+	// writing a second copy (F19), which is what real Windows does: 545
+	// definitions across the derivation corpus against 36 819 backward
+	// references. Reset alongside w.records — the offset is chunk-relative and
+	// means nothing in the next chunk.
+	chunkTemplateOffset uint32
 	// lastRecordOffset is the chunk-relative offset where the most recent
 	// record in the pending chunk begins. Committed and reset alongside
 	// w.records; zero when the chunk is empty.
@@ -348,7 +356,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	}
 
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
-	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset)
+	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, w.chunkTemplateOffset)
 
 	// A record larger than a chunk can never be written. Splitting one logical
 	// event across chunks is not valid EVTX, so reject it and write nothing.
@@ -369,8 +377,11 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		}
 		// The flush reset the collectors; rebuild this record for the new,
 		// empty chunk so its node offsets are relative to the right chunk.
+		// The new chunk holds no template definition yet, so this record must
+		// declare one inline — passing the old chunk's offset here would point
+		// the instance at bytes belonging to a chunk that is already on disk.
 		binXMLChunkOffset = evtxRecordsStart + evtxRecordHeaderSize
-		res = buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset)
+		res = buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, 0)
 		rec = wrapEventRecord(w.recordID, ts, res.payload)
 	}
 
@@ -378,6 +389,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	// the discarded first attempt's offsets would leak into the new chunk.
 	w.chunkNames = append(w.chunkNames, res.names...)
 	w.chunkTemplates = append(w.chunkTemplates, res.templates...)
+	w.chunkTemplateOffset = res.defOffset
 
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
@@ -509,6 +521,7 @@ func (w *Writer) rotate() error {
 	w.records = w.records[:0]
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
+	w.chunkTemplateOffset = 0
 	w.lastRecordOffset = 0
 	w.currentSize = evtxFileHeaderSize
 
@@ -692,6 +705,7 @@ func (w *Writer) flushChunkLocked() error {
 	w.records = w.records[:0]
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
+	w.chunkTemplateOffset = 0
 	w.lastRecordOffset = 0
 	w.firstID = w.recordID
 	w.queueFsyncLocked()

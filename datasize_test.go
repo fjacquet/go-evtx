@@ -21,7 +21,7 @@ import (
 )
 
 func TestWriteOpenElement_DataSizeIsNonZero(t *testing.T) {
-	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize), 0)
 
 	checked := 0
 	for i := preambleSize; i+7 < len(res.payload); i++ {
@@ -59,7 +59,7 @@ func TestWriteOpenElement_DataSizeIsNonZero(t *testing.T) {
 // patching the wrong open element) would make some inner span run past its
 // parent's.
 func TestWriteOpenElement_DataSizeNesting(t *testing.T) {
-	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize), 0)
 	payload := res.payload
 
 	type span struct {

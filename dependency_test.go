@@ -55,7 +55,7 @@ func isRecognisedDependencyID(dep uint16) bool {
 
 func TestWriteOpenElement_DependencyIDIsUnset(t *testing.T) {
 	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
-	res := buildBinXML(4663, 1, goldenFields(), base)
+	res := buildBinXML(4663, 1, goldenFields(), base, 0)
 	payload := res.payload
 
 	// Bound the scan to the template body: preambleSize (38) through

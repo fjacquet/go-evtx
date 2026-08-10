@@ -77,7 +77,7 @@ func TestCollectSubstitutions_LevelIsUint8(t *testing.T) {
 // structural detail. This test's job is only to fail loudly if an element
 // F12b promised is silently dropped.
 func TestBuildTemplateBody_NewSystemChildrenPresent(t *testing.T) {
-	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize), 0)
 
 	want := []string{
 		"Version", "Task", "Opcode", "Keywords", "EventRecordID",
@@ -122,7 +122,7 @@ func utf16Bytes(s string) []byte {
 // OptionalSubstitution (0x0E), not NormalSubstitution (0x0D).
 func TestBuildTemplateBody_EventIDAndLevelUseOptionalSubstitution(t *testing.T) {
 	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
-	res := buildBinXML(4663, 1, goldenFields(), base)
+	res := buildBinXML(4663, 1, goldenFields(), base, 0)
 	payload := res.payload
 
 	cases := []struct {
@@ -190,7 +190,7 @@ func TestBuildTemplateBody_EventIDAndLevelUseOptionalSubstitution(t *testing.T) 
 // emission order and Provider's own Name/Guid are emitted first.
 func TestBuildTemplateBody_ProviderTwoAttributes(t *testing.T) {
 	const base = uint32(evtxRecordsStart + evtxRecordHeaderSize)
-	res := buildBinXML(4663, 1, goldenFields(), base)
+	res := buildBinXML(4663, 1, goldenFields(), base, 0)
 	payload := res.payload
 
 	wantNameHash := sdbmHash("Name")
@@ -287,7 +287,7 @@ func decodeSubStringForTest(data []byte) string {
 // to UNSIGNED_WORD on that evidence; see the doc comment in binxml.go by
 // the type constants for the full, unresolved story.
 func TestBuildTemplateBody_EventIDQualifiersIsNullOptional(t *testing.T) {
-	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	res := buildBinXML(4663, 1, goldenFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize), 0)
 
 	encoded := utf16Bytes("Qualifiers")
 	if !bytes.Contains(res.payload, encoded) {

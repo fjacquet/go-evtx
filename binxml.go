@@ -209,6 +209,13 @@ type binXMLResult struct {
 	payload   []byte
 	names     []chunkRef
 	templates []chunkRef
+
+	// defOffset is the chunk-relative offset of the template definition this
+	// record's instance points at — the one it wrote itself, or the one an
+	// earlier record in the chunk wrote. The writer remembers it so the next
+	// record in the same chunk can reference it instead of duplicating it
+	// (F19). Reset whenever a chunk is flushed: offsets are chunk-relative.
+	defOffset uint32
 }
 
 // buildBinXML encodes an event as template-based BinXML.
@@ -227,16 +234,18 @@ type binXMLResult struct {
 //   - "Channel"       → substitution 38 (STRING); defaults to "" (F12b)
 //   - "ProviderGuid"  → substitution 40 (STRING); defaults to "" (F13b)
 //   - 12 data fields by name (see dataFieldNames)
-func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLChunkOffset uint32) binXMLResult {
-	// Template body starts after: fragment header + template instance + template node header.
-	templateBodyBase := binXMLChunkOffset + preambleSize
-
-	var names []chunkRef
-
-	// Build template body with substitution placeholders.
-	tbody := buildTemplateBody(templateBodyBase, &names)
-
-	// Collect actual substitution values from the fields map.
+//
+// sharedTemplateOffset is the chunk-relative offset of a template definition
+// already written into this chunk, or 0 when this record is the first and must
+// declare it inline.
+//
+// F19: real Windows declares a template definition once per chunk and points
+// every later instance backward at it — 545 definitions across the derivation
+// corpus against 36 819 backward references, and not one forward reference.
+// go-evtx used to inline a full copy in every record, which is valid (Windows
+// reads it) but costs roughly 800 KB of duplication in a 1.7 MB 403-record
+// file.
+func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLChunkOffset, sharedTemplateOffset uint32) binXMLResult {
 	subs := collectSubstitutionsFromFields(eventID, recordID, fields)
 
 	out := &bytes.Buffer{}
@@ -251,26 +260,42 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 	out.WriteByte(0x01) // minor version
 	out.WriteByte(0x00) // flags
 
-	// 2. TemplateInstanceNode (10 bytes).
+	// 2. TemplateInstanceNode (10 bytes). Its template_offset either names the
+	// definition this record is about to write inline, or the one an earlier
+	// record in this chunk already wrote.
+	inlineOffset := binXMLChunkOffset + fragHeaderSize + templInstSize
+	templateOffset := sharedTemplateOffset
+	if templateOffset == 0 {
+		templateOffset = inlineOffset
+	}
 	out.WriteByte(binXMLTemplateInstance) // token 0x0C
 	out.WriteByte(0x01)                   // unknown0
 	writeUint32LE(out, 1)                 // template_id
-	// template_offset: chunk-relative offset of the TemplateNode (right after this node).
-	templateOffset := binXMLChunkOffset + fragHeaderSize + templInstSize
 	writeUint32LE(out, templateOffset)
 
-	// 3. TemplateNode header (24 bytes).
-	// python-evtx layout: next_offset(4) + GUID(16, first 4B also = template_id) + data_length(4).
-	guid := make([]byte, 16)
-	binary.LittleEndian.PutUint32(guid, 1) // GUID bytes [0:4] (= template_id); [4:16] stay zero
-	writeUint32LE(out, 0)                  // next_offset (no chaining)
-	out.Write(guid)
-	writeUint32LE(out, uint32(len(tbody))) // data_length
+	var names []chunkRef
+	var templates []chunkRef
+	if sharedTemplateOffset == 0 {
+		// 3. TemplateNode header (24 bytes).
+		// python-evtx layout: next_offset(4) + GUID(16, first 4B also =
+		// template_id) + data_length(4).
+		//
+		// The body's own name offsets are chunk-relative, so it can only be
+		// built once its position is known — which is why this is here and not
+		// above.
+		tbody := buildTemplateBody(binXMLChunkOffset+preambleSize, &names)
+		guid := make([]byte, 16)
+		binary.LittleEndian.PutUint32(guid, 1) // GUID bytes [0:4] (= template_id); [4:16] stay zero
+		writeUint32LE(out, 0)                  // next_offset (no chaining)
+		out.Write(guid)
+		writeUint32LE(out, uint32(len(tbody))) // data_length
+		templates = []chunkRef{{key: guidHash(guid), offset: templateOffset}}
 
-	templates := []chunkRef{{key: guidHash(guid), offset: templateOffset}}
-
-	// 4. Template body.
-	out.Write(tbody)
+		// 4. Template body.
+		out.Write(tbody)
+	}
+	// A referencing record reports no names and no template: both are already
+	// registered in this chunk's hash tables by the record that wrote them.
 
 	// 5. Substitution array.
 	writeSubstitutionArray(out, subs)
@@ -297,7 +322,12 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 		out.WriteByte(0x00)
 	}
 
-	return binXMLResult{payload: out.Bytes(), names: names, templates: templates}
+	return binXMLResult{
+		payload:   out.Bytes(),
+		names:     names,
+		templates: templates,
+		defOffset: templateOffset,
+	}
 }
 
 // collectSubstitutionsFromFields gathers all 42 substitution values from a
