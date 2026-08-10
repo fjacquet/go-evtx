@@ -382,6 +382,19 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		// the instance at bytes belonging to a chunk that is already on disk.
 		binXMLChunkOffset = evtxRecordsStart + evtxRecordHeaderSize
 		res = buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, 0)
+
+		// The rebuilt payload must be re-checked, and this is not belt and
+		// braces: before F19 both builds were byte-identical in length, so the
+		// check above covered them both. Now the first build may REFERENCE the
+		// pending chunk's template definition while the rebuild must INLINE
+		// it, which is roughly 2 KB larger. A record that fitted as a
+		// reference can therefore exceed the limit as an inline copy, and
+		// without this it would be appended anyway — a record larger than a
+		// chunk can hold, with CRCs computed over it so the damage verifies.
+		if len(res.payload) > maxRecordPayload {
+			return fmt.Errorf("%w: payload %d bytes exceeds maximum %d once the template "+
+				"is inlined into a fresh chunk", ErrRecordTooLarge, len(res.payload), maxRecordPayload)
+		}
 		rec = wrapEventRecord(w.recordID, ts, res.payload)
 	}
 
