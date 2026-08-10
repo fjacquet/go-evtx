@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRunDump_EventShapeRoundTrips(t *testing.T) {
@@ -178,6 +180,88 @@ func TestRunDump_AllowErrorsExitsZero(t *testing.T) {
 	}
 }
 
+// writeFramingCorruptFixture flips the first record's *signature* rather than
+// a payload byte. writeCorruptFixture above deliberately leaves framing
+// intact; this one breaks it, which is the case that used to make runDump spin
+// forever — nextRecord reported the error without advancing, so the loop
+// re-read the same bytes indefinitely.
+func writeFramingCorruptFixture(t *testing.T, records int) string {
+	t.Helper()
+	good := writeFixture(t, records)
+	b, err := os.ReadFile(good) // #nosec G304 — a path this test just created
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		fileHeaderSize  = 4096
+		chunkHeaderSize = 512
+	)
+	recStart := fileHeaderSize + chunkHeaderSize
+	if len(b) < recStart+24 {
+		t.Fatalf("fixture is only %d bytes, too small to hold a record at offset %d", len(b), recStart)
+	}
+	if sig := b[recStart : recStart+4]; sig[0] != 0x2a || sig[1] != 0x2a || sig[2] != 0 || sig[3] != 0 {
+		t.Fatalf("no record signature at offset %d, got % x — writeFixture's on-disk layout changed", recStart, sig)
+	}
+	b[recStart] ^= 0xff
+
+	bad := filepath.Join(t.TempDir(), "framing.evtx")
+	if err := os.WriteFile(bad, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+// TestRunDump_FramingErrorTerminates bounds the run rather than trusting it:
+// the bug this guards against produced megabytes of identical stderr lines
+// without ever returning, so an unbounded assertion would hang CI instead of
+// failing it.
+func TestRunDump_FramingErrorTerminates(t *testing.T) {
+	path := writeFramingCorruptFixture(t, 3)
+
+	// Both buffers are mutex-guarded: runDump writes them from another
+	// goroutine, and the timeout branch reads one while it is still running.
+	done := make(chan int, 1)
+	out, errb := &syncBuffer{}, &syncBuffer{}
+	go func() { done <- runDump([]string{"--in", path}, out, errb) }()
+
+	select {
+	case code := <-done:
+		if code == 0 {
+			t.Fatalf("runDump = 0 on a framing-corrupt file, want non-zero; stderr: %s", errb.String())
+		}
+		if n := strings.Count(errb.String(), "invalid record signature"); n != 1 {
+			t.Errorf("the framing error was reported %d times, want exactly 1; stderr: %q", n, errb.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("runDump did not terminate on a framing-corrupt file (stderr grew to %d bytes)", errb.Len())
+	}
+}
+
+// syncBuffer is a bytes.Buffer usable from two goroutines at once.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *syncBuffer) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Len()
+}
+
 func TestRunDump_UnknownShapeExitsOne(t *testing.T) {
 	path := writeFixture(t, 1)
 	var out, errb bytes.Buffer
@@ -186,6 +270,30 @@ func TestRunDump_UnknownShapeExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "shape") {
 		t.Errorf("stderr = %q, want it to name the bad flag", errb.String())
+	}
+}
+
+// TestRunDump_BadInputLeavesOutFileIntact pins the ordering: os.Create
+// truncates, so creating the output before opening the input turned a typo in
+// --in into the loss of a previous dump.
+func TestRunDump_BadInputLeavesOutFileIntact(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "previous.ndjson")
+	const existing = "{\"record_id\":1}\n"
+	if err := os.WriteFile(outPath, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", filepath.Join(dir, "absent.evtx"), "--out", outPath}, &out, &errb); code != 1 {
+		t.Errorf("runDump on a missing input = %d, want 1", code)
+	}
+	b, err := os.ReadFile(outPath) // #nosec G304 — a path this test just created
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != existing {
+		t.Errorf("--out file = %q, want it untouched (%q) when the input could not be opened", b, existing)
 	}
 }
 

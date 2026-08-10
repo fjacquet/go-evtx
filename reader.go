@@ -124,6 +124,26 @@ func (r *Reader) loadChunk(idx int) error {
 	return nil
 }
 
+// abandonChunkLocked gives up on the remainder of the current chunk, so that
+// the next call to nextRecord loads the following chunk — or reports the end
+// of the stream when there is none.
+//
+// Every framing field (signature, size) is what tells the reader where the
+// *next* record begins. Once one of them is wrong, no offset in the rest of
+// the chunk can be trusted, and there is nothing to resynchronise on: the
+// only choices are to abandon the chunk or to guess. Returning the error
+// without moving is not among them — nextRecord used to do exactly that, and
+// every caller looping until ErrNoMoreRecords span forever on the same bytes.
+//
+// An empty window (both offsets zero) is used rather than recOff = freeOff
+// because freeOff is itself read from the chunk header and may be the corrupt
+// value in question.
+//
+// CALLER MUST HOLD r.mu.
+func (r *Reader) abandonChunkLocked() {
+	r.recOff, r.freeOff = 0, 0
+}
+
 // nextRecord advances to and parses the next event record header.
 // Returns the raw BinXML payload (without the 24-byte record header or the
 // trailing size copy) and payloadChunkOffset, the chunk-relative byte offset
@@ -143,18 +163,24 @@ func (r *Reader) nextRecord() (recordID uint64, ts uint64, payload []byte, paylo
 		}
 
 		if r.recOff+24 > len(r.buf) {
-			return 0, 0, nil, 0, fmt.Errorf("go_evtx: truncated record at offset %d", r.recOff)
+			off := r.recOff
+			r.abandonChunkLocked()
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: truncated record at offset %d", off)
 		}
 		rec := r.buf[r.recOff:]
 
 		sig := binary.LittleEndian.Uint32(rec[0:4])
 		if sig != evtxRecordSignature {
-			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, r.recOff)
+			off := r.recOff
+			r.abandonChunkLocked()
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record signature 0x%08x at chunk offset %d", sig, off)
 		}
 
 		size := int(binary.LittleEndian.Uint32(rec[4:8]))
 		if size < 28 || r.recOff+size > len(r.buf) {
-			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, r.recOff)
+			off := r.recOff
+			r.abandonChunkLocked()
+			return 0, 0, nil, 0, fmt.Errorf("go_evtx: invalid record size %d at chunk offset %d", size, off)
 		}
 
 		recordID = binary.LittleEndian.Uint64(rec[8:16])
@@ -187,10 +213,25 @@ func (r *Reader) ReadRaw() ([]byte, error) {
 // ReadEvent reads and decodes the next event record.
 // Returns ErrNoMoreRecords when all records have been read.
 //
-// A decode failure is returned for that record alone: record framing comes
-// from the 24-byte record header, independently of the BinXML payload, so the
-// Reader stays positioned on the next record and the caller chooses whether to
-// stop or skip. No partial Event is ever returned.
+// Two kinds of failure are returned, and they leave the Reader in different
+// places. No partial Event is ever returned by either.
+//
+// A *decode* failure — the 24-byte record header parsed, but its BinXML
+// payload did not — is returned for that record alone. Framing comes from the
+// record header independently of the payload, so the Reader stays positioned
+// on the next record: the caller chooses whether to stop or to skip, and a
+// loop that skips reads every remaining record.
+//
+// A *framing* failure — a bad signature, an impossible size, a record header
+// running past the end of the chunk — is returned once, and the rest of that
+// chunk is abandoned, because the fields that say where the next record begins
+// are the ones that cannot be trusted. The following call resumes at the next
+// chunk, or returns ErrNoMoreRecords when this was the last one. Records after
+// the corrupt point in that chunk are therefore not reported; a loop that
+// skips still terminates.
+//
+// ReadRaw shares both behaviours: they belong to record framing, not to
+// decoding.
 func (r *Reader) ReadEvent() (*Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

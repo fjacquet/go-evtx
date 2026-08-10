@@ -63,6 +63,10 @@ func TestFILETIME_RoundTripAcrossTheRange(t *testing.T) {
 		{"filetime epoch", time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)},
 		{"unix epoch", time.Unix(0, 0).UTC()},
 		{"one tick after the unix epoch", time.Date(1970, 1, 1, 0, 0, 0, 100, time.UTC)},
+		// Pre-1970 *and* fractional: delta is negative and does not divide
+		// evenly, so both the quotient and the remainder come out negative.
+		// That is the one path in fromFILETIME with no other coverage.
+		{"one tick before the unix epoch", time.Date(1969, 12, 31, 23, 59, 59, 999999900, time.UTC)},
 		{"present day", time.Date(2026, 8, 10, 6, 2, 35, 412300000, time.UTC)},
 	}
 	for _, tc := range cases {

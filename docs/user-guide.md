@@ -215,7 +215,7 @@ and counted rather than printed one line per record:
 
 ```
 decode     1813/1818 records, 5 failures
-             5  AnsiString is not supported: the format carries no codepage, and it occurs zero times across the measured corpus
+             5  AnsiString is not supported: the format carries no codepage, so any decoding would be a guess
 ```
 
 ### Exit codes
@@ -251,6 +251,13 @@ $ evtx dump security.evtx | jq -s 'map(.system.event_id) | unique'
   reader resolves templates by offset, never by bucket.
 - **`WriteRecord` and `WriteRaw` must not be mixed in one `Writer` session.**
   This is a caller contract; nothing at runtime enforces it.
+- **The reader validates structure, not checksums.** It checks the file magic,
+  the chunk magic, record signatures and record sizes, and it stops there —
+  the CRC32s the writer computes over each chunk and each record are never
+  recomputed on the way back in. A payload whose bits have been flipped but
+  which still parses is returned as if it were valid, with no complaint. Do
+  not read §7's "checksum-invisible" as implying that checksums are otherwise
+  verified: on the read path none of them are.
 
 ## 7. Errors you will actually meet
 

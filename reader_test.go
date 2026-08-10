@@ -6,9 +6,11 @@
 package evtx
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -322,8 +324,11 @@ func TestReadEvent_MultipleRecords(t *testing.T) {
 // TestReadEvent_ZeroTimestampDecodes covers the record shape that made
 // ReadEvent fail on 178 of the 285 files in the local corpus: a record-header
 // FILETIME of 0, which is 1601-01-01T00:00:00Z and which Windows writes for an
-// unset timestamp. Written through the public API rather than by patching
-// bytes, so the chunk CRCs stay valid and the test exercises the real path.
+// unset timestamp. Written through the public API rather than by hand-
+// assembling bytes, so what is read back is whatever the real encode path
+// produces for this timestamp rather than what the test author believed it
+// would produce. (Not a CRC argument: the reader verifies no checksum, so
+// patched bytes would be accepted just as readily.)
 func TestReadEvent_ZeroTimestampDecodes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero-ts.evtx")
 	w, err := New(path, RotationConfig{})
@@ -355,6 +360,122 @@ func TestReadEvent_ZeroTimestampDecodes(t *testing.T) {
 	if !ev.Timestamp.Equal(want) {
 		t.Errorf("Timestamp = %s, want %s",
 			ev.Timestamp.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+}
+
+// writeSignatureCorruptFile writes a multi-record fixture and then flips the
+// first record's *signature* — the framing field, not the BinXML payload that
+// cmd/evtx's writeCorruptFixture deliberately leaves the framing intact for.
+// A framing error tells the reader nothing about where the next record starts,
+// which is what makes the abandon-the-chunk behaviour necessary.
+//
+// The on-disk offset is asserted rather than assumed: New always produces a
+// single-chunk file here (a 4096-byte file header, then one chunk whose
+// 512-byte header precedes its first record), so the first signature sits at
+// exactly 4096+512.
+func writeSignatureCorruptFile(t *testing.T, records int) string {
+	t.Helper()
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.evtx")
+	w, err := New(good, RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < records; i++ {
+		if err := w.WriteRecord(4663, map[string]string{
+			"ProviderName": "Microsoft-Windows-Security-Auditing",
+			"Computer":     "TESTHOST",
+		}); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	b, err := os.ReadFile(good) // #nosec G304 — a path this test just created
+	if err != nil {
+		t.Fatal(err)
+	}
+	recStart := int(evtxFileHeaderSize) + int(evtxChunkHeaderSize)
+	if len(b) < recStart+24 {
+		t.Fatalf("fixture is only %d bytes, too small to hold a record at offset %d", len(b), recStart)
+	}
+	if got := binary.LittleEndian.Uint32(b[recStart : recStart+4]); got != evtxRecordSignature {
+		t.Fatalf("no record signature at offset %d, got 0x%08x — the on-disk layout changed", recStart, got)
+	}
+	b[recStart] ^= 0xff // no longer the record signature
+
+	bad := filepath.Join(dir, "corrupt.evtx")
+	if err := os.WriteFile(bad, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+// TestReadEvent_FramingErrorTerminates is the regression guard for the spin:
+// nextRecord used to return a framing error without advancing recOff, so every
+// subsequent call re-read the same bytes and returned the same error forever.
+// The iteration guard is deliberate — if the bug returns, this test fails
+// instead of hanging CI.
+func TestReadEvent_FramingErrorTerminates(t *testing.T) {
+	path := writeSignatureCorruptFile(t, 3)
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	const maxIterations = 100 // three records were written; anything near this is a spin
+	var framingErrs, decoded, iterations int
+	for iterations = 0; iterations < maxIterations; iterations++ {
+		_, err := r.ReadEvent()
+		if errors.Is(err, ErrNoMoreRecords) {
+			break
+		}
+		if err != nil {
+			framingErrs++
+			if !strings.Contains(err.Error(), "invalid record signature") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			continue
+		}
+		decoded++
+	}
+	if iterations >= maxIterations {
+		t.Fatalf("ReadEvent did not terminate within %d calls — the framing error is not advancing the reader", maxIterations)
+	}
+	if framingErrs != 1 {
+		t.Errorf("framing errors = %d, want exactly 1 (reported once, then the chunk is abandoned)", framingErrs)
+	}
+	// The chunk is abandoned, so the records after the corrupt one are not
+	// recovered: framing is what tells the reader where they start.
+	if decoded != 0 {
+		t.Errorf("decoded = %d, want 0 — the rest of the chunk is abandoned, not resynchronised", decoded)
+	}
+}
+
+// TestReadRaw_FramingErrorTerminates pins the same guarantee on the other
+// record-level entry point, since both share nextRecord.
+func TestReadRaw_FramingErrorTerminates(t *testing.T) {
+	path := writeSignatureCorruptFile(t, 3)
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	const maxIterations = 100
+	var i int
+	for i = 0; i < maxIterations; i++ {
+		if _, err := r.ReadRaw(); errors.Is(err, ErrNoMoreRecords) {
+			break
+		}
+	}
+	if i >= maxIterations {
+		t.Fatalf("ReadRaw did not terminate within %d calls", maxIterations)
 	}
 }
 

@@ -24,7 +24,10 @@ func buildReservedKeys() map[string]bool {
 		"binary":    true,
 		"user_data": true,
 		// Provider is one nested object in the faithful shape and three scalar
-		// keys here; none of the three appears in System's own tags.
+		// keys here. "provider" is System's own tag for that object and would
+		// be picked up by the reflection pass below anyway; it is listed
+		// explicitly so all three keys of the projection appear together. The
+		// other two exist only in this shape.
 		"provider":                   true,
 		"provider_guid":              true,
 		"provider_event_source_name": true,
@@ -89,13 +92,42 @@ func flatten(ev *evtx.Event) (map[string]any, int) {
 		key := d.Name
 		if key == "" || reservedKeys[key] || used[key] {
 			relocated++
-			key = fmt.Sprintf("data_%d", i)
-			if d.Name != "" {
-				key += "_" + d.Name
-			}
+			key = uniqueKey(fallbackKey(i, d.Name), used)
 		}
 		used[key] = true
 		root[key] = d.Value
 	}
 	return root, relocated
+}
+
+// fallbackKey is the generated key for an entry that cannot take its own name:
+// data_<i>, where i is the entry's absolute index, followed by _<Name> when a
+// name exists.
+func fallbackKey(i int, name string) string {
+	key := fmt.Sprintf("data_%d", i)
+	if name != "" {
+		key += "_" + name
+	}
+	return key
+}
+
+// uniqueKey returns key, or the first key_2, key_3, … that is neither reserved
+// nor already used.
+//
+// The generated name is not inherently safe: a record carrying
+// <Data Name="data_3"> at index 0 and an unnamed <Data> at index 3 generates
+// data_3 twice, and writing it unconditionally made the second entry
+// overwrite the first while relocated still counted it as a successful
+// rename. Silent loss is exactly what this shape promises not to do, so the
+// generated key is checked against the same two sets the original name was.
+func uniqueKey(key string, used map[string]bool) string {
+	if !used[key] && !reservedKeys[key] {
+		return key
+	}
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s_%d", key, n)
+		if !used[candidate] && !reservedKeys[candidate] {
+			return candidate
+		}
+	}
 }

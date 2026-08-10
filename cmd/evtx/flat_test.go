@@ -107,6 +107,57 @@ func TestFlatten_ReservedSetIgnoresOmitempty(t *testing.T) {
 	}
 }
 
+// TestFlatten_GeneratedKeyDoesNotOverwrite covers the case the rule used to
+// lose silently: a Data entry literally named data_3 at index 0, and an
+// unnamed entry at index 3 whose generated key is also data_3. Writing the
+// generated key unconditionally made the second overwrite the first while
+// relocated counted it as a successful rename.
+//
+// Value carries no exported constructor, so the two entries are told apart by
+// the keys they land under rather than by their values: what is at stake is
+// that four entries produce four keys, not three.
+func TestFlatten_GeneratedKeyDoesNotOverwrite(t *testing.T) {
+	ev := &evtx.Event{
+		EventData: []evtx.Data{
+			{Name: "data_3"}, // index 0, owns the name a later entry will generate
+			{Name: "B"},
+			{Name: "C"},
+			{Name: ""}, // index 3, generates data_3
+		},
+	}
+	flat, relocated := flatten(ev)
+	if relocated != 1 {
+		t.Errorf("relocated = %d, want 1 (only the unnamed entry is renamed)", relocated)
+	}
+	for _, k := range []string{"data_3", "B", "C", "data_3_2"} {
+		if _, ok := flat[k]; !ok {
+			t.Errorf("%s missing — an entry was silently overwritten; got keys %v", k, keysOf(flat))
+		}
+	}
+}
+
+// The reserved set is checked for the generated key too, not just for the
+// entry's own name: data_0_timestamp would otherwise land on the root
+// timestamp the projection puts there.
+func TestFlatten_GeneratedKeyAvoidsReserved(t *testing.T) {
+	ev := &evtx.Event{
+		EventData: []evtx.Data{{Name: "record_id"}},
+	}
+	// Pin the premise: if this key ever stops being reserved the test below
+	// stops testing anything.
+	if !reservedKeys["data_0_record_id"] {
+		reservedKeys["data_0_record_id"] = true
+		defer delete(reservedKeys, "data_0_record_id")
+	}
+	flat, relocated := flatten(ev)
+	if relocated != 1 {
+		t.Errorf("relocated = %d, want 1", relocated)
+	}
+	if _, ok := flat["data_0_record_id_2"]; !ok {
+		t.Errorf("generated key collided with a reserved key; got keys %v", keysOf(flat))
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

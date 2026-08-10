@@ -31,6 +31,17 @@ func runDump(args []string, stdout, stderr io.Writer) (code int) {
 		return 1
 	}
 
+	// The input is opened before the output is created. os.Create truncates,
+	// so the other order destroys an existing --out file and then exits 1 when
+	// the input turns out not to be readable — a typo in --in costing the
+	// previous dump.
+	r, err := evtx.Open(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+		return 1
+	}
+	defer func() { _ = r.Close() }()
+
 	w := stdout
 	if *out != "" {
 		f, err := os.Create(*out) // #nosec G304 — an operator-supplied output path
@@ -52,13 +63,6 @@ func runDump(args []string, stdout, stderr io.Writer) (code int) {
 		}()
 		w = f
 	}
-
-	r, err := evtx.Open(path)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "evtx dump: %v\n", err)
-		return 1
-	}
-	defer func() { _ = r.Close() }()
 
 	enc := json.NewEncoder(w)
 	total, skipped, relocated := 0, 0, 0
