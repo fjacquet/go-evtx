@@ -318,3 +318,42 @@ func TestReadEvent_MultipleRecords(t *testing.T) {
 		t.Errorf("read %d records, want %d", got, count)
 	}
 }
+
+// TestReadEvent_ZeroTimestampDecodes covers the record shape that made
+// ReadEvent fail on 178 of the 285 files in the local corpus: a record-header
+// FILETIME of 0, which is 1601-01-01T00:00:00Z and which Windows writes for an
+// unset timestamp. Written through the public API rather than by patching
+// bytes, so the chunk CRCs stay valid and the test exercises the real path.
+func TestReadEvent_ZeroTimestampDecodes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero-ts.evtx")
+	w, err := New(path, RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := w.WriteRecord(4663, map[string]string{
+		"ProviderName": "Microsoft-Windows-Security-Auditing",
+		"Computer":     "TESTHOST",
+		"TimeCreated":  "1601-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	ev, err := r.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	want := time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !ev.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %s, want %s",
+			ev.Timestamp.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+}

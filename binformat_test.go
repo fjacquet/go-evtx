@@ -52,27 +52,49 @@ func TestToFILETIME(t *testing.T) {
 	}
 }
 
-// TestFromFILETIME_RoundTrip verifies the ordinary case: a modern timestamp
-// converted to FILETIME and back returns exactly what went in, with no error.
-func TestFromFILETIME_RoundTrip(t *testing.T) {
-	want := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	got, err := fromFILETIME(toFILETIME(want))
-	if err != nil {
-		t.Fatalf("fromFILETIME: %v", err)
+// TestFILETIME_RoundTripAcrossTheRange covers both ends of the format's range,
+// not just a modern timestamp. toFILETIME has the same nanosecond-overflow
+// defect as fromFILETIME had, so a 1601 case is what proves both halves fixed.
+func TestFILETIME_RoundTripAcrossTheRange(t *testing.T) {
+	cases := []struct {
+		name string
+		want time.Time
+	}{
+		{"filetime epoch", time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"unix epoch", time.Unix(0, 0).UTC()},
+		{"one tick after the unix epoch", time.Date(1970, 1, 1, 0, 0, 0, 100, time.UTC)},
+		{"present day", time.Date(2026, 8, 10, 6, 2, 35, 412300000, time.UTC)},
 	}
-	if !got.Equal(want) {
-		t.Errorf("fromFILETIME(toFILETIME(%v)) = %v, want %v", want, got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := fromFILETIME(toFILETIME(tc.want))
+			if err != nil {
+				t.Fatalf("fromFILETIME(toFILETIME(%s)): %v", tc.want.Format(time.RFC3339Nano), err)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("round trip = %s, want %s",
+					got.Format(time.RFC3339Nano), tc.want.Format(time.RFC3339Nano))
+			}
+		})
 	}
 }
 
-// TestFromFILETIME_OutOfRangeIsError is carried finding A: ft == 0 is exactly
-// what a corrupt or absent timestamp field yields, and the pre-fix formula
-// (int64(ft)-filetimeEpochDelta)*100 silently overflows int64 for it instead
-// of failing. A decoder built to read untrusted forensic files must detect
-// this rather than return a silently wrong time.
-func TestFromFILETIME_OutOfRangeIsError(t *testing.T) {
-	if _, err := fromFILETIME(0); err == nil {
-		t.Fatal("fromFILETIME(0) must report an error, not a silently wrapped time")
+// TestFromFILETIME_ZeroIsYear1601 replaces TestFromFILETIME_OutOfRangeIsError,
+// which asserted that ft == 0 must be rejected as corruption. It is not
+// corruption: FILETIME 0 is 1601-01-01T00:00:00Z, Windows writes it for an
+// unset timestamp, and 180 records across 178 of the 285 files in the local
+// corpus carry one. The old rejection came from converting through int64
+// nanoseconds, which cannot represent 1601 — a limit of our arithmetic, not of
+// the format.
+func TestFromFILETIME_ZeroIsYear1601(t *testing.T) {
+	got, err := fromFILETIME(0)
+	if err != nil {
+		t.Fatalf("fromFILETIME(0) = error %v, want 1601-01-01T00:00:00Z", err)
+	}
+	want := time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("fromFILETIME(0) = %s, want %s",
+			got.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
 	}
 }
 
