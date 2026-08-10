@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-10
+
+### Changed
+
+- **BREAKING:** `WriteRecord` returns `ErrMissingProviderName` when `fields`
+  has no non-empty `"ProviderName"`, instead of writing the record.
+
+  Since 0.7.1 an unsupplied value is a `NULL` substitution, which omits its
+  element — so an empty provider name produced `<Provider></Provider>`, and
+  `Get-WinEvent` threw a `NullReferenceException` on the whole file. The file
+  was otherwise valid: `EventLogReader` read every record and `wevtutil`
+  exited 0, which is what made the cause so hard to find. It cost a downstream
+  consumer a full investigation (issue #10) before an empty `ProviderName` was
+  isolated as the trigger.
+
+  Callers passing an empty provider name were already producing a file
+  `Get-WinEvent` could not read. This turns that into an error at the point of
+  the mistake.
+
+  Only this field is validated. Measured on Windows Server 2025, one variable
+  at a time: an empty `Computer` and an empty `Channel` both read fine, so
+  rejecting them would be a rule nothing measured.
+
+- `cmd/gen-fixture` removed — it supplied no `ProviderName` and no longer
+  runs. `cmd/gen-fixture-system` is the CI gate. What the frozen fixture stood
+  for is now `conformance_test.go`, which asserts the rules the corpus taught
+  (8-alignment, the EOF token and padding, `NULL` for zero-length values)
+  against output written by today's encoder rather than against old bytes.
+  See the note at the end of `docs/format-baseline.md`.
+
+- `binxml.go` split into three files — 1174 lines to 431, with the `<Event>`
+  template body in `binxml_template.go` and the token writers in
+  `binxml_tokens.go`. No behaviour change: `testdata/binxml-golden.bin` matches
+  byte for byte, so the encoder emits exactly what it did before. The
+  F14/F15/F16 narrative moved to `docs/evtx-format-notes.md`.
+
+  Nothing for a consumer to act on. It is here because the split is what makes
+  the remaining format work reviewable: every format fix lands in the template
+  file, and the token writers have no reason to change when an event's shape
+  does.
+
 ## [0.7.1] - 2026-08-09
 
 The writer now emits what Windows emits. 0.7.0 made `ToXml()` render; this
@@ -275,7 +316,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/fjacquet/go-evtx/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/fjacquet/go-evtx/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/fjacquet/go-evtx/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/fjacquet/go-evtx/compare/v0.5.0...v0.6.0

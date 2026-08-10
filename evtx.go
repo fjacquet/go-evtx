@@ -335,6 +335,18 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		}
 	}
 
+	// Rejected before anything is written, and deliberately not defaulted to
+	// some invented provider name: a record with no provider produces a file
+	// Get-WinEvent cannot read, and inventing a value would put a name in a
+	// forensic artefact that no caller chose. See ErrMissingProviderName.
+	//
+	// Checked here rather than beside checkStateLocked so it cannot mask a
+	// sticky durability error: a caller must learn that data was lost before
+	// it learns its field map is wrong.
+	if fields["ProviderName"] == "" {
+		return ErrMissingProviderName
+	}
+
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
 	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset)
 

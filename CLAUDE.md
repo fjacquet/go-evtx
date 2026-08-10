@@ -37,7 +37,9 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `errors.go` | Sentinel errors (`ErrClosed`, `ErrRecordTooLarge`) and capacity limits (`maxChunkPayload`, `maxRecordPayload`) |
 | `reader.go` | Reader API: `Reader`, `Record`, `Open()`, `ReadRecord()`, `ReadRaw()`, `Close()`, `ErrNoMoreRecords` |
 | `binformat.go` | Binary format helpers: file/chunk headers, event record wrapper, CRC32, `toFILETIME`/`fromFILETIME`, UTF-16LE encoding |
-| `binxml.go` | BinXML encoder: template body, substitution array, token writers, `fieldPatch` back-patching for `data_size`/`attr_list_size` |
+| `binxml.go` | BinXML encoder, record assembly: `buildBinXML`, the substitution array, the substitution index map |
+| `binxml_template.go` | The `<Event>` template body — which element gets which token, in which order, with which substitution index. **This is the file a format fix touches.** `fieldPatch` back-patching for `data_size`/`attr_list_size` lives here |
+| `binxml_tokens.go` | The token writers and little-endian helpers. Knows nothing about `<System>`; writes one token as the format defines it |
 | `binxml_reader.go` | BinXML decoder: `decodeBinXML()`, substitution array parser, UTF-16LE decoder |
 | `chunkhash.go` | Per-chunk hash tables: `sdbmHash` (UTF-16 code units), `guidHash`, bucket rules, `fillHashTables` |
 | `corpus_scan_test.go` | Corpus fact dumper: one JSON Lines fact per file, chunk and record. Never string values |
@@ -93,8 +95,21 @@ Neither is shipped: `.goreleaser.yaml` sets `builds: [{skip: true}]` because thi
 
 | Command | Role |
 |---|---|
-| `gen-fixture` | **Frozen.** Produces the main measurement fixture. Every row of `docs/format-baseline.md` compares against it, so changing its output silently invalidates the comparison chain. Do not touch it. |
+| `gen-fixture-system` | **The CI gate.** Produces the main measurement fixture: 403 records, several chunks, non-ASCII and non-BMP names, a record at the chunk ceiling. Rows from 23 on in `docs/format-baseline.md` compare against it |
 | `gen-fixture-minimal` | One record, one chunk, pure ASCII — the smallest file the library can produce |
+
+`cmd/gen-fixture` was removed on 2026-08-10. It supplied no `ProviderName`, so
+`ErrMissingProviderName` stopped it running, and a repository hook had frozen
+it against edits. Its freeze preserved the generator's *input*, never its
+output — rerunning it after an encoder change always produced different bytes,
+so reproducing an old baseline row needed the library of the time too. See the
+note at the end of `docs/format-baseline.md`.
+
+What it stood for is now `conformance_test.go`: instead of comparing against
+old bytes, the encoder's output is asserted against the rules those
+measurements established — 8-alignment, the fragment EOF token and padding,
+zero-length descriptors declaring `NULL`, and no `NormalSubstitution` paired
+with a `NULL` array entry. Each assertion carries its corpus count.
 
 **The bisection harness is gone.** Eleven further `main` packages plus `binxml_variants.go` and its test — 3067 lines — produced the shrink-ladder and real/ours graft experiments. Their results stay recorded in `docs/format-baseline.md`; the code went once the defect they were hunting was found (F15, the shape census). Deleting them also took `Format Verify` from 28 jobs to 5.
 
