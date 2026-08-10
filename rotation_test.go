@@ -41,8 +41,14 @@ func TestWriter_SizeRotation(t *testing.T) {
 		"AccessMask":   "0x2",
 	}
 
-	// Write 1000 records — enough to push past 1 MB threshold.
-	for i := 0; i < 1000; i++ {
+	// Enough records to push past the 1 MB threshold. This was 1000 until
+	// F19 stopped duplicating the template definition in every record: a
+	// record carrying its own inline copy ran to roughly 2.5 KB, and one
+	// referencing the chunk's shared definition is closer to 600 bytes, so
+	// 1000 no longer reached the threshold and this test silently stopped
+	// exercising size rotation. Sized with margin rather than to the byte,
+	// since the point is that rotation happens, not where.
+	for i := 0; i < 4000; i++ {
 		if err := w.WriteRecord(4663, fields); err != nil {
 			t.Fatalf("WriteRecord %d: %v", i, err)
 		}

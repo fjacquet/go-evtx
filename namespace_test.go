@@ -15,7 +15,7 @@ const eventSchemaURI = "http://schemas.microsoft.com/win/2004/08/events/event"
 // TestBuildBinXML_DeclaresEventNamespace looks for the schema URI in the
 // encoded payload as UTF-16LE, which is how BinXML stores strings.
 func TestBuildBinXML_DeclaresEventNamespace(t *testing.T) {
-	res := buildBinXML(4663, 1, testFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize))
+	res := buildBinXML(4663, 1, testFields(), uint32(evtxRecordsStart+evtxRecordHeaderSize), 0)
 
 	var want strings.Builder
 	for _, u := range utf16.Encode([]rune(eventSchemaURI)) {

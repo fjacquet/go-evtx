@@ -74,6 +74,38 @@ func writeConformanceFixture(t *testing.T) string {
 	return path
 }
 
+// walkChunkRecords calls fn for each record in a chunk, and is strict about
+// boundaries on purpose. An earlier version of these tests broke out of the
+// loop on an implausible size, so a malformed record would silently shorten
+// the walk and the test would pass having checked fewer records than it
+// thought — the same "stopped testing without saying so" failure this
+// repository has hit three times. A bad boundary is fatal, and the walk must
+// end exactly at the chunk's free-space offset.
+func walkChunkRecords(t *testing.T, chunk []byte, chunkIndex int, fn func(off, size int)) {
+	t.Helper()
+	free := int(binary.LittleEndian.Uint32(chunk[48:52]))
+	if free < int(evtxChunkHeaderSize) || free > len(chunk) {
+		t.Fatalf("chunk %d: free space offset %d outside the chunk", chunkIndex, free)
+	}
+	off := int(evtxChunkHeaderSize)
+	for off < free {
+		if off+24 > free {
+			t.Fatalf("chunk %d: %d bytes before free space offset %d — too few for a record header",
+				chunkIndex, free-off, free)
+		}
+		size := int(binary.LittleEndian.Uint32(chunk[off+4:]))
+		if size < 28 || off+size > free {
+			t.Fatalf("chunk %d: record at %d declares size %d, which does not fit before free space offset %d",
+				chunkIndex, off, size, free)
+		}
+		fn(off, size)
+		off += size
+	}
+	if off != free {
+		t.Fatalf("chunk %d: record walk ended at %d, free space offset is %d", chunkIndex, off, free)
+	}
+}
+
 // TestConformance_RecordsAreAlignedAndTerminated walks every record of a
 // freshly written file and checks W1 and W2 at the byte level.
 func TestConformance_RecordsAreAlignedAndTerminated(t *testing.T) {
@@ -91,18 +123,12 @@ func TestConformance_RecordsAreAlignedAndTerminated(t *testing.T) {
 		start := int(evtxFileHeaderSize) + ci*int(evtxChunkSize)
 		chunk := raw[start : start+int(evtxChunkSize)]
 		cache := newTemplateCache(chunk)
-		free := int(binary.LittleEndian.Uint32(chunk[48:52]))
 
-		if free > 65528 {
+		if free := int(binary.LittleEndian.Uint32(chunk[48:52])); free > 65528 {
 			t.Errorf("chunk %d: free space offset %d — real Windows never exceeds 65528 in 2900 measured chunks",
 				ci, free)
 		}
-		off := int(evtxChunkHeaderSize)
-		for off+24 <= free {
-			size := int(binary.LittleEndian.Uint32(chunk[off+4:]))
-			if size < 28 || off+size > len(chunk) {
-				t.Fatalf("chunk %d: implausible record size %d at offset %d", ci, size, off)
-			}
+		walkChunkRecords(t, chunk, ci, func(off, size int) {
 			// W2.
 			if size%8 != 0 {
 				t.Errorf("chunk %d record at %d: size %d is not a multiple of 8", ci, off, size)
@@ -117,8 +143,7 @@ func TestConformance_RecordsAreAlignedAndTerminated(t *testing.T) {
 				t.Errorf("chunk %d record at %d: %v", ci, off, err)
 			}
 			records++
-			off += size
-		}
+		})
 	}
 	if records != 120 {
 		t.Fatalf("walked %d records, want 120", records)
@@ -154,13 +179,7 @@ func TestConformance_AbsentValuesDeclareNull(t *testing.T) {
 				absent++
 			}
 		}
-		free := int(binary.LittleEndian.Uint32(chunk[48:52]))
-		off := int(evtxChunkHeaderSize)
-		for off+24 <= free {
-			size := int(binary.LittleEndian.Uint32(chunk[off+4:]))
-			if size < 28 || off+size > len(chunk) {
-				break
-			}
+		walkChunkRecords(t, chunk, ci, func(off, size int) {
 			// The decode is what drives the shape hook above, which is how
 			// F18b gets checked. F18a is checked separately below, straight
 			// from the descriptors, so a wrong declared type cannot hide
@@ -169,8 +188,7 @@ func TestConformance_AbsentValuesDeclareNull(t *testing.T) {
 				t.Fatalf("chunk %d record at %d: %v", ci, off, err)
 			}
 			zeroLength += countZeroLengthDescriptors(t, chunk, off, size)
-			off += size
-		}
+		})
 	}
 	if absent == 0 {
 		t.Fatal("no NULL substitution values seen — the fixture must leave some fields unsupplied")
@@ -224,4 +242,49 @@ func countZeroLengthDescriptors(t *testing.T, chunk []byte, recOff, size int) in
 		}
 	}
 	return zero
+}
+
+// TestConformance_TemplateDeclaredOncePerChunk pins F19. Real Windows declares
+// a template definition once and points every later instance in the chunk
+// backward at it: 545 definitions across the derivation corpus against 36 819
+// backward references, and not one forward reference. go-evtx inlined a full
+// copy in every record until v0.7.3, which cost 46% of the file.
+func TestConformance_TemplateDeclaredOncePerChunk(t *testing.T) {
+	raw, err := os.ReadFile(writeConformanceFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := int(binary.LittleEndian.Uint16(raw[42:44]))
+
+	inline, backward := 0, 0
+	for ci := 0; ci < chunks; ci++ {
+		start := int(evtxFileHeaderSize) + ci*int(evtxChunkSize)
+		chunk := raw[start : start+int(evtxChunkSize)]
+		cache := newTemplateCache(chunk)
+		perChunkInline := 0
+		walkChunkRecords(t, chunk, ci, func(off, size int) {
+			rf := recordFact{}
+			fragScan(cache, off+24, size-28, &rf)
+			if !rf.HasDef {
+				t.Fatalf("chunk %d record at %d: no template instance found", ci, off)
+			}
+			switch {
+			case rf.Inline:
+				perChunkInline++
+				inline++
+			case rf.DefOff < off:
+				backward++
+			default:
+				t.Errorf("chunk %d record at %d: template offset %d points forward — "+
+					"zero forward references occur in the derivation corpus", ci, off, rf.DefOff)
+			}
+		})
+		if perChunkInline != 1 {
+			t.Errorf("chunk %d declares %d template definitions, want exactly 1", ci, perChunkInline)
+		}
+	}
+	if backward == 0 {
+		t.Fatal("no record referenced a shared definition — the fixture must put several records in a chunk")
+	}
+	t.Logf("%d inline definitions, %d backward references across %d chunks", inline, backward, chunks)
 }
