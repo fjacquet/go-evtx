@@ -20,8 +20,17 @@ builds:
     goarch: [amd64, arm64]
 
 archives:
+  # No build filter here. The key that selects builds was renamed from
+  # `builds` to `ids` after v2.7.0, which is the version CI pins — so naming
+  # either one ties this file to a goreleaser version. There is exactly one
+  # build, and an archive with no filter takes all of them, so the filter is
+  # unnecessary in the first place.
+  #
+  # v0.8.0's release failed on precisely this: `goreleaser check` passed
+  # locally against 2.17.1 and CI's 2.7.0 rejected `ids` with
+  # "field ids not found in type config.Archive". Validate against the pinned
+  # version, not the current documentation.
   - id: evtx
-    ids: [evtx]
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
