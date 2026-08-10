@@ -12,6 +12,23 @@ var ErrClosed = errors.New("go_evtx: writer is closed")
 // the record is rejected and nothing is written.
 var ErrRecordTooLarge = errors.New("go_evtx: record exceeds chunk capacity")
 
+// ErrMissingProviderName is returned by WriteRecord when fields has no
+// non-empty "ProviderName". Since v0.7.1 an unsupplied value is encoded as a
+// NULL substitution, which per the format omits its element — so an empty
+// provider name produces <Provider></Provider>, and Get-WinEvent throws a
+// NullReferenceException dereferencing a provider that has no name. The file
+// is otherwise valid: EventLogReader reads every record and wevtutil exits 0,
+// which is what makes the failure so hard to trace back to its cause.
+//
+// Measured on Windows Server 2025, one variable at a time: an empty
+// ProviderName fails, while an empty Computer and an empty Channel both read
+// fine. Only this one field is rejected — validating the other two would be
+// inventing a rule nothing measured.
+//
+// Reported downstream as issue #10, where it cost a full investigation before
+// the cause was found. An error here is the diagnostic that was missing.
+var ErrMissingProviderName = errors.New("go_evtx: ProviderName must not be empty")
+
 // ErrTooManyChunks is returned when a file has reached the maximum number of
 // chunks a uint16 chunk counter can address. Continuing would wrap the counter
 // and overwrite chunk 0. Rotate, or set MaxFileSizeMB so rotation happens

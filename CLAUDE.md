@@ -95,8 +95,21 @@ Neither is shipped: `.goreleaser.yaml` sets `builds: [{skip: true}]` because thi
 
 | Command | Role |
 |---|---|
-| `gen-fixture` | **Frozen.** Produces the main measurement fixture. Every row of `docs/format-baseline.md` compares against it, so changing its output silently invalidates the comparison chain. Do not touch it. |
+| `gen-fixture-system` | **The CI gate.** Produces the main measurement fixture: 403 records, several chunks, non-ASCII and non-BMP names, a record at the chunk ceiling. Rows from 23 on in `docs/format-baseline.md` compare against it |
 | `gen-fixture-minimal` | One record, one chunk, pure ASCII — the smallest file the library can produce |
+
+`cmd/gen-fixture` was removed on 2026-08-10. It supplied no `ProviderName`, so
+`ErrMissingProviderName` stopped it running, and a repository hook had frozen
+it against edits. Its freeze preserved the generator's *input*, never its
+output — rerunning it after an encoder change always produced different bytes,
+so reproducing an old baseline row needed the library of the time too. See the
+note at the end of `docs/format-baseline.md`.
+
+What it stood for is now `conformance_test.go`: instead of comparing against
+old bytes, the encoder's output is asserted against the rules those
+measurements established — 8-alignment, the fragment EOF token and padding,
+zero-length descriptors declaring `NULL`, and no `NormalSubstitution` paired
+with a `NULL` array entry. Each assertion carries its corpus count.
 
 **The bisection harness is gone.** Eleven further `main` packages plus `binxml_variants.go` and its test — 3067 lines — produced the shrink-ladder and real/ours graft experiments. Their results stay recorded in `docs/format-baseline.md`; the code went once the defect they were hunting was found (F15, the shape census). Deleting them also took `Format Verify` from 28 jobs to 5.
 

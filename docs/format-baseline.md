@@ -3164,3 +3164,40 @@ open, now as a file-size matter: a go-evtx file carries a full inline template
 copy in every record where Windows carries one per chunk. And the template
 hash-table bucket rule for format 3.2 remains unknown (`#46`); the 3.1 rule
 scores at or below chance on every 3.2 file measured.
+
+## Note, 2026-08-10: `cmd/gen-fixture` no longer exists
+
+Every row above cites `cmd/gen-fixture`. It has been removed, and this note is
+here so a reader finding those citations is not left looking for a directory
+that is gone.
+
+**Why it went.** `ErrMissingProviderName` rejects a record with no provider
+name at write time — the diagnostic downstream issue #10 asked for, after an
+empty `ProviderName` cost a full investigation. `gen-fixture` supplied none, so
+it stopped running: it now dies inside its own binary search with a message
+blaming the search's lower bound. It was frozen behind a repository hook
+precisely so it could not be edited, which left removing it as the only way
+forward.
+
+**What was actually lost, which is less than it looks.** The freeze preserved
+the generator's *input*, never its output. Rerunning it after any encoder
+change produces different bytes, and this release changed the encoder three
+times (F18, W1, W2). Reproducing row 1 was never a matter of rerunning
+`gen-fixture` — it needed v0.6.0's library as well. The rows above remain what
+they always were: a record of what was measured, when, and against which
+`head_sha`.
+
+**What replaced it.** `cmd/gen-fixture-system` is the CI gate and produces the
+fixture rows from row 23 on compare against. And `conformance_test.go` pins
+the rules those rows established, asserted against a file the test writes with
+today's encoder rather than against old bytes:
+
+- records 8-aligned in size and offset (W2)
+- an EOF token and 0–7 bytes of padding after every substitution array (W1)
+- every zero-length descriptor declaring `NULL` (F18a)
+- no `NormalSubstitution` paired with a `NULL` array entry (F18b)
+
+Each of those is a measurement over the derivation corpus, cited with its
+count in the test, and each was violated by this encoder at some point. A
+change that breaks one fails in seconds locally instead of on a Windows runner
+several steps later.

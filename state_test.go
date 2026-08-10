@@ -217,3 +217,92 @@ func TestWriter_Close_FinalFlushFailureSetsStickyError(t *testing.T) {
 		t.Fatalf("WriteRecord after failed Close = %v, want the sticky error %v", got, stickyErr)
 	}
 }
+
+// TestWriteRecord_RejectsEmptyProviderName pins the one field validated at
+// write time, and pins that it is the only one.
+//
+// Measured on Windows Server 2025, one variable at a time: with an empty
+// ProviderName, Get-WinEvent throws a NullReferenceException on the whole
+// file; with an empty Computer or an empty Channel it reads every record.
+// Since v0.7.1 an unsupplied value is a NULL substitution, which omits its
+// element — so an empty provider name yields <Provider></Provider>, and the
+// reader dereferences a provider that has no name. Reported downstream as
+// issue #10, where it cost a full investigation.
+//
+// Computer and Channel are deliberately NOT validated. Rejecting them would
+// be a rule nothing measured.
+func TestWriteRecord_RejectsEmptyProviderName(t *testing.T) {
+	valid := func() map[string]string {
+		return map[string]string{
+			"ProviderName": "Microsoft-Windows-Security-Auditing",
+			"Computer":     "TESTHOST",
+			"Channel":      "Security",
+			"ObjectName":   `C:\test\file.txt`,
+		}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(map[string]string)
+		wantErr error
+	}{
+		{"all set", func(map[string]string) {}, nil},
+		{"empty ProviderName", func(f map[string]string) { f["ProviderName"] = "" }, ErrMissingProviderName},
+		{"absent ProviderName", func(f map[string]string) { delete(f, "ProviderName") }, ErrMissingProviderName},
+		{"empty Computer", func(f map[string]string) { f["Computer"] = "" }, nil},
+		{"empty Channel", func(f map[string]string) { f["Channel"] = "" }, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w, err := New(filepath.Join(t.TempDir(), "w.evtx"), RotationConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = w.Close() }()
+			f := valid()
+			tc.mutate(f)
+			err = w.WriteRecord(4663, f)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("WriteRecord = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestWriteRecord_EmptyProviderNameWritesNothing pins that a rejected record
+// leaves the writer untouched — the same contract ErrRecordTooLarge has.
+func TestWriteRecord_EmptyProviderNameWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.evtx")
+	w, err := New(path, RotationConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRecord(4663, map[string]string{"ObjectName": "x"}); !errors.Is(err, ErrMissingProviderName) {
+		t.Fatalf("WriteRecord = %v, want ErrMissingProviderName", err)
+	}
+	if err := w.WriteRecord(4663, map[string]string{
+		"ProviderName": "Microsoft-Windows-Security-Auditing",
+		"ObjectName":   "x",
+	}); err != nil {
+		t.Fatalf("second WriteRecord: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	n := 0
+	for {
+		if _, err := r.ReadEvent(); err == ErrNoMoreRecords {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		n++
+	}
+	if n != 1 {
+		t.Errorf("file holds %d records, want 1 — the rejected record must not have been written", n)
+	}
+}

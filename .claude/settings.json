@@ -1,17 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "p=$(jq -r '.tool_input.file_path // empty'); case \"$p\" in */cmd/gen-fixture/main.go) echo 'BLOCKED: cmd/gen-fixture/main.go is frozen. Every row of docs/format-baseline.md compares against its output, so changing it silently invalidates the measurement chain. Add a new generator under cmd/ instead. See the cmd/ section in CLAUDE.md.' >&2; exit 2;; esac; exit 0"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",

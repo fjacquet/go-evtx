@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** `WriteRecord` returns `ErrMissingProviderName` when `fields`
+  has no non-empty `"ProviderName"`, instead of writing the record.
+
+  Since 0.7.1 an unsupplied value is a `NULL` substitution, which omits its
+  element — so an empty provider name produced `<Provider></Provider>`, and
+  `Get-WinEvent` threw a `NullReferenceException` on the whole file. The file
+  was otherwise valid: `EventLogReader` read every record and `wevtutil`
+  exited 0, which is what made the cause so hard to find. It cost a downstream
+  consumer a full investigation (issue #10) before an empty `ProviderName` was
+  isolated as the trigger.
+
+  Callers passing an empty provider name were already producing a file
+  `Get-WinEvent` could not read. This turns that into an error at the point of
+  the mistake.
+
+  Only this field is validated. Measured on Windows Server 2025, one variable
+  at a time: an empty `Computer` and an empty `Channel` both read fine, so
+  rejecting them would be a rule nothing measured.
+
+- `cmd/gen-fixture` removed — it supplied no `ProviderName` and no longer
+  runs. `cmd/gen-fixture-system` is the CI gate. What the frozen fixture stood
+  for is now `conformance_test.go`, which asserts the rules the corpus taught
+  (8-alignment, the EOF token and padding, `NULL` for zero-length values)
+  against output written by today's encoder rather than against old bytes.
+  See the note at the end of `docs/format-baseline.md`.
+
 - `binxml.go` split into three files — 1174 lines to 431, with the `<Event>`
   template body in `binxml_template.go` and the token writers in
   `binxml_tokens.go`. No behaviour change: `testdata/binxml-golden.bin` matches
