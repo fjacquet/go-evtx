@@ -155,9 +155,21 @@ Expected effect, to be confirmed by re-measuring after the change: `ReadEvent`
 failures fall from 206 to 26, and affected files from 178 to 4. The CLI then
 exits 0 on 281 of 285 corpus files instead of 107.
 
+**`toFILETIME` has the same defect and must move with it.** It computes
+`t.UTC().UnixNano()/100 + filetimeEpochDelta`, and `UnixNano` is undefined
+outside 1678–2262 — so the 1601 round trip this fix is meant to enable would
+fail on the encode side. It becomes
+`u.Unix()*10_000_000 + int64(u.Nanosecond())/100 + filetimeEpochDelta`.
+
+**One existing test asserts the wrong belief and must be rewritten, not
+deleted.** `TestFromFILETIME_OutOfRangeIsError` in `binformat_test.go` states
+that `fromFILETIME(0)` must error, with a comment explaining it as a corruption
+guard. It becomes a test that 0 decodes to 1601-01-01T00:00:00Z, carrying a
+comment that says what replaced the old belief and why.
+
 Tests: `fromFILETIME(0)` yields 1601-01-01T00:00:00Z; a round trip through
 `toFILETIME` returns the input for 1601, for the Unix epoch, and for a present
-day value; `ft > MaxInt64` still errors. A `Record`/`Event` level test asserts a
+day value; `ft > MaxInt64` still errors. A reader-level test asserts a
 zero-timestamp record now decodes rather than failing.
 
 ## Architecture
@@ -207,8 +219,8 @@ Four fields already read, or trivially readable, in `Open`. This is a new public
 surface on a `v0.x` library and is intentional: "what format version am I
 holding" is a legitimate question for any consumer, not only for a display.
 
-Everything else `info` reports — record count, distinct templates, decode
-failures — comes from walking the file, so it needs no further API.
+Everything else `info` reports — record count and decode failures — comes from
+walking the file with `ReadEvent`, so it needs no further API.
 
 ## `evtx dump`
 
@@ -294,9 +306,14 @@ format     3.2
 chunks     11
 flags      dirty=false full=true
 records    1818
-templates  545 distinct definitions
 decode     1818/1818 records, 0 failures
 ```
+
+**Correction, made while planning.** An earlier draft of this section also
+printed a distinct-template count. It is not reachable: template offsets live
+in unexported structures, `cmd/evtx` is a separate package, and the only ways
+to print it would be to export chunk internals or to reimplement the decoder in
+the CLI. Dropped rather than paid for.
 
 When records fail, causes are **grouped and normalised**, never listed one per
 record:
