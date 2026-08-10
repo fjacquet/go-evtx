@@ -24,7 +24,8 @@ Spec: `docs/superpowers/specs/2026-08-10-evtx-cli-and-docs-design.md`.
   Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01V4aa2erUpGicpwi3pPi6Ds
   ```
-- **Branch:** all work lands on `feat/evtx-cli`, which already exists and carries the spec commit.
+- **Branch:** all work lands on `feat/evtx-cli`, which already exists, carries the spec and plan commits, and is rebased on `v0.7.4`.
+- **`WriteRecord` gained `ErrInvalidFieldValue` in v0.7.4** (issue #13): `Level`, `Version`, `Task`, `Opcode` and `Keywords` are now read from the fields map, parsed as fixed-width unsigned integers in decimal or with an `0x` prefix. Any new test that passes one of those keys must pass a value that fits, or expect the error.
 
 ---
 
@@ -2064,10 +2065,13 @@ Then add the compare links at the bottom of the file:
 
 ```
 [Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...v0.8.0
+[0.8.0]: https://github.com/fjacquet/go-evtx/compare/v0.7.4...v0.8.0
 ```
 
 and change the existing `[Unreleased]` line to point from `v0.8.0`.
+
+Note the base is **v0.7.4**, not v0.7.3: issue #13 shipped as a separate patch
+release while this plan was being written.
 
 - [ ] **Step 5: Full verification**
 
