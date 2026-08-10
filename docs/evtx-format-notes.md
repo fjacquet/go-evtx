@@ -90,7 +90,7 @@ permissive.** Its own source contains `# TODO: use this size() field` —
 a `data_size` that lies about its own content cannot break it — and,
 independently, its `RootNode.substitutions()` tolerates a fixed-width type
 (e.g. `GUID`, 16 bytes) whose declared size is off by up to 4 bytes rather
-than rejecting the mismatch outright [measured: `task-8e-report.md`, Attempt
+than rejecting the mismatch outright [measured: `docs/reports/task-8e-report.md`, Attempt
 1's crash and its explanation]. **python-evtx going green after F1–F15 fixed
 every structural divergence it can see is not evidence the file is
 well-formed** — `Get-WinEvent`/`ToXml()` still reject every go-evtx-produced
@@ -1062,7 +1062,7 @@ none — every byte this function and buildTemplateBody write is identical
 to what F12b/F13c already wrote. The value was in what got measured along
 the way, not in a code change.
 
-task-8b-report.md's Step 1 table claims Correlation/@ActivityID and
+docs/reports/task-8b-report.md's Step 1 table claims Correlation/@ActivityID and
 @RelatedActivityID are typed GUID (0x0f), Security/@UserID is typed SID
 (0x13), and EventID/@Qualifiers is typed UNSIGNED_WORD (0x06) — all at
 size 0 — and F13c (Task 8c) built Qualifiers to match.
@@ -1111,7 +1111,7 @@ may themselves be unreliable, and this task did not independently
 re-derive them, only re-checked the types at the indices the table
 already named — or Windows' acceptance of a record ties to this declared
 type through a mechanism this investigation did not identify. See
-task-8e-report.md's "Concerns" section. task-8b-report.md carries its own
+docs/reports/task-8e-report.md's "Concerns" section. docs/reports/task-8b-report.md carries its own
 correction note for the four-position type discrepancy regardless of
 which explanation is right — that byte-level finding (about real Windows
 output) stands on its own, independent of what go-evtx's own encoder
@@ -1233,7 +1233,7 @@ metadata.
   the three fields Task 8d's own `PROP` probe showed `.NET` reads
   independent of `ToXml`.
 - **`Qualifiers`'s declared type is an open, evidence-contradicting
-  question**, not a settled one. `task-8b-report.md`'s own hex-decoded Step 1
+  question**, not a settled one. `docs/reports/task-8b-report.md`'s own hex-decoded Step 1
   table said real Windows declares `EventID/@Qualifiers` as `UInt16Type`
   at size 0; a later byte-for-byte re-parse of the *same* real record found
   it declared `0x00` (`NullType`) there instead — but changing go-evtx to
@@ -1323,7 +1323,7 @@ twice, and regressed once by trusting a hex dump over CI.**
    `EventID`/`Level`, fields go-evtx always supplies and which are never
    actually absent. The measured table, not the brief's summary prose, is
    what F13a's later work correctly extended from.
-3. **The regression.** Task 8e trusted `task-8b-report.md`'s own
+3. **The regression.** Task 8e trusted `docs/reports/task-8b-report.md`'s own
    hex-decoded Step 1 table — itself a real measurement, not a guess — and
    reclassified five NULL-valued `<System>`/`<EventID>` attribute fields
    from a generic `NullType` marker to their "real" types (`GuidType`,

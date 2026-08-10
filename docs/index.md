@@ -26,3 +26,11 @@ go get github.com/fjacquet/go-evtx@latest
 - [ADR-004 — Open-handle incremental flush](adr/ADR-004-open-handle-incremental-flush.md)
 - [ADR-005 — Ship CLI binaries](adr/ADR-005-ship-cli-binaries.md)
 - [ADR-006 — Derive format rules from a corpus, not from one sample](adr/ADR-006-corpus-derived-format-method.md)
+
+## Format record
+
+- [EVTX format notes](evtx-format-notes.md) — the durable, corrected record of
+  what this project has verified about the binary format
+- [Format baseline](format-baseline.md) — the append-only measurement log
+- [Investigation reports](reports/README.md) — three working reports the code
+  cites as evidence, kept verbatim including the claims later shown false

@@ -10,7 +10,7 @@
 // landed.
 //
 // Task 8c (F13a/F13b/F13c) adds three more tests below, closing the named
-// list task-8b-report.md's "Concerns" section left open: EventID/Level must
+// list docs/reports/task-8b-report.md's "Concerns" section left open: EventID/Level must
 // use OptionalSubstitution (0x0E) with a real dependency_id, Provider must
 // carry a second attribute (Guid) using the 0x46/0x06 "more attributes
 // follow" pattern, and EventID must carry a Qualifiers attribute whose value
@@ -23,7 +23,7 @@
 // F14 (Task 8e) tried correcting Qualifiers' declared type from UNSIGNED_WORD
 // (0x06) to a generic NULL (0x00), on the strength of a byte-for-byte
 // re-parse of testdata/system.evtx's own record finding the attribute
-// declared type 0x00 there, contradicting task-8b-report.md's Step 1 table
+// declared type 0x00 there, contradicting docs/reports/task-8b-report.md's Step 1 table
 // (which F13c built from). That change made Get-WinEvent's STAGE2 READ
 // regress from reading all 403 records to failing on record 0 — reverted
 // back to UNSIGNED_WORD on that stronger, directly measured signal. See the
@@ -114,7 +114,7 @@ func utf16Bytes(s string) []byte {
 // TestBuildTemplateBody_EventIDAndLevelUseOptionalSubstitution (F13a):
 // testdata/system.evtx ties EventID's and Level's own OpenStartElementTag
 // dependency_id to their own content substitution's index (3 and 0 in the
-// real file's numbering; task-8b-report.md's Step 1 table), the same
+// real file's numbering; docs/reports/task-8b-report.md's Step 1 table), the same
 // convention F12b/F12c already established for Version/Task/Opcode/Keywords/
 // EventRecordID. go-evtx's own indices for EventID/Level are 1 and 2
 // (unchanged — see the sub* constants), so their dependency_id must now be
@@ -278,7 +278,7 @@ func decodeSubStringForTest(data []byte) string {
 // re-confirmed this after a false start): EventID must carry a Qualifiers
 // attribute, and — since go-evtx has no caller-supplied source for it — its
 // substitution entry must be NULL: value-spec type UNSIGNED_WORD (0x06,
-// Qualifiers' own declared type per task-8b-report.md's Step 1 table), size
+// Qualifiers' own declared type per docs/reports/task-8b-report.md's Step 1 table), size
 // 0. F14 (Task 8e) tried asserting binXMLTypeNull (0x00) here instead,
 // following a byte-for-byte re-parse of testdata/system.evtx's own record
 // that contradicted this table — but that change made Get-WinEvent's

@@ -1766,7 +1766,7 @@ that sentence again before reading anything else below it: fourteen tasks
 (F1/F3-F11, B1-B3, F8, F12) each independently corrected a real, measured
 divergence from `testdata/system.evtx` and none moved `STAGE2 READ` off
 zero. This task's fixes did. Full detail is in
-`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-8c-report.md`,
+`docs/reports/task-8c-report.md`,
 written after the fact from the commit and CI logs (the report was not
 written at the time because the agent that implemented this task stalled
 waiting on CI rather than writing up what was already measured); the
@@ -1891,7 +1891,7 @@ different Windows APIs (`EventLogReader.ReadEvent()`, forward iteration;
 `Get-WinEvent`, newest-first by default) reading the identical bytes give
 two different verdicts. That gap — and whether it is ordering-dependent —
 is the subject of Task 8d, documented in
-`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-8d-report.md`,
+`docs/reports/task-8d-report.md`,
 not repeated here.
 
 ### Reading this result
@@ -1912,7 +1912,7 @@ experiment this task did not run.
 ## Task 8d: `-Oldest` experiment, and where `Get-WinEvent` actually fails
 
 Full detail is in
-`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-8d-report.md`;
+`docs/reports/task-8d-report.md`;
 the essential facts are repeated here so this document stays
 self-contained, per the same convention row 12/"Task 8c" above follows.
 
@@ -2016,12 +2016,12 @@ followed from this lead.
 Full detail — including the complete substitution-array table, the
 byte-for-byte real-file cross-check, and the string null-termination
 lead found but not acted on — is in
-`.superpowers/sdd/2026-08-08-v0.7.0-format-correctness/task-8e-report.md`.
+`docs/reports/task-8e-report.md`.
 Summarized here per this document's own convention.
 
 **Starting point.** Task 8d's `ToXml()` lead pointed at XML rendering of a
 record's content. A probe of go-evtx's own record 0's substitution array,
-cross-checked against `task-8b-report.md`'s Step 1 table (a real-file
+cross-checked against `docs/reports/task-8b-report.md`'s Step 1 table (a real-file
 decode from an earlier task), found the table claims four NULL-valued
 positions declare their field's own real type (`GUID`, `SID`,
 `UNSIGNED_WORD`) rather than a generic `0x00` marker.
@@ -2066,7 +2066,7 @@ accepts only the original F12b/F13c one (five fields `NULL`, `Qualifiers`
 **Net functional code change: none, and that is the whole point.** Three
 pushes, three CI round-trips, and the release ends exactly where Task 8d
 left it — but with a real, confirmed divergence documented
-(`task-8b-report.md`'s Step 1 table is wrong at four positions, corrected
+(`docs/reports/task-8b-report.md`'s Step 1 table is wrong at four positions, corrected
 in place with its own note) and a real, confirmed non-fix ruled out with
 evidence rather than left as an untested guess for a future task to
 re-attempt. `Correlation`/`Execution`/`Security`'s five fields' reversion
@@ -2075,7 +2075,7 @@ to `binXMLTypeNull` is solid, independent of the `Qualifiers` question
 field the type is nominally attached to). `Qualifiers`'s own case is
 **left open, not resolved**: real Windows' file shows `0x00` at the
 position identified as `Qualifiers`; go-evtx's own record needs `0x06`
-there for Windows to read it. The task-8e-report.md "Concerns" section
+there for Windows to read it. The docs/reports/task-8e-report.md "Concerns" section
 names the likeliest reconciliation (the Step 1 table's *index*
 assignments, not just some of its *type* claims, may themselves be
 unreliable) as unchecked, not ruled out.

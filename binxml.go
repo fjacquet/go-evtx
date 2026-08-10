@@ -180,8 +180,8 @@ const (
 // knownOptionalDependencyIDs needs to recognise them as legitimate
 // non-sentinel dependency identifiers rather than corruption.
 //
-// Measured against testdata/system.evtx (task-8b-report.md's Step 1 table,
-// extended by task-8c-report.md): the real file ties EventID's element-level
+// Measured against testdata/system.evtx (docs/reports/task-8b-report.md's Step 1 table,
+// extended by docs/reports/task-8c-report.md): the real file ties EventID's element-level
 // dependency_id to its own content substitution's index — 0x0003 there, NOT
 // the index of its Qualifiers attribute (0x0004) — and Level's the same way
 // (0x0000, its own content index). Both match the convention F12b/F12c
@@ -450,7 +450,7 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// binXMLTypeNull/0x00) — reproducing exactly how the real file itself
 	// encodes these fields for an event that doesn't populate them (F14/Task
 	// 8e re-confirmed this directly, byte-for-byte, against the exact real
-	// record task-8b-report.md's own Step 1 table cites, after an initial
+	// record docs/reports/task-8b-report.md's own Step 1 table cites, after an initial
 	// attempt at this task briefly believed that table's claim of GUID/SID
 	// types instead — see the F14 doc comment by the type constants for the
 	// full story and how the correction was verified three independent

@@ -244,7 +244,7 @@ func writeNameNode(b *bytes.Buffer, name string, binXMLBase uint32, refs *[]chun
 // had a declared size of exactly char_count*2, none had a trailing
 // UTF-16 null pair. Two examples: "Microsoft-Windows-WindowsUpdateClient"
 // (37 chars, declared size 74) and "System" (6 chars, declared size 12).
-// This independently reproduces task-8e-report.md's own Part 4 finding
+// This independently reproduces docs/reports/task-8e-report.md's own Part 4 finding
 // (28/28 samples, same two examples).
 //
 // This is NOT true of NameNode strings, which real Windows DOES

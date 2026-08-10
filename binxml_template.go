@@ -122,7 +122,7 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	//     <EventID Qualifiers="%41">%1</EventID>                        (F13a/F13c)
 	//
 	// F13c declares Qualifiers UNSIGNED_WORD (0x06) at size 0.
-	// task-8b-report.md's Step 1 table cites this as the real file's own
+	// docs/reports/task-8b-report.md's Step 1 table cites this as the real file's own
 	// encoding; F14 (Task 8e) partly disputed that (a byte-for-byte re-parse
 	// of the real record the table cites found index 4 declared type 0x00,
 	// not 0x06) and briefly changed this to binXMLTypeNull to match — but
@@ -137,7 +137,7 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 	// unreliable — this task did not re-derive them independently, only
 	// re-checked the types at the indices the table already named), or some
 	// other mechanism ties Windows' acceptance to this declared type in a
-	// way not yet understood. See task-8e-report.md's "Concerns" for the
+	// way not yet understood. See docs/reports/task-8e-report.md's "Concerns" for the
 	// open question this leaves. F13a: the element's own dependency_id
 	// becomes subEventID (its own content index), and the content
 	// substitution switches to OptionalSubstitution.
