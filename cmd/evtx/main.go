@@ -35,8 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	switch args[0] {
-	// The dump case arrives with dump.go; usage below documents only what
-	// this switch can actually serve.
+	case "dump":
+		return runDump(args[1:], stdout, stderr)
 	case "info":
 		return runInfo(args[1:], stdout, stderr)
 	case "version", "--version", "-version":
@@ -56,11 +56,16 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `evtx reads Windows Event Log (.evtx) files.
 
 Usage:
+  evtx dump [--in FILE] [--out FILE] [--shape=event|flat] [--allow-errors] [FILE]
   evtx info [--in FILE] [FILE]
   evtx version
 
+dump writes one JSON object per record (NDJSON) to stdout or --out.
 info reports the file header and the result of a full decode pass.
-It exits 0 unless the input is unreadable.
+
+Exit codes for dump: 0 all records decoded, 2 some were skipped,
+1 usage error or unreadable input. info exits 0 unless the input is
+unreadable.
 `)
 }
 

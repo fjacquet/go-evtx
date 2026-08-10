@@ -1,0 +1,220 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestRunDump_EventShapeRoundTrips(t *testing.T) {
+	path := writeFixture(t, 4)
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path}, &out, &errb); code != 0 {
+		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
+	}
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4", len(lines))
+	}
+	// Asserted through a generic map, not evtx.Event: the library deliberately
+	// has no UnmarshalJSON on Value, since a lossy one would discard the
+	// declared type MarshalJSON exists to render (a SID, a FILETIME and a
+	// HexInt64 would all come back as undifferentiated strings). This proves
+	// the same three facts the event-typed assertion would have without that
+	// API.
+	for i, line := range lines {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v", i, err)
+		}
+		sys, ok := obj["system"].(map[string]any)
+		if !ok {
+			t.Fatalf("line %d has no system object", i)
+		}
+		provider, ok := sys["provider"].(map[string]any)
+		if !ok {
+			t.Fatalf("line %d has no system.provider object", i)
+		}
+		if provider["name"] != "Microsoft-Windows-Security-Auditing" {
+			t.Errorf("line %d: system.provider.name = %v, want the value passed to WriteRecord",
+				i, provider["name"])
+		}
+		if sys["computer"] != "TESTHOST" {
+			t.Errorf("line %d: system.computer = %v, want TESTHOST", i, sys["computer"])
+		}
+	}
+}
+
+func TestRunDump_FlatShapeIsOneLevel(t *testing.T) {
+	path := writeFixture(t, 2)
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path, "--shape", "flat"}, &out, &errb); code != 0 {
+		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
+	}
+	for i, line := range strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n") {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v", i, err)
+		}
+		if obj["provider"] != "Microsoft-Windows-Security-Auditing" {
+			t.Errorf("line %d: provider = %v, want the flat scalar", i, obj["provider"])
+		}
+		if _, nested := obj["system"]; nested {
+			t.Errorf("line %d: flat output still carries a nested system object", i)
+		}
+		if _, ok := obj["ObjectName"]; !ok {
+			t.Errorf("line %d: ObjectName was not lifted to the root", i)
+		}
+	}
+}
+
+func TestRunDump_WritesToOutFile(t *testing.T) {
+	path := writeFixture(t, 2)
+	outPath := filepath.Join(t.TempDir(), "out.ndjson")
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path, "--out", outPath}, &out, &errb); code != 0 {
+		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout should be empty when --out is given, got %q", out.String())
+	}
+	b, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "\n"); n != 2 {
+		t.Errorf("%s has %d lines, want 2", outPath, n)
+	}
+}
+
+// writeCorruptFixture writes a normal fixture via writeFixture, then flips
+// one byte inside the first record's BinXML payload — the template-instance
+// token, five bytes past the fragment header, itself four bytes past the
+// 24-byte record header — to a value no token table recognises. Record
+// framing (signature, size, record ID, timestamp, trailing size copy) is
+// untouched: the reader parses that independently of BinXML, so a corrupt
+// payload still lets it advance to the next record, which is what keeps
+// runDump's loop from spinning rather than reporting one skipped record.
+//
+// The two on-disk offsets below aren't guesses: writeFixture always produces
+// a single-chunk file (a 4096-byte file header, then one chunk whose 512-byte
+// chunk header precedes its first record — reader.go's loadChunk and
+// nextRecord), so the first record's signature always starts at exactly
+// 4096+512. This is asserted below rather than assumed, so a change to
+// either constant fails loudly here instead of silently corrupting the wrong
+// byte.
+func writeCorruptFixture(t *testing.T, records int) string {
+	t.Helper()
+	good := writeFixture(t, records)
+	b, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		fileHeaderSize  = 4096
+		chunkHeaderSize = 512
+		recordHeaderLen = 24 // signature(4) + size(4) + recordID(8) + timestamp(8)
+		fragHeaderLen   = 4  // BinXML fragment header: token, major, minor, flags
+	)
+	recStart := fileHeaderSize + chunkHeaderSize
+	if len(b) < recStart+recordHeaderLen+fragHeaderLen+1 {
+		t.Fatalf("fixture is only %d bytes, too small to hold a record at offset %d", len(b), recStart)
+	}
+	if sig := b[recStart : recStart+4]; sig[0] != 0x2a || sig[1] != 0x2a || sig[2] != 0 || sig[3] != 0 {
+		t.Fatalf("no record signature at offset %d, got % x — writeFixture's on-disk layout changed", recStart, sig)
+	}
+	tokenOff := recStart + recordHeaderLen + fragHeaderLen
+	b[tokenOff] = 0xff // not a template-instance token, nor anything else recognised
+
+	bad := filepath.Join(t.TempDir(), "corrupt.evtx")
+	if err := os.WriteFile(bad, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bad
+}
+
+func TestRunDump_DecodeFailureExitsTwo(t *testing.T) {
+	path := writeCorruptFixture(t, 3)
+	var out, errb bytes.Buffer
+	code := runDump([]string{"--in", path}, &out, &errb)
+	if code != 2 {
+		t.Fatalf("runDump = %d, want 2 (a corrupted fixture that fails to decode); stderr: %s", code, errb.String())
+	}
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d surviving records on stdout, want 2 (3 written, 1 corrupted)", len(lines))
+	}
+	for i, line := range lines {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Errorf("surviving line %d is not valid JSON: %v", i, err)
+		}
+	}
+
+	errOut := errb.String()
+	if !strings.Contains(errOut, "chunk 0, record") {
+		t.Errorf("stderr = %q, want a per-record failure line naming the record", errOut)
+	}
+	if !strings.Contains(errOut, "1 of 3 records failed to decode") {
+		t.Errorf("stderr = %q, want the summary line '1 of 3 records failed to decode'", errOut)
+	}
+}
+
+func TestRunDump_AllowErrorsExitsZero(t *testing.T) {
+	path := writeCorruptFixture(t, 3)
+	var out, errb bytes.Buffer
+	code := runDump([]string{"--in", path, "--allow-errors"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("runDump --allow-errors = %d, want 0; stderr: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "1 of 3 records failed to decode") {
+		t.Errorf("stderr = %q, want the failure summary even with --allow-errors", errb.String())
+	}
+}
+
+func TestRunDump_UnknownShapeExitsOne(t *testing.T) {
+	path := writeFixture(t, 1)
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path, "--shape", "sideways"}, &out, &errb); code != 1 {
+		t.Errorf("runDump with an unknown shape = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "shape") {
+		t.Errorf("stderr = %q, want it to name the bad flag", errb.String())
+	}
+}
+
+func TestRunDump_MissingFileExitsOne(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", filepath.Join(t.TempDir(), "absent.evtx")}, &out, &errb); code != 1 {
+		t.Errorf("runDump on a missing file = %d, want 1", code)
+	}
+}
+
+// TestRun_DumpIsDispatched covers the wiring rather than the subcommand: run
+// must reach runDump, and usage must name it. Task 3 deliberately left both
+// out, since a usage line for a subcommand the switch cannot serve is worse
+// than no line at all.
+func TestRun_DumpIsDispatched(t *testing.T) {
+	path := writeFixture(t, 1)
+	var out, errb bytes.Buffer
+	if code := run([]string{"dump", "--in", path}, &out, &errb); code != 0 {
+		t.Fatalf("run(dump) = %d, want 0; stderr: %s", code, errb.String())
+	}
+	if out.Len() == 0 {
+		t.Error("run(dump) produced no output")
+	}
+
+	var usageOut, usageErr bytes.Buffer
+	if code := run([]string{"help"}, &usageOut, &usageErr); code != 0 {
+		t.Fatalf("run(help) = %d, want 0", code)
+	}
+	if !strings.Contains(usageOut.String(), "dump") {
+		t.Errorf("usage does not mention dump:\n%s", usageOut.String())
+	}
+}

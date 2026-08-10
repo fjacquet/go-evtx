@@ -1207,17 +1207,30 @@ func TestRunDump_EventShapeRoundTrips(t *testing.T) {
 	if len(lines) != 4 {
 		t.Fatalf("got %d lines, want 4", len(lines))
 	}
+	// Asserted through a map rather than by unmarshalling into evtx.Event: the
+	// library deliberately has no Value.UnmarshalJSON. A lossy one would
+	// return a SID, a FILETIME and a HexInt64 as undifferentiated strings,
+	// discarding the declared type that MarshalJSON exists to render — and
+	// nothing in the spec asks the library to read its own JSON back.
 	for i, line := range lines {
-		var ev evtx.Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
 			t.Fatalf("line %d is not valid JSON: %v", i, err)
 		}
-		if ev.System.Provider.Name != "Microsoft-Windows-Security-Auditing" {
-			t.Errorf("line %d: provider = %q, want the value passed to WriteRecord",
-				i, ev.System.Provider.Name)
+		sys, ok := obj["system"].(map[string]any)
+		if !ok {
+			t.Fatalf("line %d has no system object", i)
 		}
-		if ev.System.Computer != "TESTHOST" {
-			t.Errorf("line %d: computer = %q, want TESTHOST", i, ev.System.Computer)
+		prov, ok := sys["provider"].(map[string]any)
+		if !ok {
+			t.Fatalf("line %d has no provider object", i)
+		}
+		if prov["name"] != "Microsoft-Windows-Security-Auditing" {
+			t.Errorf("line %d: provider = %v, want the value passed to WriteRecord",
+				i, prov["name"])
+		}
+		if sys["computer"] != "TESTHOST" {
+			t.Errorf("line %d: computer = %v, want TESTHOST", i, sys["computer"])
 		}
 	}
 }
