@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -70,12 +71,23 @@ func flatten(ev *evtx.Event) (map[string]any, int, error) {
 
 	// System is lifted through its own JSON tags rather than field by field,
 	// so it cannot fall out of step with the faithful shape.
+	//
+	// UseNumber is load-bearing, not a style choice. Decoding into a
+	// map[string]any turns every JSON number into a float64, whose 53 bits of
+	// mantissa cannot hold a uint64 above 2^53 — and Keywords is a 64-bit mask
+	// whose top bit is set on nearly every real Windows event. Without it,
+	// 0x8000000000000000 marshalled back out as 9223372036854776000 instead of
+	// 9223372036854775808: silent corruption of the field, in the shape meant
+	// for ingestion. json.Number keeps the original digits and re-marshals
+	// them verbatim.
 	var sys map[string]any
 	b, err := json.Marshal(ev.System)
 	if err != nil {
 		return nil, 0, fmt.Errorf("marshal system: %w", err)
 	}
-	if err := json.Unmarshal(b, &sys); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&sys); err != nil {
 		return nil, 0, fmt.Errorf("unmarshal system: %w", err)
 	}
 	delete(sys, "provider")
