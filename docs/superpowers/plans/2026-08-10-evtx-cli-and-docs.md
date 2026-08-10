@@ -444,7 +444,12 @@ EOF
   func inputPath(in string, rest []string) (string, error)
   func normaliseCause(err error) string
   ```
-  Task 4 calls `inputPath` and `normaliseCause`, and adds a `dump` case to `run`.
+  Task 5 calls `inputPath` and `normaliseCause`, adds the `dump` case to `run`, and extends `usage`.
+
+**No `dump` anywhere in this task.** `run` dispatches `info` and `version`
+only, and `usage` documents only what exists. A placeholder `runDump` that
+always fails would be dead code a reviewer is right to flag, and wiring a
+subcommand `usage` advertises but `run` cannot serve is worse.
 
 **Background.** The binary must stay dependency-free, so argument parsing is
 `flag` with one `FlagSet` per subcommand. Subcommands are functions returning an
@@ -667,8 +672,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	switch args[0] {
-	case "dump":
-		return runDump(args[1:], stdout, stderr)
+	// The dump case arrives with dump.go; usage below documents only what
+	// this switch can actually serve.
 	case "info":
 		return runInfo(args[1:], stdout, stderr)
 	case "version", "--version", "-version":
@@ -688,16 +693,11 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `evtx reads Windows Event Log (.evtx) files.
 
 Usage:
-  evtx dump [--in FILE] [--out FILE] [--shape=event|flat] [--allow-errors] [FILE]
   evtx info [--in FILE] [FILE]
   evtx version
 
-dump writes one JSON object per record (NDJSON) to stdout or --out.
 info reports the file header and the result of a full decode pass.
-
-Exit codes for dump: 0 all records decoded, 2 some were skipped,
-1 usage error or unreadable input. info exits 0 unless the input is
-unreadable.
+It exits 0 unless the input is unreadable.
 `)
 }
 
@@ -821,37 +821,18 @@ func sortedCauses(causes map[string]int) []string {
 }
 ```
 
-- [ ] **Step 5: Add a temporary `runDump` so the package compiles**
-
-`run` references `runDump`, which Task 4 writes. Add this to `dump.go` now so
-the package builds, and replace it wholesale in Task 4:
-
-```go
-package main
-
-import (
-	"fmt"
-	"io"
-)
-
-func runDump(args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "evtx dump: not implemented yet")
-	return 1
-}
-```
-
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 5: Run the tests**
 
 Run: `go test -race ./cmd/evtx/ -v`
 Expected: PASS. `TestRunInfo_ReportsTheContainer` proves `FileInfo` is wired
 through: `format     3.1` can only come from the file header.
 
-- [ ] **Step 7: Verify the whole repo still builds, including Windows**
+- [ ] **Step 6: Verify the whole repo still builds, including Windows**
 
 Run: `go build ./... && GOOS=windows go build ./... && go vet ./... && gofmt -l .`
 Expected: no output from any of them.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add cmd/evtx/
@@ -872,257 +853,21 @@ EOF
 
 ---
 
-### Task 4: `evtx dump --shape=event`
+### Task 4: the flat shape projection
 
 **Files:**
-- Modify: `cmd/evtx/dump.go` (replace the placeholder from Task 3 entirely)
-- Create: `cmd/evtx/dump_test.go`
-
-**Interfaces:**
-- Consumes: `inputPath`, `normaliseCause` (Task 3); `evtx.Open`, `evtx.Reader.ReadEvent`, `evtx.ErrNoMoreRecords`, `evtx.Event`.
-- Produces: `runDump(args []string, stdout, stderr io.Writer) int`, and the `--shape` flag whose `flat` value Task 5 implements.
-
-**Background.** `evtx.Event` already carries JSON tags and `evtx.Value` already
-has a type-aware `MarshalJSON`, so the event shape is `json.Encoder.Encode(ev)`
-and nothing else. `json.Encoder.Encode` appends a newline after each value,
-which is exactly NDJSON.
-
-- [ ] **Step 1: Write the failing tests**
-
-Create `cmd/evtx/dump_test.go`:
-
-```go
-package main
-
-import (
-	"bytes"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-
-	evtx "github.com/fjacquet/go-evtx"
-)
-
-func TestRunDump_EventShapeRoundTrips(t *testing.T) {
-	path := writeFixture(t, 4)
-	var out, errb bytes.Buffer
-	if code := runDump([]string{"--in", path}, &out, &errb); code != 0 {
-		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
-	}
-
-	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("got %d lines, want 4", len(lines))
-	}
-	for i, line := range lines {
-		var ev evtx.Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("line %d is not valid JSON: %v", i, err)
-		}
-		if ev.System.Provider.Name != "Microsoft-Windows-Security-Auditing" {
-			t.Errorf("line %d: provider = %q, want the value passed to WriteRecord",
-				i, ev.System.Provider.Name)
-		}
-		if ev.System.Computer != "TESTHOST" {
-			t.Errorf("line %d: computer = %q, want TESTHOST", i, ev.System.Computer)
-		}
-	}
-}
-
-func TestRunDump_WritesToOutFile(t *testing.T) {
-	path := writeFixture(t, 2)
-	outPath := filepath.Join(t.TempDir(), "out.ndjson")
-	var out, errb bytes.Buffer
-	if code := runDump([]string{"--in", path, "--out", outPath}, &out, &errb); code != 0 {
-		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
-	}
-	if out.Len() != 0 {
-		t.Errorf("stdout should be empty when --out is given, got %q", out.String())
-	}
-	b, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(string(b), "\n"); n != 2 {
-		t.Errorf("%s has %d lines, want 2", outPath, n)
-	}
-}
-
-func TestRunDump_UnknownShapeExitsOne(t *testing.T) {
-	path := writeFixture(t, 1)
-	var out, errb bytes.Buffer
-	if code := runDump([]string{"--in", path, "--shape", "sideways"}, &out, &errb); code != 1 {
-		t.Errorf("runDump with an unknown shape = %d, want 1", code)
-	}
-	if !strings.Contains(errb.String(), "shape") {
-		t.Errorf("stderr = %q, want it to name the bad flag", errb.String())
-	}
-}
-
-func TestRunDump_MissingFileExitsOne(t *testing.T) {
-	var out, errb bytes.Buffer
-	if code := runDump([]string{"--in", filepath.Join(t.TempDir(), "absent.evtx")}, &out, &errb); code != 1 {
-		t.Errorf("runDump on a missing file = %d, want 1", code)
-	}
-}
-```
-
-- [ ] **Step 2: Run and confirm failure**
-
-Run: `go test -race ./cmd/evtx/ -run TestRunDump -v`
-Expected: every subtest fails with `evtx dump: not implemented yet` and exit code 1.
-
-- [ ] **Step 3: Replace `dump.go`**
-
-```go
-package main
-
-import (
-	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
-	"io"
-	"os"
-
-	evtx "github.com/fjacquet/go-evtx"
-)
-
-func runDump(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("dump", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	in := fs.String("in", "", "input .evtx file")
-	out := fs.String("out", "", "output file; stdout when empty")
-	shape := fs.String("shape", "event", "output shape: event or flat")
-	allowErrors := fs.Bool("allow-errors", false, "exit 0 even when records were skipped")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if *shape != "event" && *shape != "flat" {
-		fmt.Fprintf(stderr, "evtx dump: unknown --shape %q, want event or flat\n", *shape)
-		return 1
-	}
-	path, err := inputPath(*in, fs.Args())
-	if err != nil {
-		fmt.Fprintf(stderr, "evtx dump: %v\n", err)
-		return 1
-	}
-
-	w := stdout
-	if *out != "" {
-		f, err := os.Create(*out) // #nosec G304 — an operator-supplied output path
-		if err != nil {
-			fmt.Fprintf(stderr, "evtx dump: %v\n", err)
-			return 1
-		}
-		defer func() { _ = f.Close() }()
-		w = f
-	}
-
-	r, err := evtx.Open(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "evtx dump: %v\n", err)
-		return 1
-	}
-	defer func() { _ = r.Close() }()
-
-	enc := json.NewEncoder(w)
-	total, skipped, relocated := 0, 0, 0
-	for {
-		ev, err := r.ReadEvent()
-		if errors.Is(err, evtx.ErrNoMoreRecords) {
-			break
-		}
-		total++
-		if err != nil {
-			// One line per skipped record, on stderr, keeping the position
-			// ReadEvent already put in the message. The stream on stdout stays
-			// pure NDJSON so a pipeline never has to filter it.
-			skipped++
-			fmt.Fprintf(stderr, "%v\n", err)
-			continue
-		}
-		var payload any = ev
-		if *shape == "flat" {
-			flat, moved := flatten(ev)
-			payload, relocated = flat, relocated+moved
-		}
-		if err := enc.Encode(payload); err != nil {
-			fmt.Fprintf(stderr, "evtx dump: %v\n", err)
-			return 1
-		}
-	}
-
-	if skipped > 0 {
-		fmt.Fprintf(stderr, "%d of %d records failed to decode\n", skipped, total)
-	}
-	if relocated > 0 {
-		fmt.Fprintf(stderr, "%d event_data keys were renamed to avoid a collision\n", relocated)
-	}
-	if skipped > 0 && !*allowErrors {
-		return 2
-	}
-	return 0
-}
-```
-
-- [ ] **Step 4: Add a stub `flatten` so the package compiles**
-
-Task 5 writes the real one. Create `cmd/evtx/flat.go`:
-
-```go
-package main
-
-import evtx "github.com/fjacquet/go-evtx"
-
-func flatten(ev *evtx.Event) (map[string]any, int) {
-	return map[string]any{"record_id": ev.RecordID}, 0
-}
-```
-
-- [ ] **Step 5: Run the dump tests**
-
-Run: `go test -race ./cmd/evtx/ -run TestRunDump -v`
-Expected: PASS.
-
-- [ ] **Step 6: Run everything**
-
-Run: `go test -race ./... -count=1 && go vet ./... && gofmt -l .`
-Expected: PASS, no output.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add cmd/evtx/dump.go cmd/evtx/dump_test.go cmd/evtx/flat.go
-git commit -F - <<'EOF'
-feat(cli): add evtx dump with the faithful event shape
-
-The event shape is json.Encoder.Encode on the library's own Event: the
-CLI adds no serialisation of its own, so it cannot drift from the API it
-demonstrates. Value.MarshalJSON already renders SIDs, FILETIMEs, base64
-binary and the 2^53 quoting rule.
-
-Diagnostics go to stderr so stdout stays pure NDJSON.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01V4aa2erUpGicpwi3pPi6Ds
-EOF
-```
-
----
-
-### Task 5: the flat shape and the corpus test
-
-**Files:**
-- Modify: `cmd/evtx/flat.go` (replace the Task 4 stub entirely)
+- Create: `cmd/evtx/flat.go`
 - Create: `cmd/evtx/flat_test.go`
-- Create: `cmd/evtx/corpus_test.go`
 
 **Interfaces:**
-- Consumes: `evtx.Event`, `evtx.System`, `evtx.Data`, `evtx.Value`, `evtx.Node`; `runDump` (Task 4).
-- Produces: `flatten(ev *evtx.Event) (map[string]any, int)` — the map is the JSON object, the int counts keys renamed to avoid a collision.
+- Consumes: `evtx.Event`, `evtx.System`, `evtx.Data`, `evtx.Value`, `evtx.Node`.
+- Produces: `flatten(ev *evtx.Event) (map[string]any, int)` — the map is the JSON
+  object, the int counts keys renamed to avoid a collision. Task 5's `runDump`
+  calls it for `--shape=flat`.
+
+This task adds no CLI wiring: `flatten` is a pure function with its own tests,
+and Task 5 is what reaches for it. Written first so that Task 5 never needs a
+placeholder.
 
 **The rule, from the spec.** An `EventData` entry takes its own name as its
 root key when that name is non-empty, collides with no reserved key, and has
@@ -1268,9 +1013,9 @@ func keysOf(m map[string]any) []string {
 - [ ] **Step 2: Run and confirm failure**
 
 Run: `go test -race ./cmd/evtx/ -run TestFlatten -v`
-Expected: all five fail — the stub returns only `record_id`.
+Expected: build failure — `undefined: flatten`.
 
-- [ ] **Step 3: Replace `flat.go`**
+- [ ] **Step 3: Write `flat.go`**
 
 ```go
 package main
@@ -1376,16 +1121,107 @@ func flatten(ev *evtx.Event) (map[string]any, int) {
 }
 ```
 
-- [ ] **Step 4: Run the flatten tests**
+- [ ] **Step 4: Run the tests**
 
 Run: `go test -race ./cmd/evtx/ -run TestFlatten -v`
 Expected: PASS, five tests.
 
-- [ ] **Step 5: Add an end-to-end flat test and the corpus test**
+- [ ] **Step 5: Run everything**
 
-Append to `cmd/evtx/dump_test.go`:
+Run: `go test -race ./... -count=1 && go vet ./... && gofmt -l . && GOOS=windows go build ./...`
+Expected: PASS, no output.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add cmd/evtx/flat.go cmd/evtx/flat_test.go
+git commit -F - <<'EOF'
+feat(cli): add the flat projection with an explicit collision rule
+
+An EventData entry keeps its own name unless that name is empty, is a
+reserved key, or was already used; otherwise it becomes data_<i>_<Name>.
+Deterministic, traceable to the originating index, and lossless.
+
+The reserved set is read from evtx.System's struct tags, not listed by
+hand: several tags carry omitempty, so a set derived from the record in
+hand would reserve different keys for different records of one file.
+
+Unit-tested rather than end to end on purpose — the writer cannot produce
+a single one of the contentious cases, so an end-to-end test would pass
+while testing nothing.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01V4aa2erUpGicpwi3pPi6Ds
+EOF
+```
+
+---
+
+### Task 5: `evtx dump`
+
+**Files:**
+- Create: `cmd/evtx/dump.go`
+- Create: `cmd/evtx/dump_test.go`
+- Create: `cmd/evtx/corpus_test.go`
+- Modify: `cmd/evtx/main.go` — add the `dump` case to `run` and extend `usage`
+
+**Interfaces:**
+- Consumes: `inputPath`, `normaliseCause` (Task 3); `flatten` (Task 4);
+  `evtx.Open`, `evtx.Reader.ReadEvent`, `evtx.ErrNoMoreRecords`, `evtx.Event`.
+- Produces: `runDump(args []string, stdout, stderr io.Writer) int`.
+
+**Background.** `evtx.Event` already carries JSON tags and `evtx.Value` already
+has a type-aware `MarshalJSON`, so the event shape is
+`json.Encoder.Encode(ev)` and nothing else. `json.Encoder.Encode` appends a
+newline after each value, which is exactly NDJSON. `ReadEvent` documents that a
+decode failure is returned for that record alone and the reader stays
+positioned on the next one, so the loop continues past an error.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `cmd/evtx/dump_test.go`. `writeFixture` already exists in
+`info_test.go` from Task 3; reuse it rather than writing a second one.
 
 ```go
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	evtx "github.com/fjacquet/go-evtx"
+)
+
+func TestRunDump_EventShapeRoundTrips(t *testing.T) {
+	path := writeFixture(t, 4)
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path}, &out, &errb); code != 0 {
+		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
+	}
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4", len(lines))
+	}
+	for i, line := range lines {
+		var ev evtx.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v", i, err)
+		}
+		if ev.System.Provider.Name != "Microsoft-Windows-Security-Auditing" {
+			t.Errorf("line %d: provider = %q, want the value passed to WriteRecord",
+				i, ev.System.Provider.Name)
+		}
+		if ev.System.Computer != "TESTHOST" {
+			t.Errorf("line %d: computer = %q, want TESTHOST", i, ev.System.Computer)
+		}
+	}
+}
+
 func TestRunDump_FlatShapeIsOneLevel(t *testing.T) {
 	path := writeFixture(t, 2)
 	var out, errb bytes.Buffer
@@ -1408,7 +1244,212 @@ func TestRunDump_FlatShapeIsOneLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestRunDump_WritesToOutFile(t *testing.T) {
+	path := writeFixture(t, 2)
+	outPath := filepath.Join(t.TempDir(), "out.ndjson")
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path, "--out", outPath}, &out, &errb); code != 0 {
+		t.Fatalf("runDump = %d, want 0; stderr: %s", code, errb.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout should be empty when --out is given, got %q", out.String())
+	}
+	b, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "\n"); n != 2 {
+		t.Errorf("%s has %d lines, want 2", outPath, n)
+	}
+}
+
+func TestRunDump_UnknownShapeExitsOne(t *testing.T) {
+	path := writeFixture(t, 1)
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", path, "--shape", "sideways"}, &out, &errb); code != 1 {
+		t.Errorf("runDump with an unknown shape = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "shape") {
+		t.Errorf("stderr = %q, want it to name the bad flag", errb.String())
+	}
+}
+
+func TestRunDump_MissingFileExitsOne(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := runDump([]string{"--in", filepath.Join(t.TempDir(), "absent.evtx")}, &out, &errb); code != 1 {
+		t.Errorf("runDump on a missing file = %d, want 1", code)
+	}
+}
+
+// TestRun_DumpIsDispatched covers the wiring rather than the subcommand: run
+// must reach runDump, and usage must name it. Task 3 deliberately left both
+// out, since a usage line for a subcommand the switch cannot serve is worse
+// than no line at all.
+func TestRun_DumpIsDispatched(t *testing.T) {
+	path := writeFixture(t, 1)
+	var out, errb bytes.Buffer
+	if code := run([]string{"dump", "--in", path}, &out, &errb); code != 0 {
+		t.Fatalf("run(dump) = %d, want 0; stderr: %s", code, errb.String())
+	}
+	if out.Len() == 0 {
+		t.Error("run(dump) produced no output")
+	}
+
+	var usageOut, usageErr bytes.Buffer
+	if code := run([]string{"help"}, &usageOut, &usageErr); code != 0 {
+		t.Fatalf("run(help) = %d, want 0", code)
+	}
+	if !strings.Contains(usageOut.String(), "dump") {
+		t.Errorf("usage does not mention dump:\n%s", usageOut.String())
+	}
+}
 ```
+
+- [ ] **Step 2: Run and confirm failure**
+
+Run: `go test -race ./cmd/evtx/ -run 'TestRunDump|TestRun_DumpIsDispatched' -v`
+Expected: build failure — `undefined: runDump`.
+
+- [ ] **Step 3: Write `dump.go`**
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+
+	evtx "github.com/fjacquet/go-evtx"
+)
+
+func runDump(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("dump", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	in := fs.String("in", "", "input .evtx file")
+	out := fs.String("out", "", "output file; stdout when empty")
+	shape := fs.String("shape", "event", "output shape: event or flat")
+	allowErrors := fs.Bool("allow-errors", false, "exit 0 even when records were skipped")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *shape != "event" && *shape != "flat" {
+		fmt.Fprintf(stderr, "evtx dump: unknown --shape %q, want event or flat\n", *shape)
+		return 1
+	}
+	path, err := inputPath(*in, fs.Args())
+	if err != nil {
+		fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+		return 1
+	}
+
+	w := stdout
+	if *out != "" {
+		f, err := os.Create(*out) // #nosec G304 — an operator-supplied output path
+		if err != nil {
+			fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+			return 1
+		}
+		defer func() { _ = f.Close() }()
+		w = f
+	}
+
+	r, err := evtx.Open(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+		return 1
+	}
+	defer func() { _ = r.Close() }()
+
+	enc := json.NewEncoder(w)
+	total, skipped, relocated := 0, 0, 0
+	for {
+		ev, err := r.ReadEvent()
+		if errors.Is(err, evtx.ErrNoMoreRecords) {
+			break
+		}
+		total++
+		if err != nil {
+			// One line per skipped record, on stderr, keeping the position
+			// ReadEvent already put in the message. The stream on stdout stays
+			// pure NDJSON so a pipeline never has to filter it.
+			skipped++
+			fmt.Fprintf(stderr, "%v\n", err)
+			continue
+		}
+		var payload any = ev
+		if *shape == "flat" {
+			flat, moved := flatten(ev)
+			payload, relocated = flat, relocated+moved
+		}
+		if err := enc.Encode(payload); err != nil {
+			fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+			return 1
+		}
+	}
+
+	if skipped > 0 {
+		fmt.Fprintf(stderr, "%d of %d records failed to decode\n", skipped, total)
+	}
+	if relocated > 0 {
+		fmt.Fprintf(stderr, "%d event_data keys were renamed to avoid a collision\n", relocated)
+	}
+	if skipped > 0 && !*allowErrors {
+		return 2
+	}
+	return 0
+}
+```
+
+- [ ] **Step 4: Wire `dump` into `main.go`**
+
+In `cmd/evtx/main.go`, replace the comment placeholder in `run`'s switch:
+
+```go
+	switch args[0] {
+	// The dump case arrives with dump.go; usage below documents only what
+	// this switch can actually serve.
+	case "info":
+```
+
+with:
+
+```go
+	switch args[0] {
+	case "dump":
+		return runDump(args[1:], stdout, stderr)
+	case "info":
+```
+
+and replace the whole `usage` body with:
+
+```go
+	fmt.Fprint(w, `evtx reads Windows Event Log (.evtx) files.
+
+Usage:
+  evtx dump [--in FILE] [--out FILE] [--shape=event|flat] [--allow-errors] [FILE]
+  evtx info [--in FILE] [FILE]
+  evtx version
+
+dump writes one JSON object per record (NDJSON) to stdout or --out.
+info reports the file header and the result of a full decode pass.
+
+Exit codes for dump: 0 all records decoded, 2 some were skipped,
+1 usage error or unreadable input. info exits 0 unless the input is
+unreadable.
+`)
+```
+
+- [ ] **Step 5: Run the dump tests**
+
+Run: `go test -race ./cmd/evtx/ -run 'TestRunDump|TestRun_DumpIsDispatched' -v`
+Expected: PASS.
+
+- [ ] **Step 6: Add the corpus test**
 
 Create `cmd/evtx/corpus_test.go`:
 
@@ -1486,7 +1527,7 @@ func TestCorpusDump(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run the CLI tests, then the corpus test**
+- [ ] **Step 7: Run the CLI tests, then the corpus test**
 
 Run: `go test -race ./cmd/evtx/ -v`
 Expected: PASS, with `TestCorpusDump` skipped.
@@ -1495,29 +1536,25 @@ Run, substituting your corpus path:
 `EVTX_CORPUS=/path/to/corpus go test -race ./cmd/evtx/ -run TestCorpusDump -v`
 Expected: PASS, logging the file count.
 
-- [ ] **Step 7: Run everything**
+- [ ] **Step 8: Run everything**
 
 Run: `go test -race ./... -count=1 && go vet ./... && gofmt -l . && GOOS=windows go build ./...`
 Expected: PASS, no output.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add cmd/evtx/flat.go cmd/evtx/flat_test.go cmd/evtx/dump_test.go cmd/evtx/corpus_test.go
+git add cmd/evtx/dump.go cmd/evtx/dump_test.go cmd/evtx/corpus_test.go cmd/evtx/main.go
 git commit -F - <<'EOF'
-feat(cli): add the flat dump shape with an explicit collision rule
+feat(cli): add evtx dump in both shapes
 
-An EventData entry keeps its own name unless that name is empty, is a
-reserved key, or was already used; otherwise it becomes data_<i>_<Name>.
-Deterministic, traceable to the originating index, and lossless.
+The event shape is json.Encoder.Encode on the library's own Event: the
+CLI adds no serialisation of its own, so it cannot drift from the API it
+demonstrates. Value.MarshalJSON already renders SIDs, FILETIMEs, base64
+binary and the 2^53 quoting rule.
 
-The reserved set is read from evtx.System's struct tags, not listed by
-hand: several tags carry omitempty, so a set derived from the record in
-hand would reserve different keys for different records of one file.
-
-Unit-tested rather than end to end on purpose — the writer cannot produce
-a single one of the contentious cases, so an end-to-end test would pass
-while testing nothing.
+Diagnostics go to stderr so stdout stays pure NDJSON. Exit 2 when records
+were skipped, 0 with --allow-errors.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01V4aa2erUpGicpwi3pPi6Ds
@@ -2166,9 +2203,14 @@ Expected: `github.com/fjacquet/go-evtx v0.8.0`. A version appearing in
 
 **Spec coverage.** Every section of the spec maps to a task: the FILETIME fix
 to Task 1, `Reader.FileInfo` to Task 2, the architecture and `info` to Task 3,
-`dump --shape=event` and the exit codes to Task 4, the flat shape rules and the
-corpus test to Task 5, the release posture and ADR-005 to Task 6, the remaining
-documents to Task 7, the godoc examples and CHANGELOG to Task 8.
+the flat shape rules to Task 4, `dump` in both shapes plus the exit codes and
+the corpus test to Task 5, the release posture and ADR-005 to Task 6, the
+remaining documents to Task 7, the godoc examples and CHANGELOG to Task 8.
+
+Tasks 4 and 5 were swapped after the plan was first written: `dump` came first
+and needed a placeholder `flatten`, while Task 3 needed a placeholder
+`runDump`. Both placeholders were dead code a reviewer would rightly flag, and
+ordering the pure function before its caller removes them.
 
 One spec item was dropped during planning and the spec was corrected to match:
 `info` no longer prints a distinct-template count, which is unreachable from an
@@ -2178,9 +2220,9 @@ One item was added: `toFILETIME` needs the same fix as `fromFILETIME`, because
 `UnixNano` is equally undefined before 1678 — without it the 1601 round trip
 the fix exists to enable would fail on the encode side.
 
-**Type consistency.** `flatten(ev *evtx.Event) (map[string]any, int)` is used
-with that signature in Task 4's `dump.go`, stubbed with it in Task 4 Step 4 and
-implemented with it in Task 5. `runDump`, `runInfo` and `run` all take
+**Type consistency.** `flatten(ev *evtx.Event) (map[string]any, int)` is
+implemented in Task 4 and consumed with that same signature by Task 5's
+`dump.go`. `runDump`, `runInfo` and `run` all take
 `(args []string, stdout, stderr io.Writer) int`. `inputPath(in string, rest
 []string) (string, error)` and `normaliseCause(err error) string` are defined in
 Task 3 and consumed in Task 4. `FileInfo`'s four fields are defined in Task 2
