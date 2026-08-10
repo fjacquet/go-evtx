@@ -29,6 +29,28 @@ Velociraptor compatibility is untested — do not rely on it.
 
 > Full requirements and roadmap: [docs/PRD.md](docs/PRD.md)
 
+## Command line
+
+```bash
+go install github.com/fjacquet/go-evtx/cmd/evtx@latest
+```
+
+`evtx dump` writes one JSON object per record (NDJSON):
+
+```bash
+evtx dump security.evtx | jq -s 'map(.system.event_id) | unique'
+```
+
+`evtx info` reports the file header and a full decode pass, failures grouped
+by cause:
+
+```bash
+evtx info security.evtx
+```
+
+See the [user guide](docs/user-guide.md) for flags, output shapes, and exit
+codes.
+
 ## Format references
 
 - **[MS-EVEN6]**, Microsoft's EventLog Remoting Protocol v6.0 —

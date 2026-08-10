@@ -1,7 +1,7 @@
-# ADR-005 — Ship CLI binaries
+# ADR-005: Ship CLI binaries
 
-**Status:** Accepted
 **Date:** 2026-08-10
+**Status:** Accepted
 
 ## Context
 
@@ -41,7 +41,7 @@ version — `evtx version` reporting v0.8.0 means something.
   `./cmd/evtx` explicitly, so `gen-fixture-system` and `gen-fixture-minimal`
   remain CI-only tools.
 
-## Alternatives considered
+## Alternatives Considered
 
 **A separate module under `cmd/evtx/go.mod`.** Would isolate CLI dependencies
 if the CLI ever wanted cobra or coloured output. Rejected: it costs `replace`
