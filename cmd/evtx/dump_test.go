@@ -346,3 +346,45 @@ func TestRun_DumpIsDispatched(t *testing.T) {
 		t.Errorf("usage does not mention dump:\n%s", usageOut.String())
 	}
 }
+
+// TestRunDump_OutIsInputRejected: os.Create truncates, so --out naming the
+// input destroyed the file the dump was still reading. The two spellings are
+// compared by identity, so a relative path and an absolute one for the same
+// file are both caught.
+func TestRunDump_OutIsInputRejected(t *testing.T) {
+	path := writeFixture(t, 3)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel(filepath.Dir(path), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	for _, out := range []string{path, rel, "./" + rel} {
+		var stdout, stderr bytes.Buffer
+		if code := runDump([]string{"--in", path, "--out", out}, &stdout, &stderr); code != 1 {
+			t.Errorf("runDump --out %q = %d, want 1", out, code)
+		}
+		if !strings.Contains(stderr.String(), "is the input file") {
+			t.Errorf("--out %q: stderr = %q, want it to name the problem", out, stderr.String())
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatalf("--out %q: the input file was modified", out)
+		}
+	}
+}

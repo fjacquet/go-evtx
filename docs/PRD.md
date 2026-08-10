@@ -67,7 +67,9 @@
 | C-02 | `dump --shape=flat` projects each event onto a single JSON level, renaming any `EventData` key that collides with a reserved `System` key |
 | C-03 | `evtx info [--in FILE] [FILE]` reports the file header (format version, chunk count, dirty/full flags) and the result of a full decode pass, with failures grouped by cause |
 | C-04 | Exit codes for `dump`: 0 — every record decoded; 2 — at least one record was skipped (unless `--allow-errors`); 1 — usage error or unreadable input |
-| C-05 | Exit codes for `info`: 0 unless the input file itself cannot be opened, in which case 1 |
+| C-05 | Exit codes for `info`: 0 unless the input file cannot be read, in which case 1 |
+| C-06 | "Unreadable input" includes a file that fails part-way: if a chunk cannot be loaded, the file has not been read to the end, and both commands report it and exit 1 rather than a clean pass over the records they did read. `--allow-errors` does not suppress it |
+| C-07 | `dump` rejects an `--out` that names the input file (exit 1), comparing the two by file identity rather than by string |
 
 ### 3.2 Planned
 

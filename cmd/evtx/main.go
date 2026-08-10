@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -92,8 +93,46 @@ func inputPath(in string, rest []string) (string, error) {
 	}
 }
 
-// digits matches every run of decimal digits in an error message.
-var digits = regexp.MustCompile(`[0-9]+`)
+// sameFile reports whether two paths name the same file on disk.
+//
+// os.SameFile is the authority when both paths exist: it compares the device
+// and inode, so a symlink, a hard link and a relative spelling all resolve to
+// the same answer. When the second path does not exist yet — the ordinary case
+// for an output file — there is nothing to stat, and cleaned absolute paths are
+// compared instead, which still catches the relative-versus-absolute spelling
+// of one file.
+func sameFile(a, b string) (bool, error) {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false, err
+	}
+	bi, err := os.Stat(b)
+	if err == nil {
+		return os.SameFile(ai, bi), nil
+	}
+	if !os.IsNotExist(err) {
+		return false, err
+	}
+	absA, err := filepath.Abs(a)
+	if err != nil {
+		return false, err
+	}
+	absB, err := filepath.Abs(b)
+	if err != nil {
+		return false, err
+	}
+	return filepath.Clean(absA) == filepath.Clean(absB), nil
+}
+
+// positions matches the position fields the library attaches to an error: the
+// "chunk N, record N" prefix ReadEvent wraps every per-record failure with, and
+// the "at [chunk ]offset N" a framing error carries. Only these are erased.
+//
+// Every run of digits used to be replaced, which merged causes that are
+// genuinely different — two unsupported value types, say — into one line of the
+// tally, hiding one of them behind the other's count. A number that is part of
+// what went wrong is part of the cause.
+var positions = regexp.MustCompile(`\b(chunk|record|offset) [0-9]+`)
 
 // normaliseCause reduces a per-record error to its cause so that failures of
 // the same kind group together. ReadEvent wraps each failure with its position
@@ -105,5 +144,5 @@ func normaliseCause(err error) string {
 	if i := strings.LastIndex(msg, "go_evtx: "); i >= 0 {
 		msg = msg[i+len("go_evtx: "):]
 	}
-	return digits.ReplaceAllString(msg, "N")
+	return positions.ReplaceAllString(msg, "$1 N")
 }

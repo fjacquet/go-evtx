@@ -45,6 +45,15 @@ func buildReservedKeys() map[string]bool {
 // flatten projects an Event onto a single JSON level and reports how many
 // EventData keys had to be renamed.
 //
+// It returns an error rather than projecting what it can: System is lifted
+// through its own JSON tags, and a marshalling failure there used to be
+// discarded, so every System field vanished from the record with nothing on
+// stdout or stderr to say so. The output of this shape is a compatibility
+// surface, and a record silently missing its provider, channel and event ID is
+// worse than a record the caller is told about. runDump reports it the way it
+// reports any other failure on one record: a line on stderr, that record
+// skipped, exit 2.
+//
 // The rule: an EventData entry takes its own name as its root key when that
 // name is non-empty, collides with no reserved key, and has not already been
 // used. Otherwise its key is data_<i>, where i is the entry's absolute index,
@@ -53,7 +62,7 @@ func buildReservedKeys() map[string]bool {
 // user_data stays nested even here: it is an arbitrary XML tree, and
 // flattening it would mean inventing a path convention. "Flat" describes
 // EventData, not the whole record.
-func flatten(ev *evtx.Event) (map[string]any, int) {
+func flatten(ev *evtx.Event) (map[string]any, int, error) {
 	root := map[string]any{
 		"record_id": ev.RecordID,
 		"timestamp": ev.Timestamp,
@@ -62,8 +71,12 @@ func flatten(ev *evtx.Event) (map[string]any, int) {
 	// System is lifted through its own JSON tags rather than field by field,
 	// so it cannot fall out of step with the faithful shape.
 	var sys map[string]any
-	if b, err := json.Marshal(ev.System); err == nil {
-		_ = json.Unmarshal(b, &sys)
+	b, err := json.Marshal(ev.System)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal system: %w", err)
+	}
+	if err := json.Unmarshal(b, &sys); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal system: %w", err)
 	}
 	delete(sys, "provider")
 	for k, v := range sys {
@@ -97,7 +110,7 @@ func flatten(ev *evtx.Event) (map[string]any, int) {
 		used[key] = true
 		root[key] = d.Value
 	}
-	return root, relocated
+	return root, relocated, nil
 }
 
 // fallbackKey is the generated key for an entry that cannot take its own name:

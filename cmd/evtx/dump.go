@@ -44,6 +44,17 @@ func runDump(args []string, stdout, stderr io.Writer) (code int) {
 
 	w := stdout
 	if *out != "" {
+		// os.Create truncates, so --out naming the input destroys the file
+		// being read. Checked after the input opens, and by identity rather
+		// than by string: ./f.evtx and /abs/f.evtx, or a symlink and its
+		// target, are the same file spelled two ways.
+		if same, err := sameFile(path, *out); err != nil {
+			_, _ = fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+			return 1
+		} else if same {
+			_, _ = fmt.Fprintf(stderr, "evtx dump: --out %s is the input file; it would be truncated before it is read\n", *out)
+			return 1
+		}
 		f, err := os.Create(*out) // #nosec G304 — an operator-supplied output path
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "evtx dump: %v\n", err)
@@ -71,6 +82,16 @@ func runDump(args []string, stdout, stderr io.Writer) (code int) {
 		if errors.Is(err, evtx.ErrNoMoreRecords) {
 			break
 		}
+		// A chunk that cannot be loaded ends the stream early: the records
+		// after it are not skipped, they are unread, and the file has not been
+		// dumped. That is an unreadable input (exit 1), not a record-level
+		// skip (exit 2), and --allow-errors does not cover it — it suppresses
+		// "some records were skipped", never "the file was not finished".
+		if errors.Is(err, evtx.ErrChunkUnreadable) {
+			_, _ = fmt.Fprintf(stderr, "evtx dump: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "evtx dump: stopped after %d records; the file was not read to the end\n", total)
+			return 1
+		}
 		total++
 		if err != nil {
 			// One line per skipped record, on stderr, keeping the position
@@ -82,7 +103,17 @@ func runDump(args []string, stdout, stderr io.Writer) (code int) {
 		}
 		var payload any = ev
 		if *shape == "flat" {
-			flat, moved := flatten(ev)
+			flat, moved, ferr := flatten(ev)
+			if ferr != nil {
+				// Handled exactly like a decode failure on one record: a line
+				// on stderr keeping the record's identity, that record left
+				// out of the stream, and the exit code that says records were
+				// skipped. Emitting a partial projection instead would be the
+				// silent loss this shape exists not to do.
+				skipped++
+				_, _ = fmt.Fprintf(stderr, "go_evtx: record %d: %v\n", ev.RecordID, ferr)
+				continue
+			}
 			payload, relocated = flat, relocated+moved
 		}
 		if err := enc.Encode(payload); err != nil {
