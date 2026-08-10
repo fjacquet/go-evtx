@@ -192,15 +192,15 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 |-------|-------|------|
 | 0 | ProviderName | STRING |
 | 1 | EventID | UINT16 |
-| 2 | Level | UINT8 (always 0) |
+| 2 | Level | UINT8 (from `fields["Level"]`, default 0) |
 | 3 | SystemTime | FILETIME |
 | 4 | Computer | STRING |
 | 5+2i | DataField[i] name | STRING |
 | 6+2i | DataField[i] value | STRING |
-| 29 | Version | UINT8 (always 0, no caller-supplied source) |
-| 30 | Task | UINT16 (always 0, no caller-supplied source) |
-| 31 | Opcode | UINT8 (always 0, no caller-supplied source) |
-| 32 | Keywords | HEXINT64 (always 0, no caller-supplied source) |
+| 29 | Version | UINT8 (from `fields["Version"]`, default 0) |
+| 30 | Task | UINT16 (from `fields["Task"]`, default 0) |
+| 31 | Opcode | UINT8 (from `fields["Opcode"]`, default 0) |
+| 32 | Keywords | HEXINT64 (from `fields["Keywords"]`, decimal or 0x, default 0) |
 | 33 | EventRecordID | UINT64 (the writer's own record ID) |
 | 34 | Correlation/@ActivityID | NULL (no caller-supplied source) |
 | 35 | Correlation/@RelatedActivityID | NULL (no caller-supplied source) |
@@ -213,7 +213,13 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 
 The 12 data fields (indices 5–28) are hardcoded in `dataFieldNames` in `binxml.go`; they kept their original indices and semantics across v0.7.0/Task 8b/8c — nothing calling `WriteRecord` needs to change.
 
-Indices 29–41 (v0.7.0/Task 8b's F12b, Task 8c's F13b/F13c) exist purely so the encoded `<System>` block matches a real Windows record's 14 children instead of 5, and its `Provider`/`EventID` elements carry the same attributes the real file's do; `binxml_reader.go`'s `decodeBinXML` parses them like every other substitution but does not surface most of them on `Record` — they have no caller-supplied source (except `ProviderGuid`, which round-trips through `fields["ProviderGuid"]` the same way `ProviderName` does but likewise isn't surfaced on `Record`). `EventRecordID`'s value is already exposed as `Record.RecordID` from the event record header, not from BinXML.
+Indices 29–41 (v0.7.0/Task 8b's F12b, Task 8c's F13b/F13c) were added purely so the encoded `<System>` block matches a real Windows record's 14 children instead of 5, and so its `Provider`/`EventID` elements carry the same attributes the real file's do. When they were added, none of them had a caller-supplied source.
+
+**v0.7.4 changed that for five of them.** `Level` (2), `Version` (29), `Task` (30), `Opcode` (31) and `Keywords` (32) now read from the fields map, parsed as fixed-width unsigned integers in decimal or with an `0x` prefix, defaulting to 0. A value that does not fit returns `ErrInvalidFieldValue` and writes nothing. Issue #13 is why: the keys were accepted and dropped in silence while `Channel` in the same call was honoured, so a caller could not express any non-default value. The symptom was a plausible wrong value, not a missing one — Event Viewer resolves a zero `Level` to `Information` and zero `Keywords` to `None` from its own defaults, so an event marked `Level=2` displayed as `Information`. (The issue first claimed blank columns and its author corrected that twice; the correction is why this paragraph describes a wrong value instead.) The template already declared the right type for each slot, so this changed substitution values only.
+
+Six still have no caller-supplied source, and they are not the same kind of gap: `Correlation/@ActivityID`, `Correlation/@RelatedActivityID`, `Execution/@ProcessID`, `Execution/@ThreadID`, `Security/@UserID` and `EventID/@Qualifiers` are the F15 fields — their token declares the field's real type while their array entry declares `NULL`. Filling one means flipping that array entry to a real value, and on that exact ground two of F14's three measured attempts regressed CI. `ProcessID`/`ThreadID` could be filled by the library itself from `os.Getpid()`; they must not be, for the same reason `ProviderName` is never invented — writing our own PID into a forensic artefact describing someone else's event is fabricating evidence.
+
+`ProviderGuid` round-trips through `fields["ProviderGuid"]` the same way `ProviderName` does, but is not surfaced on `Record`. `EventRecordID`'s value is already exposed as `Record.RecordID` from the event record header, not from BinXML.
 
 The seven scalar children whose sole content is one substitution value (`Version`, `Task`, `Opcode`, `Keywords`, `EventRecordID` — F12b; `EventID`, `Level` — F13a) are encoded differently from a plain `NormalSubstitution` (token `0x0D`): per `testdata/system.evtx`, every element of this shape uses `OptionalSubstitution` (token `0x0E`) with the enclosing `OpenStartElementTag`'s `dependency_id` set to that same substitution index, so `writeOpenElement`/`writeOptionalSubstitution` are called with that real index rather than `depIDNotSet`. F12b left `EventID`/`Level` as `0x0D`/`dependency_id` `0xffff` as an explicit, permitted scope decision ("elements that are genuinely always present may legitimately stay `0x0D`" — go-evtx always supplies real data for both); Task 8c/F13a closes that out to match the real file exactly — `dependency_id` is the element's own **content** substitution index (`subEventID`/`subLevel`, i.e. 1 and 2), not the index of any attribute the element also carries (real Windows ties `EventID`'s `dependency_id` to its own content, `0x0003` in the real file's numbering, not `Qualifiers`' `0x0004`). `Correlation`, `Execution` and `Security` stay `0xffff` (element itself always present, matching the real file) with their individual attribute values NULL-typed via `OptionalSubstitution` — go-evtx has no source for `ActivityID`/`RelatedActivityID`/`ProcessID`/`ThreadID`/`UserID`, so it reproduces the real file's own encoding for an event that doesn't populate them, rather than inventing forensic data. `Channel` and `Computer` stay `NormalSubstitution`/`0xffff` like the other pre-existing fields, since go-evtx always has a (possibly empty) real value for both.
 

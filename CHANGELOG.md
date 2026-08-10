@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-10
+
+### Fixed
+
+- **`Level`, `Version`, `Task`, `Opcode` and `Keywords` are read from the
+  fields map instead of being written as literal zeros.** The keys were
+  accepted and dropped without a word, while `Channel` in the same call was
+  honoured — so they looked supported precisely because nothing rejected them.
+  A caller could not express any non-default value for the five. Reported as
+  issue #13, measured on Windows Server 2025.
+
+  The symptom is a wrong value, not a missing one. Event Viewer resolves a
+  zero `Level` to `Information`, a zero `Task` to `None`, a zero `Opcode` to
+  `Info` and zero `Keywords` to `None` from its own defaults, so an event a
+  caller marked `Level=2` (Error) displayed as `Information`, plausibly and
+  silently.
+
+  Each value is parsed as an unsigned integer of its field's width, in decimal
+  or with an `0x` prefix. Windows displays `Keywords` in hex, so that is the
+  form a caller copies.
+
+  **One limit worth stating:** `Task`'s display name is resolved from a
+  provider manifest registered on the reading host. Writing a non-zero `Task`
+  puts the number in the file, but no value written here can make Event Viewer
+  render a name for it.
+
+  Absent or empty keys still produce 0, which is what every record written
+  before this release carried, so nothing changes for a caller that does not
+  supply them.
+
+### Added
+
+- `ErrInvalidFieldValue`, returned by `WriteRecord` when one of those five keys
+  holds a value that will not fit its field — `Level=256`, `Keywords=0xZZ`. The
+  record is rejected and nothing is written.
+
+  An error rather than a substituted zero, because the quiet zero is what
+  issue #13 was about. Same stance as `ErrMissingProviderName`: report at the
+  point of the mistake, not through a blank column on a Windows host three
+  steps later.
+
 ## [0.7.3] - 2026-08-10
 
 ### Changed
@@ -348,7 +389,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/fjacquet/go-evtx/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/fjacquet/go-evtx/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/fjacquet/go-evtx/compare/v0.7.0...v0.7.1
