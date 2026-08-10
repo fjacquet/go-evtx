@@ -7,7 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.2] - 2026-08-10
+## [0.7.3] - 2026-08-10
+
+### Changed
+
+- **A template definition is declared once per chunk instead of once per
+  record.** Files shrink by 46%: the 403-record CI fixture goes from
+  1 839 104 bytes in 28 chunks to 987 136 bytes in 15. Each record carried its
+  own inline copy of the same 1978-byte definition; the writer now remembers
+  the pending chunk's definition offset and later records point their template
+  instance backward at it.
+
+  Real Windows has always done this, and the corpus is unambiguous: 545
+  definitions against 36 819 backward references, and not one forward
+  reference.
+
+  Nothing for a caller to change. Files written by earlier versions still
+  read — a self-contained definition per record remains valid, just larger.
+  Verified on Windows Server 2025: 403 records, `ToXml` renders, both
+  `Get-WinEvent` orderings enumerate, and python-evtx agrees.
+
+### Fixed
+
+- **An oversized record is rejected again on the flush-and-retry path.**
+  `WriteRecord` size-checks the payload it first builds, which may *reference*
+  the pending chunk's definition. When that build does not fit the chunk, the
+  record is rebuilt for a fresh chunk and must *inline* the definition —
+  roughly 2 KB larger. That rebuilt payload was never re-checked, so a record
+  sized between the two limits could be appended to a chunk it does not fit,
+  with the chunk CRCs computed over the result. The rebuild is now checked
+  against `maxRecordPayload` too, and returns `ErrRecordTooLarge` naming the
+  inlining as the cause.
+
+  Only reachable since the change above; no released version can produce it.
 
 ### Changed
 
@@ -316,7 +348,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/fjacquet/go-evtx/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/fjacquet/go-evtx/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/fjacquet/go-evtx/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/fjacquet/go-evtx/compare/v0.6.0...v0.7.0
