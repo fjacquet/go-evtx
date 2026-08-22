@@ -6,6 +6,7 @@
 package evtx
 
 import (
+	"bytes"
 	"hash/crc32"
 	"io"
 	"os"
@@ -343,5 +344,58 @@ func TestTickFlush_SnapshotHashTablesPopulated(t *testing.T) {
 	}
 	if n != firstBatch+secondBatch {
 		t.Fatalf("snapshot yielded %d records, want %d", n, firstBatch+secondBatch)
+	}
+}
+
+// TestTickFlush_ByteIdenticalToNoTick is the release invariant for v0.10.0:
+// the finished file must be byte-for-byte what a writer with no background
+// tick produces. The incremental tick may change how bytes reach the disk; it
+// must not change which bytes end up there.
+//
+// TimeCreated is pinned so record FILETIMEs are deterministic; nothing else in
+// the sealed format carries wall-clock data.
+func TestTickFlush_ByteIdenticalToNoTick(t *testing.T) {
+	const records = 30
+
+	write := func(name string, cfg RotationConfig) []byte {
+		t.Helper()
+		outPath := filepath.Join(t.TempDir(), name)
+		w, err := New(outPath, cfg)
+		if err != nil {
+			t.Fatalf("%s New: %v", name, err)
+		}
+		for i := 0; i < records; i++ {
+			if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+				t.Fatalf("%s WriteRecord %d: %v", name, i, err)
+			}
+			if cfg.FlushIntervalSec > 0 && i == records/2 {
+				// Force at least one tick to land mid-chunk, so the file is
+				// assembled by the incremental path rather than by Close alone.
+				time.Sleep(1200 * time.Millisecond)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("%s Close: %v", name, err)
+		}
+		raw, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("%s ReadFile: %v", name, err)
+		}
+		return raw
+	}
+
+	ticked := write("ticked.evtx", RotationConfig{FlushIntervalSec: 1})
+	plain := write("plain.evtx", RotationConfig{})
+
+	if len(ticked) != len(plain) {
+		t.Fatalf("file sizes differ: ticked %d, no-tick %d", len(ticked), len(plain))
+	}
+	if !bytes.Equal(ticked, plain) {
+		for i := range ticked {
+			if ticked[i] != plain[i] {
+				t.Fatalf("files differ at offset %d (0x%x): ticked %#02x, no-tick %#02x",
+					i, i, ticked[i], plain[i])
+			}
+		}
 	}
 }
