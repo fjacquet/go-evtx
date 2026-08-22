@@ -113,10 +113,16 @@ type Writer struct {
 	// TestRecordsCRC_MatchesFullScan. Committed and reset alongside
 	// w.records; zero when the chunk is empty.
 	recordsCRC uint32
-	recordID   uint64   // monotonically incrementing record ID, starts at 1
-	firstID    uint64   // first record ID in current chunk
-	f          *os.File // open file handle; created in New(), closed in Close()
-	chunkCount uint16   // number of COMPLETE chunks written to disk so far
+	// tickWrittenLen is how many bytes of w.records the background tick has
+	// already persisted into the current chunk slot. The tick writes only
+	// w.records[tickWrittenLen:] and skips entirely when the two are equal —
+	// records are append-only, so bytes already in the slot never change.
+	// Committed and reset alongside w.records.
+	tickWrittenLen int
+	recordID       uint64   // monotonically incrementing record ID, starts at 1
+	firstID        uint64   // first record ID in current chunk
+	f              *os.File // open file handle; created in New(), closed in Close()
+	chunkCount     uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -569,6 +575,7 @@ func (w *Writer) rotate() error {
 	w.firstID = 1
 	w.records = w.records[:0]
 	w.recordsCRC = 0
+	w.tickWrittenLen = 0
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -754,6 +761,7 @@ func (w *Writer) flushChunkLocked() error {
 	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
 	w.recordsCRC = 0
+	w.tickWrittenLen = 0
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -777,6 +785,12 @@ func (w *Writer) flushChunkLocked() error {
 // Must be called with w.mu held. Does nothing if len(w.records) == 0.
 func (w *Writer) tickFlushLocked() error {
 	if len(w.records) == 0 {
+		return nil
+	}
+	// Nothing appended since the last tick wrote this slot. Rewriting the
+	// same bytes and fsyncing them again persists nothing new; at idle this
+	// is 86 400 fsyncs a day for no data.
+	if len(w.records) == w.tickWrittenLen {
 		return nil
 	}
 
@@ -820,6 +834,7 @@ func (w *Writer) tickFlushLocked() error {
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: tick sync: %w", err)
 	}
+	w.tickWrittenLen = len(w.records)
 	w.queueFsyncLocked()
 
 	return nil
