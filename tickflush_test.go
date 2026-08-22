@@ -172,7 +172,11 @@ func TestTickFlush_FileChunkAligned(t *testing.T) {
 func TestTickFlush_IncrementalRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "incremental.evtx")
-	w, err := New(outPath, RotationConfig{FlushIntervalSec: 1})
+	var syncs int64
+	w, err := New(outPath, RotationConfig{
+		FlushIntervalSec: 1,
+		OnFsync:          func(time.Time) { atomic.AddInt64(&syncs, 1) },
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -186,6 +190,9 @@ func TestTickFlush_IncrementalRoundTrip(t *testing.T) {
 			}
 		}
 		time.Sleep(1200 * time.Millisecond) // let a tick land between batches
+	}
+	if got := atomic.LoadInt64(&syncs); got == 0 {
+		t.Fatal("no background tick fired across 3 batches; test cannot verify the incremental round trip")
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -373,8 +380,14 @@ func TestTickFlush_SnapshotHashTablesPopulated(t *testing.T) {
 func TestTickFlush_ByteIdenticalToNoTick(t *testing.T) {
 	const records = 30
 
-	write := func(name string, cfg RotationConfig) []byte {
+	// wantTick is asserted independently of cfg.FlushIntervalSec so that a
+	// miswired call — e.g. the "ticked" case accidentally configured with no
+	// interval — fails loudly here rather than silently degrading into a
+	// second no-tick run that still passes the byte-comparison below.
+	write := func(name string, cfg RotationConfig, wantTick bool) []byte {
 		t.Helper()
+		var syncs int64
+		cfg.OnFsync = func(time.Time) { atomic.AddInt64(&syncs, 1) }
 		outPath := filepath.Join(t.TempDir(), name)
 		w, err := New(outPath, cfg)
 		if err != nil {
@@ -393,6 +406,14 @@ func TestTickFlush_ByteIdenticalToNoTick(t *testing.T) {
 				time.Sleep(1200 * time.Millisecond)
 			}
 		}
+		// Check before Close: Close's own final flush fires OnFsync too, which
+		// would make this pass even if no background tick ever ran.
+		switch preClose := atomic.LoadInt64(&syncs); {
+		case wantTick && preClose == 0:
+			t.Fatalf("%s: no background tick fired before Close; test cannot verify the incremental path", name)
+		case !wantTick && preClose != 0:
+			t.Fatalf("%s: fired %d sync(s) before Close, want 0 — no background tick should run", name, preClose)
+		}
 		if err := w.Close(); err != nil {
 			t.Fatalf("%s Close: %v", name, err)
 		}
@@ -403,8 +424,8 @@ func TestTickFlush_ByteIdenticalToNoTick(t *testing.T) {
 		return raw
 	}
 
-	ticked := write("ticked.evtx", RotationConfig{FlushIntervalSec: 1})
-	plain := write("plain.evtx", RotationConfig{})
+	ticked := write("ticked.evtx", RotationConfig{FlushIntervalSec: 1}, true)
+	plain := write("plain.evtx", RotationConfig{}, false)
 
 	if len(ticked) != len(plain) {
 		t.Fatalf("file sizes differ: ticked %d, no-tick %d", len(ticked), len(plain))
