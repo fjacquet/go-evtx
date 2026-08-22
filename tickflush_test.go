@@ -7,6 +7,7 @@ package evtx
 
 import (
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -144,5 +145,112 @@ func TestTickFlush_FileChunkAligned(t *testing.T) {
 	if fi.Size() != want {
 		t.Fatalf("file size = %d after tick, want %d (header + %d whole chunks)",
 			fi.Size(), want, chunks+1)
+	}
+}
+
+// TestTickFlush_IncrementalRoundTrip verifies records written across several
+// background ticks all read back, in order, after Close. This is what proves
+// the header-plus-delta write assembles the same chunk the full-chunk write
+// used to produce.
+func TestTickFlush_IncrementalRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "incremental.evtx")
+	w, err := New(outPath, RotationConfig{FlushIntervalSec: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const batches = 3
+	const perBatch = 4
+	for b := 0; b < batches; b++ {
+		for i := 0; i < perBatch; i++ {
+			if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+				t.Fatalf("WriteRecord batch %d rec %d: %v", b, i, err)
+			}
+		}
+		time.Sleep(1200 * time.Millisecond) // let a tick land between batches
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, err := Open(outPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close() //nolint:errcheck
+
+	var n int
+	for {
+		_, err := r.ReadEvent()
+		if err == ErrNoMoreRecords || err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadEvent after %d records: %v", n, err)
+		}
+		n++
+	}
+	if n != batches*perBatch {
+		t.Fatalf("read %d records, wrote %d", n, batches*perBatch)
+	}
+}
+
+// TestTickFlush_CrashSnapshot verifies that a copy of the file taken mid-session
+// — that is, whatever a crash would leave behind — parses and yields the records
+// written before the last tick. This is the closest available coverage for the
+// header-after-records write ordering, which has no injection seam.
+func TestTickFlush_CrashSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "snapshot.evtx")
+	var syncs int64
+	w, err := New(outPath, RotationConfig{
+		FlushIntervalSec: 1,
+		OnFsync:          func(time.Time) { atomic.AddInt64(&syncs, 1) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Close() //nolint:errcheck
+
+	const written = 6
+	for i := 0; i < written; i++ {
+		if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if atomic.LoadInt64(&syncs) == 0 {
+		t.Fatal("tick never fired; nothing to snapshot")
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	snap := filepath.Join(dir, "snapshot-copy.evtx")
+	if err := os.WriteFile(snap, raw, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	r, err := Open(snap)
+	if err != nil {
+		t.Fatalf("Open snapshot: %v", err)
+	}
+	defer r.Close() //nolint:errcheck
+
+	var n int
+	for {
+		_, err := r.ReadEvent()
+		if err == ErrNoMoreRecords || err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadEvent on snapshot after %d records: %v", n, err)
+		}
+		n++
+	}
+	if n != written {
+		t.Fatalf("snapshot yielded %d records, want %d", n, written)
 	}
 }

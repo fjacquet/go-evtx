@@ -792,6 +792,25 @@ func (w *Writer) flushChunkLocked() error {
 // The file header is patched with chunkCount+1 to account for the in-progress chunk.
 //
 // Must be called with w.mu held. Does nothing if len(w.records) == 0.
+// tickFlushLocked publishes the in-progress chunk from the background tick.
+//
+// It writes only what changed since the previous tick: the 512-byte chunk
+// header, and the record bytes appended since. w.records is append-only, so
+// bytes already in the slot are still valid and are not rewritten. Neither
+// w.chunkCount nor w.records is reset — the chunk stays open for further
+// appends, exactly as before (ADR-004's flush-without-reset).
+//
+// The 512-byte header buffer is sufficient because fillHashTables writes only
+// chunk[128:384] and chunk[384:512], and patchChunkCRC reads chunk[0:120] and
+// chunk[128:512]. Neither touches anything at or above evtxRecordsStart.
+//
+// The records are written BEFORE the header that advertises them. A crash
+// between the two leaves a header describing fewer records than are on disk,
+// which reads back cleanly; the reverse ordering would advertise records whose
+// bytes never landed.
+//
+// Must be called with w.mu held. Does nothing if len(w.records) == 0, or if
+// nothing was appended since the previous tick.
 func (w *Writer) tickFlushLocked() error {
 	if len(w.records) == 0 {
 		return nil
@@ -803,7 +822,6 @@ func (w *Writer) tickFlushLocked() error {
 		return nil
 	}
 
-	// Build the in-progress chunk (same layout as flushChunkLocked, but don't commit).
 	if err := w.chunkCapacityLocked(); err != nil {
 		return err
 	}
@@ -819,39 +837,30 @@ func (w *Writer) tickFlushLocked() error {
 		w.slotExtended = true
 	}
 
-	records := w.records
+	freeSpaceOffset := evtxRecordsStart + uint32(len(w.records))
+	hdr := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
+	fillHashTables(hdr, w.chunkNames, w.chunkTemplates)
+	binary.LittleEndian.PutUint32(hdr[52:], w.recordsCRC)
+	patchChunkCRC(hdr)
 
-	recordsStart := int(evtxRecordsStart)
-	freeSpaceOffset := uint32(recordsStart + len(records))
-	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
-
-	chunkBytes := make([]byte, evtxChunkSize)
-	copy(chunkBytes[0:], chunkHeader)
-	copy(chunkBytes[recordsStart:], records)
-
-	// Populate the two per-chunk hash tables from the nodes accumulated so
-	// far in this (still-open) chunk. MUST precede patchChunkCRC — the chunk
-	// header checksum covers chunk[128:512], which is exactly the region
-	// written here. Unlike flushChunkLocked, this does NOT reset
-	// w.chunkNames/w.chunkTemplates: the chunk is still in progress, exactly
-	// as w.records is left intact for further appends.
-	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
-
-	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
-	patchChunkCRC(chunkBytes)
-	if _, err := w.f.WriteAt(chunkBytes, chunkOffset); err != nil {
-		return fmt.Errorf("go_evtx: tick write chunk %d: %w", w.chunkCount, err)
+	// Records first, then the header that advertises them.
+	delta := w.records[w.tickWrittenLen:]
+	deltaOffset := chunkOffset + int64(evtxRecordsStart) + int64(w.tickWrittenLen)
+	if _, err := w.f.WriteAt(delta, deltaOffset); err != nil {
+		return fmt.Errorf("go_evtx: tick write records for chunk %d: %w", w.chunkCount, err)
+	}
+	if _, err := w.f.WriteAt(hdr, chunkOffset); err != nil {
+		return fmt.Errorf("go_evtx: tick write chunk header %d: %w", w.chunkCount, err)
 	}
 
-	// Patch file header with chunkCount+1 to reflect in-progress chunk visibility.
+	// Patch the file header with chunkCount+1 to reflect the in-progress chunk.
 	if _, err := w.f.WriteAt(buildFileHeader(w.chunkCount+1, w.recordID, w.activeFlagsLocked()), 0); err != nil {
 		return fmt.Errorf("go_evtx: tick patch file header: %w", err)
 	}
-
-	// Sync to disk.
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: tick sync: %w", err)
 	}
+
 	w.tickWrittenLen = len(w.records)
 	w.queueFsyncLocked()
 
