@@ -6,7 +6,7 @@
 ## Context
 
 Consumers of `go-evtx` have different needs:
-- High-level callers (like `cee-exporter`) have structured event data and want BinXML encoding handled automatically.
+- High-level callers (SIEM adapters) have structured event data and want BinXML encoding handled automatically.
 - Low-level callers (forensics tools, custom encoders) may produce their own BinXML payloads and only need record wrapping and file management.
 
 A single API cannot serve both without either over-constraining the high-level caller or exposing too much internal detail.
@@ -24,7 +24,7 @@ The two methods should not be mixed in a single writer session (record ID sequen
 ## Consequences
 
 **Positive:**
-- `cee-exporter` uses `WriteRecord`; no BinXML knowledge required in the adapter
+- SIEM adapters use `WriteRecord`; no BinXML knowledge required in the adapter
 - Forensics tools and custom encoders can use `WriteRaw` with full control
 - Record ID management stays inside the library regardless of which path is used
 - Future: `WriteRaw` enables direct replay of captured BinXML from existing EVTX files

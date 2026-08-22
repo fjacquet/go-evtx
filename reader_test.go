@@ -526,12 +526,12 @@ func TestReader_FileInfo(t *testing.T) {
 // the reader.
 //
 // The EventData schema was a fixed twelve fields, and WriteRecord silently
-// ignored any other key. A caller that had a client address — every CEPA
-// consumer does, and Windows Security auditing carries one on 4625 and 5145 —
-// could pass "IpAddress" in the map, see no error, and get a file without it.
-// cee-exporter shipped exactly that: an entry in its field map, a unit test
-// asserting on that map, and zero occurrences of the address across 19 records
-// in the file it produced.
+// ignored any other key. A caller that had a client address — every network
+// audit-event source does, and Windows Security auditing carries one on 4625
+// and 5145 — could pass "IpAddress" in the map, see no error, and get a file
+// without it. A downstream adapter shipped exactly that: an entry in its field
+// map, a unit test asserting on that map, and zero occurrences of the address
+// across 19 records in the file it produced.
 func TestReadEvent_IpAddress(t *testing.T) {
 	fields := map[string]string{
 		"ProviderName": "Microsoft-Windows-Security-Auditing",

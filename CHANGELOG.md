@@ -52,9 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   twelve, and `WriteRecord` ignored every key outside it without returning an
   error — so a caller with a peer address could pass `IpAddress`, see the write
   succeed, and get a file that did not contain it. Windows Security auditing
-  carries a peer address on 4625 and 5145, and every CEPA consumer has one;
-  cee-exporter shipped a field-map entry and a passing unit test for it, and
-  produced 19 records in which the address occurred zero times.
+  carries a peer address on 4625 and 5145, and every network audit-event source
+  has one; a downstream adapter shipped a field-map entry and a passing unit
+  test for it, and produced 19 records in which the address occurred zero times.
 
   The substitution pair is appended at indices 42/43 rather than extending the
   contiguous 5..28 data block, because widening that block would renumber every

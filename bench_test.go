@@ -18,12 +18,12 @@ import (
 
 func benchFields() map[string]string {
 	return map[string]string{
-		"ProviderName":      "Dell-CEE-Receiver",
-		"Computer":          "isilon-node-01",
+		"ProviderName":      "Audit-Event-Receiver",
+		"Computer":          "nas-node-01",
 		"Channel":           "Security",
 		"Level":             "4",
 		"TimeCreated":       "2026-08-22T12:00:00.000000000Z",
-		"ObjectName":        "/ifs/data/share/finance/q3-report.xlsx",
+		"ObjectName":        "/export/data/share/finance/q3-report.xlsx",
 		"AccessMask":        "0x120089",
 		"SubjectUserName":   "jdoe",
 		"SubjectDomainName": "CORP",

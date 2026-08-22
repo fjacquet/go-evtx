@@ -4,7 +4,7 @@
 **Status:** Approved, not yet implemented
 **Repo:** `github.com/fjacquet/go-evtx`
 **Releases:** v0.6.0 (durability), v0.7.0 (format correctness)
-**Companion spec:** `cee-exporter/docs/superpowers/specs/2026-08-08-promise-remediation-design.md`
+**Companion spec:** the downstream SIEM adapter's `docs/superpowers/specs/2026-08-08-promise-remediation-design.md`
 
 ## Problem
 
@@ -213,10 +213,10 @@ and the shared `r.buf`. `reader.go:47` claims "All exported methods are safe
 for concurrent use". The repo's own `-race` run passes only because no test
 reads concurrently.
 
-cee-exporter does not use the Reader, so either resolution is acceptable —
-but the doc and the code must agree. Take the cheap one: add a mutex to
-`Reader` so the existing claim becomes true, and add the concurrency test from
-D7 to keep it true.
+The downstream adapter does not use the Reader, so either resolution is
+acceptable — but the doc and the code must agree. Take the cheap one: add a
+mutex to `Reader` so the existing claim becomes true, and add the concurrency
+test from D7 to keep it true.
 
 ### v0.6.0 exit criteria
 
@@ -362,7 +362,7 @@ without waiting for a Windows runner to disagree.
 
 `Get-WinEvent -Path` uses the same Windows Event Log parsing stack as Event
 Viewer. If it parses, the claim is earned. **This job is the definition of
-OUT-06** in the companion cee-exporter spec.
+OUT-06** in the companion adapter spec.
 
 ### F7. README honesty pass — do this in v0.6.0, not v0.7.0
 
@@ -401,13 +401,13 @@ Recorded so they are not rediscovered as new:
 - `encodeUTF16LE` (`binformat.go:53`) is referenced only by its own test.
 - `go.mod` declares `go 1.24`; the consumer is on 1.26.5.
 
-## Inherited knowledge from cee-exporter
+## Inherited knowledge from the downstream adapter
 
-cee-exporter is retiring its `.planning/` process directory, which holds
-roughly 7,200 lines of phase research — a large share of it EVTX binary format
-knowledge written while the writer still lived in that repo: BinXML encoding,
-chunk layout, CRC ordering constraints, the rotation design, and a pitfalls
-catalogue.
+The downstream adapter is retiring its `.planning/` process directory, which
+holds roughly 7,200 lines of phase research — a large share of it EVTX binary
+format knowledge written while the writer still lived in that repo: BinXML
+encoding, chunk layout, CRC ordering constraints, the rotation design, and a
+pitfalls catalogue.
 
 That material belongs here now, since this repo owns the format. Receive it
 during the v0.6.0 cycle as reference documentation under `docs/`, and prune
@@ -417,16 +417,16 @@ placeholder-header and flush behaviour that this spec changes.
 Treat it as prior art to verify, not as truth. The pitfalls catalogue predates
 every finding in this document and caught none of them.
 
-The corresponding work item is T8 in the cee-exporter spec.
+The corresponding work item is T8 in the adapter spec.
 
-## Coupling to cee-exporter
+## Coupling to the downstream adapter
 
 Two sync points only:
 
-1. cee-exporter bumps to **v0.6.0** whenever it lands. Nothing blocks on it.
-2. cee-exporter's v5.0 Event Viewer claim requires **v0.7.0** with F6 green.
-   If F6 cannot pass, cee-exporter ships v5.0 with the claim deleted.
+1. The adapter bumps to **v0.6.0** whenever it lands. Nothing blocks on it.
+2. The adapter's v5.0 Event Viewer claim requires **v0.7.0** with F6 green.
+   If F6 cannot pass, the adapter ships v5.0 with the claim deleted.
 
-The format proof lives here, not in cee-exporter. go-evtx is the artifact that
-must open in Event Viewer, so it owns that assertion. cee-exporter's own
+The format proof lives here, not in the adapter. go-evtx is the artifact that
+must open in Event Viewer, so it owns that assertion. The adapter's own
 Windows job proves only its message-resource rendering.

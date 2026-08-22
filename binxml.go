@@ -258,10 +258,10 @@ var dataFieldNames = [12]string{
 //
 // It exists because the schema was previously closed at twelve and WriteRecord
 // ignored every other key in silence: a caller with a client address — every
-// CEPA consumer has one — could pass it, see no error, and get a file without
-// it. Like the other twelve it is optional; an absent or empty value writes an
-// empty <Data> element rather than omitting it, which is what the other twelve
-// already do.
+// network audit-event source has one — could pass it, see no error, and get a
+// file without it. Like the other twelve it is optional; an absent or empty
+// value writes an empty <Data> element rather than omitting it, which is what
+// the other twelve already do.
 const extraDataFieldName = "IpAddress"
 
 // chunkRef records where a NameNode or TemplateNode was emitted, as an offset

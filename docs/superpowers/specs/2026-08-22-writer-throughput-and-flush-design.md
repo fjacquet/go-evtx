@@ -6,11 +6,10 @@
 
 ## Context
 
-go-evtx is used as a sink for Dell CEE (Common Event Enabler) audit events
-published by PowerScale/Unity/PowerStore via CEPA. That workload has two ends
-and the writer must survive both: a long-running receiver at tens of events per
-second, and a burst from a busy cluster at thousands to tens of thousands per
-second.
+go-evtx is used as a sink for network-attached-storage audit events. That
+workload has two ends and the writer must survive both: a long-running receiver
+at tens of events per second, and a burst from a busy cluster at thousands to
+tens of thousands per second.
 
 A measurement spike on 2026-08-22 (Apple M1 Pro, APFS, darwin/arm64, Go
 benchmarks, throwaway harness) produced the numbers this design rests on:
