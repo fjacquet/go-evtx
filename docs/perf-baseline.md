@@ -10,6 +10,11 @@ Append-only, under the same discipline as `docs/format-baseline.md`:
   `F_FULLFSYNC`, a barrier through the drive cache, and is roughly an order of
   magnitude more expensive than a Linux `fsync` on NVMe. A row without a
   platform is not comparable to anything.
+- **Record the Go toolchain version in the platform cell, for the same
+  reason.** A compiler change can move `ns/op`/`B/op`/`allocs/op` on its own,
+  with zero change to this repo's code. A row measured on a toolchain other
+  than the `go.mod` pin must say so, so a later reader does not attribute a
+  compiler-driven delta to the code under test.
 
 Reproduce with:
 
@@ -26,11 +31,11 @@ go test -run XXX -bench . -benchtime 3s .
 | 2026-08-22 | v0.9.0 | darwin/arm64 M1 Pro, APFS | EncodeShared | 3301 | 5608 | 56 | Spike harness |
 | 2026-08-22 | v0.9.0 | darwin/arm64 M1 Pro, APFS | EncodeInline | 13960 | 20968 | 180 | Spike harness |
 | 2026-08-22 | v0.9.0 | darwin/arm64 M1 Pro, APFS | raw 64 KiB WriteAt + Sync | 5352391 | — | — | Spike harness; 2632 ns/op without the Sync |
-| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS | EncodeShared | 3146 | 5656 | 58 | v0.10.0, `bench_test.go` |
-| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS | EncodeInline | 12744 | 21016 | 182 | v0.10.0, `bench_test.go` |
-| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS | WriteRecord | 72199 | 6822 | 60 | v0.10.0, `bench_test.go`; 81.86 rec/fsync |
-| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS | WriteRecordParallel | 65862 | 6827 | 60 | v0.10.0, `bench_test.go` |
-| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS | TickFlushIdle | 13.84 | 0 | 0 | v0.10.0, `bench_test.go`; a tick with no new records since the previous one is a no-op — the pre-release (v0.9.0) tick instead performed a full-chunk write and fsync on every interval regardless of arrivals |
+| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EncodeShared | 3146 | 5656 | 58 | v0.10.0, `bench_test.go` |
+| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EncodeInline | 12744 | 21016 | 182 | v0.10.0, `bench_test.go` |
+| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecord | 72199 | 6822 | 60 | v0.10.0, `bench_test.go`; 81.86 rec/fsync |
+| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecordParallel (10) | 65862 | 6827 | 60 | v0.10.0, `bench_test.go` |
+| 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | TickFlushIdle | 13.84 | 0 | 0 | v0.10.0, `bench_test.go`; a tick with no new records since the previous one is a no-op — the pre-release (v0.9.0) tick instead performed a full-chunk write and fsync on every interval regardless of arrivals |
 
 ## Derived figures
 
