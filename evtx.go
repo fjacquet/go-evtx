@@ -106,10 +106,17 @@ type Writer struct {
 	// record in the pending chunk begins. Committed and reset alongside
 	// w.records; zero when the chunk is empty.
 	lastRecordOffset uint32
-	recordID         uint64   // monotonically incrementing record ID, starts at 1
-	firstID          uint64   // first record ID in current chunk
-	f                *os.File // open file handle; created in New(), closed in Close()
-	chunkCount       uint16   // number of COMPLETE chunks written to disk so far
+	// recordsCRC is the running CRC32 (IEEE) of w.records, maintained
+	// incrementally on every append rather than rescanned per flush.
+	// crc32.Update over the appended bytes yields the checksum of the
+	// concatenation, so this is bit-identical to a full rescan — verified by
+	// TestRecordsCRC_MatchesFullScan. Committed and reset alongside
+	// w.records; zero when the chunk is empty.
+	recordsCRC uint32
+	recordID   uint64   // monotonically incrementing record ID, starts at 1
+	firstID    uint64   // first record ID in current chunk
+	f          *os.File // open file handle; created in New(), closed in Close()
+	chunkCount uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -309,6 +316,7 @@ func (w *Writer) WriteRaw(payload []byte) error {
 
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
+	w.recordsCRC = crc32.Update(w.recordsCRC, crc32.IEEETable, rec)
 	w.recordID++
 	return nil
 }
@@ -433,6 +441,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
+	w.recordsCRC = crc32.Update(w.recordsCRC, crc32.IEEETable, rec)
 	w.recordID++
 	return nil
 }
@@ -559,6 +568,7 @@ func (w *Writer) rotate() error {
 	w.recordID = 1
 	w.firstID = 1
 	w.records = w.records[:0]
+	w.recordsCRC = 0
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -719,7 +729,7 @@ func (w *Writer) flushChunkLocked() error {
 	// covers chunk[128:512], which is exactly the region written here.
 	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
 
-	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
+	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
 	patchChunkCRC(chunkBytes)
 
 	// Write chunk at the correct file offset.
@@ -743,6 +753,7 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkCount = nextChunkCount
 	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
+	w.recordsCRC = 0
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -791,7 +802,7 @@ func (w *Writer) tickFlushLocked() error {
 	// as w.records is left intact for further appends.
 	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
 
-	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
+	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
 	patchChunkCRC(chunkBytes)
 
 	// Write at the current (in-progress) chunk slot — same slot as next flushChunkLocked.
@@ -928,12 +939,6 @@ func buildChunkHeader(firstRecordID, lastRecordID uint64, lastRecordOffset, free
 	binary.LittleEndian.PutUint32(buf[44:], lastRecordOffset) // LastEventRecordDataOffset
 	binary.LittleEndian.PutUint32(buf[48:], freeSpaceOffset)  // FreeSpaceOffset
 	return buf
-}
-
-// patchEventRecordsCRC computes CRC32 over the event records region and writes it at chunk[52:56].
-func patchEventRecordsCRC(chunk []byte, recordsStart, recordsEnd int) {
-	c := crc32.Checksum(chunk[recordsStart:recordsEnd], crc32.IEEETable)
-	binary.LittleEndian.PutUint32(chunk[52:], c)
 }
 
 // parseTimeCreated parses the "TimeCreated" field as RFC3339Nano, falling back to time.Now().
