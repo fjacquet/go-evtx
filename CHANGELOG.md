@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The background flush tick no longer rewrites the whole 64 KiB chunk and
+  fsyncs on every interval regardless of arrivals. A tick with no new records
+  since the previous one now does nothing at all — no write, no fsync — which
+  at `FlushIntervalSec: 1` turns up to 86 400 fsyncs/day at idle into zero,
+  measured at 13.84 ns/op with 0 allocations
+  (`BenchmarkTickFlushIdle`). A tick with new records still builds a full
+  chunk buffer internally (`fillHashTables` back-patches offsets inside the
+  records region, so a smaller buffer cannot be used safely) but writes only
+  the used prefix to disk — the records region plus the 512-byte header — a
+  real reduction versus the flat 65536 bytes every tick used to write, though
+  roughly half on average rather than an order of magnitude; see
+  `docs/perf-baseline.md`'s "Derived figures" section for the honest,
+  labeled-as-arithmetic estimate. No API change, and the bytes on disk after
+  `Close()` are byte-identical to v0.9.0's — asserted by
+  `TestTickFlush_ByteIdenticalToNoTick`. See ADR-007.
+- The event-records CRC continues to be computed by a full rescan of the
+  records region on every flush (`patchEventRecordsCRC`). An earlier commit on
+  this release replaced it with a CRC maintained incrementally over `w.records`
+  and claimed bit-identical output; that was **false and was reverted before
+  release**. The checksum at `chunk[52:56]` covers the *patched* chunk buffer,
+  and `fillHashTables` writes hash-chain offsets inside the records region, so
+  the bytes on disk are not the bytes in `w.records`. Every chunk written under
+  the incremental scheme carried a wrong records checksum while the record
+  bytes themselves were unchanged — checksum-invisible corruption, and a
+  violation of this release's byte-identity invariant.
+  `TestWrittenFile_EventRecordsCRCMatchesRecords` now guards the property
+  directly against a written file. See ADR-007's Decision 3.
+
+### Added
+
+- `docs/perf-baseline.md` and `bench_test.go`: reproducible writer throughput
+  benchmarks under the same append-only discipline as `docs/format-baseline.md`.
+
 ## [0.9.0] - 2026-08-22
 
 ### Added

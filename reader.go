@@ -79,6 +79,11 @@ type Reader struct {
 }
 
 // Open opens an .evtx file for sequential reading.
+//
+// Reading a file that a Writer is actively writing is not supported. The
+// background tick publishes an in-progress chunk in more than one WriteAt,
+// and nothing synchronises a Reader against it. Open a file only after its
+// Writer has been closed, or open a copy.
 func Open(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {

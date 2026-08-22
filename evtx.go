@@ -106,10 +106,28 @@ type Writer struct {
 	// record in the pending chunk begins. Committed and reset alongside
 	// w.records; zero when the chunk is empty.
 	lastRecordOffset uint32
-	recordID         uint64   // monotonically incrementing record ID, starts at 1
-	firstID          uint64   // first record ID in current chunk
-	f                *os.File // open file handle; created in New(), closed in Close()
-	chunkCount       uint16   // number of COMPLETE chunks written to disk so far
+	// tickWrittenLen is how many bytes of w.records the background tick has
+	// already persisted into the current chunk slot. It serves only the idle
+	// check: when it equals len(w.records), nothing arrived since the last
+	// tick, and the tick returns without writing or syncing. It no longer
+	// slices a delta write — the tick rebuilds and writes the used prefix of
+	// the full chunk on every non-idle call, because fillHashTables patches
+	// offsets inside already-written record bytes, so records are not
+	// append-only on disk once hash chaining is considered. Committed and
+	// reset alongside w.records.
+	tickWrittenLen int
+	// slotExtended reports whether the current chunk slot has been extended
+	// to its full evtxChunkSize on disk. The tick writes only the used
+	// prefix — the records region, then the 512-byte header — and skips the
+	// unwritten tail, so without this the file would end mid-chunk and
+	// loadChunk — which reads a whole evtxChunkSize — would hit EOF, as
+	// would Windows. The sparse tail reads back as zeros, which is what the
+	// sealing write puts there anyway. Reset alongside w.records.
+	slotExtended bool
+	recordID     uint64   // monotonically incrementing record ID, starts at 1
+	firstID      uint64   // first record ID in current chunk
+	f            *os.File // open file handle; created in New(), closed in Close()
+	chunkCount   uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -317,6 +335,10 @@ func (w *Writer) WriteRaw(payload []byte) error {
 //
 // eventID is the Windows Event ID (e.g. 4663 for file access).
 // fields is a map of field names to values.
+//
+// The fields map is read during the call and not retained. The caller must
+// not mutate it concurrently with WriteRecord: the writer's lock protects
+// the writer's own state, not the caller's map.
 //
 // Reserved field keys:
 //   - "ProviderName"  — event provider (STRING); must not be empty
@@ -559,6 +581,8 @@ func (w *Writer) rotate() error {
 	w.recordID = 1
 	w.firstID = 1
 	w.records = w.records[:0]
+	w.tickWrittenLen = 0
+	w.slotExtended = false
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -719,6 +743,9 @@ func (w *Writer) flushChunkLocked() error {
 	// covers chunk[128:512], which is exactly the region written here.
 	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
 
+	// MUST follow fillHashTables: fillOneTable patches chain offsets INTO the
+	// records region, so the bytes this checksums are not the bytes in
+	// w.records. See patchEventRecordsCRC.
 	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
 	patchChunkCRC(chunkBytes)
 
@@ -743,6 +770,8 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkCount = nextChunkCount
 	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
+	w.tickWrittenLen = 0
+	w.slotExtended = false
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -758,57 +787,106 @@ func (w *Writer) flushChunkLocked() error {
 	return nil
 }
 
-// tickFlushLocked performs a flush-without-reset for the background goroutine tick.
-// It writes the current partial chunk to disk at slot w.chunkCount WITHOUT
-// incrementing w.chunkCount or resetting w.records (Option A: flush-without-reset).
-// The file header is patched with chunkCount+1 to account for the in-progress chunk.
+// tickFlushLocked publishes the in-progress chunk from the background tick.
 //
-// Must be called with w.mu held. Does nothing if len(w.records) == 0.
+// The full evtxChunkSize buffer is built exactly as flushChunkLocked builds
+// it — header, then w.records copied in at evtxRecordsStart — because
+// fillHashTables (chunkhash.go) patches node offsets that live inside the
+// records region: besides the [128:512] bucket-head arrays, fillOneTable
+// writes a 4-byte chain terminator at chunk[ref.offset:] and, for a
+// colliding key, a 4-byte chain patch at chunk[prev:] onto an earlier
+// node's next_offset field. Both are chunk-absolute offsets into already-
+// written record bytes (>= evtxRecordsStart+evtxRecordHeaderSize), so the
+// buffer fillHashTables runs against must be full-size, not header-size —
+// a smaller buffer makes every ref fail fillOneTable's bounds check and
+// silently leaves both hash tables empty. This is also why "records are
+// append-only on disk" does not hold once hash chaining is considered: a
+// later record's chain patch can rewrite bytes inside an earlier record
+// already flushed to disk by a previous tick.
+//
+// Only the used prefix is written to disk, as two WriteAt calls sourced
+// from the patched full buffer: the records region first, then the header
+// that advertises them. If the PROCESS dies between the two, the page cache
+// still holds the records write, so the file reads back as a header
+// describing fewer records than are on disk, which is clean; the reverse
+// ordering would advertise records whose bytes never landed.
+//
+// This ordering does NOT survive power loss. There is no fsync between the
+// two WriteAt calls, so writeback may commit them to the platter in either
+// order and a torn power-loss image may show the header without the records.
+// That exposure is not new in v0.10.0 — v0.9.0 had the same gap between its
+// chunk write and its separate file-header write — but the guarantee here is
+// process-crash ordering only. The unwritten tail padding of the chunk slot
+// is left as whatever Truncate zero-filled it to — a parser never reads past
+// FreeSpaceOffset.
+//
+// Neither w.chunkCount nor w.records is reset — the chunk stays open for
+// further appends, exactly as before (ADR-004's flush-without-reset).
+//
+// Must be called with w.mu held. Does nothing if len(w.records) == 0, or if
+// nothing was appended since the previous tick.
 func (w *Writer) tickFlushLocked() error {
 	if len(w.records) == 0 {
 		return nil
 	}
+	// Nothing appended since the last tick wrote this slot. Rewriting the
+	// same bytes and fsyncing them again persists nothing new; at idle this
+	// is 86 400 fsyncs a day for no data.
+	if len(w.records) == w.tickWrittenLen {
+		return nil
+	}
 
-	// Build the in-progress chunk (same layout as flushChunkLocked, but don't commit).
 	if err := w.chunkCapacityLocked(); err != nil {
 		return err
 	}
-	records := w.records
+
+	chunkOffset := int64(evtxFileHeaderSize) + int64(w.chunkCount)*int64(evtxChunkSize)
+	if !w.slotExtended {
+		// The target is always strictly greater than the current file length
+		// at this point — the file holds exactly w.chunkCount whole chunks
+		// plus the 4096-byte header — so this can never shorten the file.
+		if err := w.f.Truncate(chunkOffset + int64(evtxChunkSize)); err != nil {
+			return fmt.Errorf("go_evtx: tick extend chunk slot %d: %w", w.chunkCount, err)
+		}
+		w.slotExtended = true
+	}
 
 	recordsStart := int(evtxRecordsStart)
-	freeSpaceOffset := uint32(recordsStart + len(records))
+	freeSpaceOffset := uint32(recordsStart + len(w.records))
 	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
 	chunkBytes := make([]byte, evtxChunkSize)
 	copy(chunkBytes[0:], chunkHeader)
-	copy(chunkBytes[recordsStart:], records)
+	copy(chunkBytes[recordsStart:], w.records)
 
-	// Populate the two per-chunk hash tables from the nodes accumulated so
-	// far in this (still-open) chunk. MUST precede patchChunkCRC — the chunk
-	// header checksum covers chunk[128:512], which is exactly the region
-	// written here. Unlike flushChunkLocked, this does NOT reset
-	// w.chunkNames/w.chunkTemplates: the chunk is still in progress, exactly
-	// as w.records is left intact for further appends.
+	// MUST precede patchChunkCRC — the chunk header checksum covers
+	// chunk[128:512], which is exactly the region this writes.
 	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
 
-	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
+	// MUST follow fillHashTables, for the same reason flushChunkLocked's call
+	// does: the checksummed bytes are the patched buffer, and the patched
+	// buffer is not derivable from w.records.
+	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(w.records))
 	patchChunkCRC(chunkBytes)
 
-	// Write at the current (in-progress) chunk slot — same slot as next flushChunkLocked.
-	chunkOffset := int64(evtxFileHeaderSize) + int64(w.chunkCount)*int64(evtxChunkSize)
-	if _, err := w.f.WriteAt(chunkBytes, chunkOffset); err != nil {
-		return fmt.Errorf("go_evtx: tick write chunk %d: %w", w.chunkCount, err)
+	// Records first, then the header that advertises them.
+	recordsEnd := recordsStart + len(w.records)
+	if _, err := w.f.WriteAt(chunkBytes[recordsStart:recordsEnd], chunkOffset+int64(evtxRecordsStart)); err != nil {
+		return fmt.Errorf("go_evtx: tick write records for chunk %d: %w", w.chunkCount, err)
+	}
+	if _, err := w.f.WriteAt(chunkBytes[0:evtxChunkHeaderSize], chunkOffset); err != nil {
+		return fmt.Errorf("go_evtx: tick write chunk header %d: %w", w.chunkCount, err)
 	}
 
-	// Patch file header with chunkCount+1 to reflect in-progress chunk visibility.
+	// Patch the file header with chunkCount+1 to reflect the in-progress chunk.
 	if _, err := w.f.WriteAt(buildFileHeader(w.chunkCount+1, w.recordID, w.activeFlagsLocked()), 0); err != nil {
 		return fmt.Errorf("go_evtx: tick patch file header: %w", err)
 	}
-
-	// Sync to disk.
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("go_evtx: tick sync: %w", err)
 	}
+
+	w.tickWrittenLen = len(w.records)
 	w.queueFsyncLocked()
 
 	return nil
@@ -930,7 +1008,17 @@ func buildChunkHeader(firstRecordID, lastRecordID uint64, lastRecordOffset, free
 	return buf
 }
 
-// patchEventRecordsCRC computes CRC32 over the event records region and writes it at chunk[52:56].
+// patchEventRecordsCRC computes CRC32 over the event records region and writes
+// it at chunk[52:56].
+//
+// It MUST run after fillHashTables. fillOneTable writes chain patches inside
+// the records region — a 4-byte chain terminator at chunk[ref.offset:] and,
+// for a colliding key, a non-zero next_offset at chunk[prev:] over a field
+// that was emitted as zero — so chunk[recordsStart:recordsEnd] is not equal to
+// w.records. A checksum maintained incrementally over w.records therefore
+// cannot match the bytes on disk, and collisions are not rare: 64 buckets fill
+// within about 30 distinct names, which a single record already emits. v0.10.0
+// shipped exactly that mistake and it is why this full rescan stays.
 func patchEventRecordsCRC(chunk []byte, recordsStart, recordsEnd int) {
 	c := crc32.Checksum(chunk[recordsStart:recordsEnd], crc32.IEEETable)
 	binary.LittleEndian.PutUint32(chunk[52:], c)
