@@ -45,6 +45,12 @@ func init() {
 	for i := 0; i < 12; i++ {
 		knownOptionalDependencyIDs[uint16(6+i*2)] = true
 	}
+	// The thirteenth <Data> value slot. It sits at 43 rather than 30 because
+	// the pair was appended past the named System indices instead of extending
+	// the contiguous block — see subExtraDataValue. The rule it follows is the
+	// same as the twelve above: the element's dependency_id names its own
+	// content substitution.
+	knownOptionalDependencyIDs[subExtraDataValue] = true
 }
 
 // isRecognisedDependencyID reports whether dep is either the "always

@@ -170,7 +170,15 @@ const (
 	subProviderGuid      = 40
 	subEventIDQualifiers = 41
 
-	totalSubstitutions = 42
+	// The thirteenth EventData field, appended here rather than extended into
+	// the 5..28 block for the reason stated above: renumbering 29..41 would
+	// move every named System index. The pair is therefore non-contiguous with
+	// the first twelve, which the format permits — a substitution's index is
+	// explicit in its own token, not implied by document order.
+	subExtraDataName  = 42
+	subExtraDataValue = 43
+
+	totalSubstitutions = 44
 )
 
 // subEventID and subLevel name the two pre-existing substitution indices
@@ -225,7 +233,10 @@ type substitutionEntry struct {
 	data []byte // raw value bytes
 }
 
-// dataFieldNames defines the 12 data field names in substitution order.
+// dataFieldNames defines the 12 data field names carried in the contiguous
+// 5..28 substitution block, in substitution order. The thirteenth field,
+// extraDataFieldName, lives at subExtraDataName/subExtraDataValue — see the
+// comment there for why it is not simply appended to this array.
 var dataFieldNames = [12]string{
 	"SubjectUserSid",
 	"SubjectUserName",
@@ -240,6 +251,18 @@ var dataFieldNames = [12]string{
 	"ProcessId",
 	"ProcessName",
 }
+
+// extraDataFieldName is the thirteenth EventData field. IpAddress is what
+// Windows Security auditing calls the peer address on 4625 and 5145, so a
+// reader parsing genuine Security events finds it under the name it expects.
+//
+// It exists because the schema was previously closed at twelve and WriteRecord
+// ignored every other key in silence: a caller with a client address — every
+// CEPA consumer has one — could pass it, see no error, and get a file without
+// it. Like the other twelve it is optional; an absent or empty value writes an
+// empty <Data> element rather than omitting it, which is what the other twelve
+// already do.
+const extraDataFieldName = "IpAddress"
 
 // chunkRef records where a NameNode or TemplateNode was emitted, as an offset
 // relative to the start of the chunk.
@@ -284,7 +307,7 @@ type binXMLResult struct {
 //   - "TimeCreated"   → RFC3339Nano timestamp; fallback to time.Now()
 //   - "Channel"       → substitution 38 (STRING); defaults to "" (F12b)
 //   - "ProviderGuid"  → substitution 40 (STRING); defaults to "" (F13b)
-//   - 12 data fields by name (see dataFieldNames)
+//   - 13 data fields by name (dataFieldNames, then extraDataFieldName)
 //
 // sharedTemplateOffset is the chunk-relative offset of a template definition
 // already written into this chunk, or 0 when this record is the first and must
@@ -392,6 +415,7 @@ func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLC
 // Sub 3: SystemTime (FILETIME) from fields["TimeCreated"] parsed as RFC3339Nano; fallback time.Now()
 // Sub 4: Computer (STRING) from fields["Computer"]
 // Subs 5..28: 12 data field name+value pairs from fields map (see dataFieldNames)
+// Subs 42..43: the 13th data field name+value pair (extraDataFieldName)
 // Subs 29..39: F12b's nine added System children — see buildTemplateBody
 // Subs 40..41: F13b/F13c's Provider/@Guid and EventID/@Qualifiers — see buildTemplateBody
 func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[string]string) []substitutionEntry {
@@ -484,6 +508,12 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// full, unresolved story.
 	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 40 Provider/@Guid
 	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 41 EventID/@Qualifiers
+
+	// Sub 42..43: the thirteenth EventData field. Same name/value pair shape
+	// as the twelve in 5..28, just at an index that did not require moving
+	// anything already named.
+	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(extraDataFieldName)})         // 42 Data[12] @Name
+	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields[extraDataFieldName])}) // 43 Data[12] value
 
 	return subs
 }

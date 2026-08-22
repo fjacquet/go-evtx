@@ -335,10 +335,16 @@ func (w *Writer) WriteRaw(payload []byte) error {
 //   - "Opcode"   — uint8
 //   - "Keywords" — uint64; 0x80000000000000 renders as "Classic"
 //
-// Data field keys (12 fields, in order):
+// Data field keys (13 fields, in order):
 //   - SubjectUserSid, SubjectUserName, SubjectDomainName, SubjectLogonId
 //   - ObjectServer, ObjectType, ObjectName, HandleId
 //   - AccessList, AccessMask, ProcessId, ProcessName
+//   - IpAddress
+//
+// The schema is closed: a key outside the reserved and data-field sets is
+// ignored, not written and not reported. IpAddress was added in v0.9.0 for
+// callers that have a peer address — Windows Security auditing carries one on
+// 4625 and 5145 — and previously had nowhere to put it.
 func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	w.mu.Lock()
 	defer w.drainFsyncCallbacks()

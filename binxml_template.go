@@ -33,6 +33,8 @@ import (
 //	4:  Computer      (STRING)
 //	5+2i:  Data[i] Name attr  (STRING)   — 12 data fields
 //	6+2i:  Data[i] value      (STRING)
+//	42:    Data[12] Name attr (STRING)   — the 13th, appended not interleaved
+//	43:    Data[12] value     (STRING)
 //	29: Version                    (UINT8)    — F12b, no source: always 0
 //	30: Task                       (UINT16)   — F12b, no source: always 0
 //	31: Opcode                     (UINT8)    — F12b, no source: always 0
@@ -247,6 +249,19 @@ func buildTemplateBody(baseOffset uint32, names *[]chunkRef) []byte {
 		writeOptionalSubstitution(b, valueIdx, binXMLTypeString)
 		dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 	}
+
+	//     The 13th Data element: <Data Name="%42">%43</Data>
+	//
+	// Emitted from the same shape as the twelve above, reading its pair from
+	// subs 42/43 instead of the 5..28 block. Document order and substitution
+	// index are independent — the index is explicit in each token — so this
+	// element reads back in position thirteen despite its higher indices.
+	dataSizeStack, attrListPos = pushOpenElementAttrs(b, "Data", subExtraDataValue, baseOffset, names, dataSizeStack)
+	writeAttributeSub(b, "Name", subExtraDataName, binXMLTypeString, false, baseOffset, names)
+	patches = closeAttrList(b, attrListPos, patches)
+	b.WriteByte(binXMLCloseElement)
+	writeOptionalSubstitution(b, subExtraDataValue, binXMLTypeString)
+	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
 
 	//   </EventData>
 	dataSizeStack, patches = writeEndElement(b, dataSizeStack, patches)
