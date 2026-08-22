@@ -1,7 +1,7 @@
 # Writer Throughput and Flush Policy — Design
 
 **Date:** 2026-08-22
-**Status:** Approved, not yet implemented
+**Status:** Release 1 (v0.10.0, flush amplification) shipped; Release 2 (v0.11.0 — `SyncPolicy`, `WriteRecords`, allocation reuse) not yet implemented
 **Releases:** v0.10.0 (flush amplification), v0.11.0 (throughput)
 
 ## Context
@@ -36,10 +36,12 @@ Two findings reframed the work:
    64 KiB chunk. A batch API therefore saves a lock acquire and some
    allocations, not the fsync. **Fsync frequency is the only throughput lever.**
 2. `tickFlushLocked` rewrites the entire 64 KiB chunk and fsyncs on every tick
-   regardless of how few records arrived. At `FlushIntervalSec: 1` and 10
-   events/sec that is roughly 5.5 GB written and 86 400 fsyncs per day to
-   persist about 600 KB of events. ADR-004 already lists this rewrite as a known
-   negative.
+   regardless of how few records arrived. At true idle that is 86 400 fsyncs
+   per day to persist nothing at all — pure waste. At `FlushIntervalSec: 1`
+   and 10 events/sec it is also redundant, if less dramatically so: roughly
+   5.5 GB written and 86 400 fsyncs per day to persist about 674 MB of
+   events, an amplification of roughly 8.4x. ADR-004 already lists this
+   rewrite as a known negative.
 
 The darwin fsync cost is `F_FULLFSYNC`, a barrier through the drive cache.
 Linux `fsync` on NVMe is substantially cheaper, so the 82% figure is an upper

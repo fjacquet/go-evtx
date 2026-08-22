@@ -24,7 +24,7 @@ Append-only, under the same discipline as `docs/format-baseline.md`:
 Reproduce with:
 
 ```bash
-go test -run XXX -bench . -benchtime 3s .
+go test -run XXX -bench . -benchtime 3s -benchmem .
 ```
 
 ## Rows

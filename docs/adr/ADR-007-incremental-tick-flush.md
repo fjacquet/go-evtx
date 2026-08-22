@@ -11,6 +11,16 @@
 > bytes **inside the records region** of the chunk buffer. Two independent
 > mistakes on this branch, one root cause. Decision 5's crash-ordering claim is
 > also narrowed below: it holds for a process crash, not for power loss.
+>
+> **Correction, 2026-08-22 (pre-merge).** The Context section's daily
+> events-persisted figure was an arithmetic error, off by roughly three
+> orders of magnitude; the correct figure is roughly 674 MB/day (10
+> events/sec × 780 bytes/record × 86 400 sec). The
+> write amplification it implied was overstated too — the real ratio at
+> `FlushIntervalSec: 1` is roughly 8.4x, not the ~9000x the wrong number
+> implied, and 8.4x does not by itself justify this decision. What does is the
+> idle case: 86 400 fsyncs a day persisting nothing at all, which is waste
+> independent of any amplification math.
 
 ## Context
 
@@ -23,9 +33,14 @@ On darwin/arm64 with APFS, `f.Sync()` is `F_FULLFSYNC` and costs ~5.1 ms for a
 record, of which ~61 µs is the amortized fsync — 82% of wall clock. The
 background tick paid a full one of those every interval regardless of arrivals.
 
-At `FlushIntervalSec: 1` and 10 events/sec that is roughly 5.5 GB written and
-86 400 fsyncs per day to persist about 600 KB of events. At true idle it is the
-same cost to persist nothing at all.
+At true idle, that background tick performed 86 400 fsyncs a day — each one a
+wakeup, a syscall, and a full `F_FULLFSYNC` barrier — to persist nothing at
+all: pure waste, independent of any workload. At `FlushIntervalSec: 1` and 10
+events/sec it was also doing redundant work, if less dramatically: roughly
+5.5 GB written and 86 400 fsyncs per day to persist about 674 MB of events, an
+amplification of roughly 8.4x. That ratio alone is not a disk-wear concern —
+5.5 GB/day sits comfortably inside any reasonable SSD endurance budget — but
+the work is still unnecessary and worth not doing.
 
 The driving workload is a Dell CEE (Common Event Enabler) receiver taking CEPA
 audit events from PowerScale/Unity/PowerStore, which must survive both a

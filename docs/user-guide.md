@@ -330,9 +330,13 @@ guaranteed to be on disk. It is a durability window, and since v0.10.0 it is
 no longer also a write-amplification setting to the degree it once was.
 
 Before v0.10.0 each tick rewrote the whole 64 KiB chunk and fsynced, whether
-or not anything had arrived — at `FlushIntervalSec: 1` that was roughly 5.5 GB
-and 86 400 fsyncs a day to persist about 600 KB of events, and the same cost
-at idle to persist nothing.
+or not anything had arrived. At true idle that was 86 400 fsyncs a day —
+each one a wakeup, a syscall, and a device cache-flush barrier — to persist
+nothing at all: pure waste. At `FlushIntervalSec: 1` and 10 events/sec it was
+also doing more work than it needed to, if less dramatically: roughly 5.5 GB
+written and 86 400 fsyncs a day to persist about 674 MB of events, an
+amplification of roughly 8.4x — not a disk-wear problem on any reasonable
+SSD, just redundant work.
 
 Since v0.10.0 a tick with no new records does nothing at all — no write, no
 fsync — which is where the largest win lands: a workload with gaps between
@@ -355,7 +359,8 @@ w, err := evtx.New("/var/log/audit.evtx", evtx.RotationConfig{
 ```
 
 `FlushIntervalSec: 0` disables the background goroutine entirely. Records then
-reach disk only when a chunk fills (roughly every 64 KiB) or on `Close()`.
+reach disk only when a chunk fills (roughly every 64 KiB), on `Rotate()`, or
+on `Close()`.
 
 Measured figures are in [`perf-baseline.md`](perf-baseline.md); the reasoning is
 in [ADR-007](adr/ADR-007-incremental-tick-flush.md).
