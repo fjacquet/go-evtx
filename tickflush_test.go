@@ -7,6 +7,7 @@ package evtx
 
 import (
 	"hash/crc32"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -101,5 +102,47 @@ func TestTickFlush_IdleWritesNothing(t *testing.T) {
 
 	if got := atomic.LoadInt64(&syncs); got != 1 {
 		t.Fatalf("fsync count = %d after 3 ticks with 1 record, want 1", got)
+	}
+}
+
+// TestTickFlush_FileChunkAligned verifies the file length stays a whole
+// number of chunks after a background tick. A file ending mid-chunk is
+// unreadable: loadChunk reads a full evtxChunkSize and hits EOF, and so does
+// Windows. This is the regression guard for the partial-range tick write.
+func TestTickFlush_FileChunkAligned(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "aligned.evtx")
+	var syncs int64
+	w, err := New(outPath, RotationConfig{
+		FlushIntervalSec: 1,
+		OnFsync:          func(time.Time) { atomic.AddInt64(&syncs, 1) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Close() //nolint:errcheck
+
+	for i := 0; i < 5; i++ {
+		if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if atomic.LoadInt64(&syncs) == 0 {
+		t.Fatal("tick never fired; test cannot measure alignment")
+	}
+
+	fi, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	w.mu.Lock()
+	chunks := int64(w.chunkCount)
+	w.mu.Unlock()
+
+	want := int64(evtxFileHeaderSize) + (chunks+1)*int64(evtxChunkSize)
+	if fi.Size() != want {
+		t.Fatalf("file size = %d after tick, want %d (header + %d whole chunks)",
+			fi.Size(), want, chunks+1)
 	}
 }

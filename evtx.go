@@ -119,10 +119,17 @@ type Writer struct {
 	// records are append-only, so bytes already in the slot never change.
 	// Committed and reset alongside w.records.
 	tickWrittenLen int
-	recordID       uint64   // monotonically incrementing record ID, starts at 1
-	firstID        uint64   // first record ID in current chunk
-	f              *os.File // open file handle; created in New(), closed in Close()
-	chunkCount     uint16   // number of COMPLETE chunks written to disk so far
+	// slotExtended reports whether the current chunk slot has been extended
+	// to its full evtxChunkSize on disk. The tick writes only the header and
+	// the appended delta, so without this the file would end mid-chunk and
+	// loadChunk — which reads a whole evtxChunkSize — would hit EOF. The
+	// sparse tail reads back as zeros, which is what the sealing write puts
+	// there anyway. Reset alongside w.records.
+	slotExtended bool
+	recordID     uint64   // monotonically incrementing record ID, starts at 1
+	firstID      uint64   // first record ID in current chunk
+	f            *os.File // open file handle; created in New(), closed in Close()
+	chunkCount   uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -576,6 +583,7 @@ func (w *Writer) rotate() error {
 	w.records = w.records[:0]
 	w.recordsCRC = 0
 	w.tickWrittenLen = 0
+	w.slotExtended = false
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -762,6 +770,7 @@ func (w *Writer) flushChunkLocked() error {
 	w.records = w.records[:0]
 	w.recordsCRC = 0
 	w.tickWrittenLen = 0
+	w.slotExtended = false
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -798,6 +807,18 @@ func (w *Writer) tickFlushLocked() error {
 	if err := w.chunkCapacityLocked(); err != nil {
 		return err
 	}
+
+	chunkOffset := int64(evtxFileHeaderSize) + int64(w.chunkCount)*int64(evtxChunkSize)
+	if !w.slotExtended {
+		// The target is always strictly greater than the current file length
+		// at this point — the file holds exactly w.chunkCount whole chunks
+		// plus the 4096-byte header — so this can never shorten the file.
+		if err := w.f.Truncate(chunkOffset + int64(evtxChunkSize)); err != nil {
+			return fmt.Errorf("go_evtx: tick extend chunk slot %d: %w", w.chunkCount, err)
+		}
+		w.slotExtended = true
+	}
+
 	records := w.records
 
 	recordsStart := int(evtxRecordsStart)
@@ -818,9 +839,6 @@ func (w *Writer) tickFlushLocked() error {
 
 	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
 	patchChunkCRC(chunkBytes)
-
-	// Write at the current (in-progress) chunk slot — same slot as next flushChunkLocked.
-	chunkOffset := int64(evtxFileHeaderSize) + int64(w.chunkCount)*int64(evtxChunkSize)
 	if _, err := w.f.WriteAt(chunkBytes, chunkOffset); err != nil {
 		return fmt.Errorf("go_evtx: tick write chunk %d: %w", w.chunkCount, err)
 	}
