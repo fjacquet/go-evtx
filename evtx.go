@@ -114,17 +114,22 @@ type Writer struct {
 	// w.records; zero when the chunk is empty.
 	recordsCRC uint32
 	// tickWrittenLen is how many bytes of w.records the background tick has
-	// already persisted into the current chunk slot. The tick writes only
-	// w.records[tickWrittenLen:] and skips entirely when the two are equal —
-	// records are append-only, so bytes already in the slot never change.
-	// Committed and reset alongside w.records.
+	// already persisted into the current chunk slot. It serves only the idle
+	// check: when it equals len(w.records), nothing arrived since the last
+	// tick, and the tick returns without writing or syncing. It no longer
+	// slices a delta write — the tick rebuilds and writes the used prefix of
+	// the full chunk on every non-idle call, because fillHashTables patches
+	// offsets inside already-written record bytes, so records are not
+	// append-only on disk once hash chaining is considered. Committed and
+	// reset alongside w.records.
 	tickWrittenLen int
 	// slotExtended reports whether the current chunk slot has been extended
-	// to its full evtxChunkSize on disk. The tick writes only the header and
-	// the appended delta, so without this the file would end mid-chunk and
-	// loadChunk — which reads a whole evtxChunkSize — would hit EOF. The
-	// sparse tail reads back as zeros, which is what the sealing write puts
-	// there anyway. Reset alongside w.records.
+	// to its full evtxChunkSize on disk. The tick writes only the used
+	// prefix — the records region, then the 512-byte header — and skips the
+	// unwritten tail, so without this the file would end mid-chunk and
+	// loadChunk — which reads a whole evtxChunkSize — would hit EOF, as
+	// would Windows. The sparse tail reads back as zeros, which is what the
+	// sealing write puts there anyway. Reset alongside w.records.
 	slotExtended bool
 	recordID     uint64   // monotonically incrementing record ID, starts at 1
 	firstID      uint64   // first record ID in current chunk

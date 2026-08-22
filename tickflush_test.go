@@ -151,8 +151,9 @@ func TestTickFlush_FileChunkAligned(t *testing.T) {
 
 // TestTickFlush_IncrementalRoundTrip verifies records written across several
 // background ticks all read back, in order, after Close. This is what proves
-// the header-plus-delta write assembles the same chunk the full-chunk write
-// used to produce.
+// the tick's used-prefix write — the full chunk buffer, patched, with only
+// the records region and the 512-byte header written to disk — assembles the
+// same chunk the full-chunk write used to produce.
 func TestTickFlush_IncrementalRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "incremental.evtx")
