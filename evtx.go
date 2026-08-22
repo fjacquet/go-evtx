@@ -786,28 +786,33 @@ func (w *Writer) flushChunkLocked() error {
 	return nil
 }
 
-// tickFlushLocked performs a flush-without-reset for the background goroutine tick.
-// It writes the current partial chunk to disk at slot w.chunkCount WITHOUT
-// incrementing w.chunkCount or resetting w.records (Option A: flush-without-reset).
-// The file header is patched with chunkCount+1 to account for the in-progress chunk.
-//
-// Must be called with w.mu held. Does nothing if len(w.records) == 0.
 // tickFlushLocked publishes the in-progress chunk from the background tick.
 //
-// It writes only what changed since the previous tick: the 512-byte chunk
-// header, and the record bytes appended since. w.records is append-only, so
-// bytes already in the slot are still valid and are not rewritten. Neither
-// w.chunkCount nor w.records is reset — the chunk stays open for further
-// appends, exactly as before (ADR-004's flush-without-reset).
+// The full evtxChunkSize buffer is built exactly as flushChunkLocked builds
+// it — header, then w.records copied in at evtxRecordsStart — because
+// fillHashTables (chunkhash.go) patches node offsets that live inside the
+// records region: besides the [128:512] bucket-head arrays, fillOneTable
+// writes a 4-byte chain terminator at chunk[ref.offset:] and, for a
+// colliding key, a 4-byte chain patch at chunk[prev:] onto an earlier
+// node's next_offset field. Both are chunk-absolute offsets into already-
+// written record bytes (>= evtxRecordsStart+evtxRecordHeaderSize), so the
+// buffer fillHashTables runs against must be full-size, not header-size —
+// a smaller buffer makes every ref fail fillOneTable's bounds check and
+// silently leaves both hash tables empty. This is also why "records are
+// append-only on disk" does not hold once hash chaining is considered: a
+// later record's chain patch can rewrite bytes inside an earlier record
+// already flushed to disk by a previous tick.
 //
-// The 512-byte header buffer is sufficient because fillHashTables writes only
-// chunk[128:384] and chunk[384:512], and patchChunkCRC reads chunk[0:120] and
-// chunk[128:512]. Neither touches anything at or above evtxRecordsStart.
+// Only the used prefix is written to disk, as two WriteAt calls sourced
+// from the patched full buffer: the records region first, then the header
+// that advertises them. A crash between the two leaves a header describing
+// fewer records than are on disk, which reads back cleanly; the reverse
+// ordering would advertise records whose bytes never landed. The unwritten
+// tail padding of the chunk slot is left as whatever Truncate zero-filled
+// it to — a parser never reads past FreeSpaceOffset.
 //
-// The records are written BEFORE the header that advertises them. A crash
-// between the two leaves a header describing fewer records than are on disk,
-// which reads back cleanly; the reverse ordering would advertise records whose
-// bytes never landed.
+// Neither w.chunkCount nor w.records is reset — the chunk stays open for
+// further appends, exactly as before (ADR-004's flush-without-reset).
 //
 // Must be called with w.mu held. Does nothing if len(w.records) == 0, or if
 // nothing was appended since the previous tick.
@@ -837,19 +842,26 @@ func (w *Writer) tickFlushLocked() error {
 		w.slotExtended = true
 	}
 
-	freeSpaceOffset := evtxRecordsStart + uint32(len(w.records))
-	hdr := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
-	fillHashTables(hdr, w.chunkNames, w.chunkTemplates)
-	binary.LittleEndian.PutUint32(hdr[52:], w.recordsCRC)
-	patchChunkCRC(hdr)
+	recordsStart := int(evtxRecordsStart)
+	freeSpaceOffset := uint32(recordsStart + len(w.records))
+	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
+
+	chunkBytes := make([]byte, evtxChunkSize)
+	copy(chunkBytes[0:], chunkHeader)
+	copy(chunkBytes[recordsStart:], w.records)
+
+	// MUST precede patchChunkCRC — the chunk header checksum covers
+	// chunk[128:512], which is exactly the region this writes.
+	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
+	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
+	patchChunkCRC(chunkBytes)
 
 	// Records first, then the header that advertises them.
-	delta := w.records[w.tickWrittenLen:]
-	deltaOffset := chunkOffset + int64(evtxRecordsStart) + int64(w.tickWrittenLen)
-	if _, err := w.f.WriteAt(delta, deltaOffset); err != nil {
+	recordsEnd := recordsStart + len(w.records)
+	if _, err := w.f.WriteAt(chunkBytes[recordsStart:recordsEnd], chunkOffset+int64(evtxRecordsStart)); err != nil {
 		return fmt.Errorf("go_evtx: tick write records for chunk %d: %w", w.chunkCount, err)
 	}
-	if _, err := w.f.WriteAt(hdr, chunkOffset); err != nil {
+	if _, err := w.f.WriteAt(chunkBytes[0:evtxChunkHeaderSize], chunkOffset); err != nil {
 		return fmt.Errorf("go_evtx: tick write chunk header %d: %w", w.chunkCount, err)
 	}
 

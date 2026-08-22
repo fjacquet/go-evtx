@@ -254,3 +254,94 @@ func TestTickFlush_CrashSnapshot(t *testing.T) {
 		t.Fatalf("snapshot yielded %d records, want %d", n, written)
 	}
 }
+
+// TestTickFlush_SnapshotHashTablesPopulated verifies a mid-session tick
+// actually populates the chunk's hash-table region, chunk[128:512] — the 64
+// common-string buckets and 32 template buckets, plus their chain patches.
+//
+// fillOneTable (chunkhash.go) writes not only the bucket-head arrays inside
+// [128:512], but also a 4-byte chain-terminator at chunk[ref.offset:] and a
+// 4-byte chain patch at chunk[prev:] for a colliding key — both chunk-
+// absolute offsets that point at nodes already copied into the *records*
+// region, i.e. at or beyond evtxRecordsStart+evtxRecordHeaderSize (>= 536).
+// A header buffer smaller than the full chunk cannot receive those writes:
+// every ref fails fillOneTable's bounds check (int(ref.offset)+4 >
+// len(chunk)) and is silently skipped, leaving the hash tables entirely
+// zero with no error and a CRC computed over the zeros. This test is the
+// regression guard for exactly that failure mode.
+func TestTickFlush_SnapshotHashTablesPopulated(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "hashsnap.evtx")
+	var syncs int64
+	w, err := New(outPath, RotationConfig{
+		FlushIntervalSec: 1,
+		OnFsync:          func(time.Time) { atomic.AddInt64(&syncs, 1) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer w.Close() //nolint:errcheck
+
+	const firstBatch = 3
+	for i := 0; i < firstBatch; i++ {
+		if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+			t.Fatalf("WriteRecord batch1 %d: %v", i, err)
+		}
+	}
+	time.Sleep(1200 * time.Millisecond) // let a tick land
+
+	const secondBatch = 3
+	for i := 0; i < secondBatch; i++ {
+		if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+			t.Fatalf("WriteRecord batch2 %d: %v", i, err)
+		}
+	}
+	time.Sleep(1200 * time.Millisecond) // let a second tick land
+
+	if got := atomic.LoadInt64(&syncs); got < 2 {
+		t.Fatalf("only %d tick syncs fired, need at least 2", got)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	snap := filepath.Join(dir, "hashsnap-copy.evtx")
+	if err := os.WriteFile(snap, raw, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	chunkStart := evtxFileHeaderSize
+	tables := raw[chunkStart+128 : chunkStart+512]
+	allZero := true
+	for _, b := range tables {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Fatal("chunk[128:512] is all zero after a mid-session tick; hash tables were not populated")
+	}
+
+	r, err := Open(snap)
+	if err != nil {
+		t.Fatalf("Open snapshot: %v", err)
+	}
+	defer r.Close() //nolint:errcheck
+
+	var n int
+	for {
+		_, err := r.ReadEvent()
+		if err == ErrNoMoreRecords || err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadEvent on snapshot after %d records: %v", n, err)
+		}
+		n++
+	}
+	if n != firstBatch+secondBatch {
+		t.Fatalf("snapshot yielded %d records, want %d", n, firstBatch+secondBatch)
+	}
+}
