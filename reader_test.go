@@ -521,3 +521,47 @@ func TestReader_FileInfo(t *testing.T) {
 		t.Error("Full = true on a file that never reached a size limit")
 	}
 }
+
+// TestReadEvent_IpAddress round-trips the peer address through the writer and
+// the reader.
+//
+// The EventData schema was a fixed twelve fields, and WriteRecord silently
+// ignored any other key. A caller that had a client address — every CEPA
+// consumer does, and Windows Security auditing carries one on 4625 and 5145 —
+// could pass "IpAddress" in the map, see no error, and get a file without it.
+// cee-exporter shipped exactly that: an entry in its field map, a unit test
+// asserting on that map, and zero occurrences of the address across 19 records
+// in the file it produced.
+func TestReadEvent_IpAddress(t *testing.T) {
+	fields := map[string]string{
+		"ProviderName": "Microsoft-Windows-Security-Auditing",
+		"Computer":     "nas01",
+		"TimeCreated":  time.Date(2026, 8, 14, 20, 35, 21, 0, time.UTC).Format(time.RFC3339Nano),
+		"ObjectName":   `\\nas01\share\file.txt`,
+		"IpAddress":    "10.26.1.222",
+	}
+	path := writeTestFile(t, fields, 4663)
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	ev, err := r.ReadEvent()
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+
+	var got string
+	var names []string
+	for _, d := range ev.EventData {
+		names = append(names, d.Name)
+		if d.Name == "IpAddress" {
+			got = d.Value.String()
+		}
+	}
+	if got != "10.26.1.222" {
+		t.Errorf("IpAddress = %q, want %q; EventData names were %v", got, "10.26.1.222", names)
+	}
+}

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`IpAddress` as a thirteenth `EventData` field.** The schema was closed at
+  twelve, and `WriteRecord` ignored every key outside it without returning an
+  error — so a caller with a peer address could pass `IpAddress`, see the write
+  succeed, and get a file that did not contain it. Windows Security auditing
+  carries a peer address on 4625 and 5145, and every CEPA consumer has one;
+  cee-exporter shipped a field-map entry and a passing unit test for it, and
+  produced 19 records in which the address occurred zero times.
+
+  The substitution pair is appended at indices 42/43 rather than extending the
+  contiguous 5..28 data block, because widening that block would renumber every
+  named `<System>` index from 29 up. Document order and substitution index are
+  independent, so the element still reads back in position thirteen.
+
+  This changes the encoding: `testdata/binxml-golden.bin` is regenerated in the
+  same commit, per the rule stated on `TestBuildBinXML_PayloadUnchangedByCollection`.
+
 ## [0.8.2] - 2026-08-10
 
 ### Fixed

@@ -108,7 +108,7 @@ func ExampleReader() {
 		}
 		fmt.Println(ev.System.EventID, ev.System.Provider.Name, ev.EventData)
 	}
-	// Output: 4663 Microsoft-Windows-Security-Auditing [{SubjectUserSid } {SubjectUserName } {SubjectDomainName } {SubjectLogonId } {ObjectServer } {ObjectType } {ObjectName /mnt/share/report.xlsx} {HandleId } {AccessList } {AccessMask } {ProcessId } {ProcessName }]
+	// Output: 4663 Microsoft-Windows-Security-Auditing [{SubjectUserSid } {SubjectUserName } {SubjectDomainName } {SubjectLogonId } {ObjectServer } {ObjectType } {ObjectName /mnt/share/report.xlsx} {HandleId } {AccessList } {AccessMask } {ProcessId } {ProcessName } {IpAddress }]
 }
 
 // ExampleReader_FileInfo shows how to tell a go-evtx file from a
