@@ -7,6 +7,7 @@ package evtx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"hash/crc32"
 	"io"
 	"os"
@@ -25,58 +26,72 @@ func tickTestFields() map[string]string {
 	}
 }
 
-// TestRecordsCRC_MatchesFullScan verifies the incrementally maintained
-// w.recordsCRC equals a full rescan of w.records at every append. If these
-// ever diverge, every chunk header written by the tick path carries a wrong
-// checksum and Windows rejects the file.
-func TestRecordsCRC_MatchesFullScan(t *testing.T) {
-	dir := t.TempDir()
-	w, err := New(filepath.Join(dir, "crc.evtx"), RotationConfig{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer w.Close() //nolint:errcheck
+// TestWrittenFile_EventRecordsCRCMatchesRecords is the records-checksum
+// ordering guard, the pair to TestWrittenFile_ChunkHeaderCRCCoversTables in
+// hashtable_integration_test.go: that one guards chunk[124:128] over
+// chunk[128:512], this one guards chunk[52:56] over the records region.
+//
+// The regression it exists for: v0.10.0 briefly replaced the full rescan with
+// a CRC maintained incrementally over w.records. fillHashTables patches chain
+// offsets INSIDE the records region, so the bytes on disk are not the bytes in
+// w.records and every chunk shipped a wrong checksum. TestTickFlush_
+// ByteIdenticalToNoTick could not see it — it compares two HEAD writers
+// against each other, and the defect was identical on both paths — so this
+// asserts the property against the file directly.
+func TestWrittenFile_EventRecordsCRCMatchesRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		records int
+	}{
+		{"single", 1},
+		{"multi_record", 30},
+		{"multi_chunk", 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "recordscrc.evtx")
+			w, err := New(path, RotationConfig{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer w.Close() //nolint:errcheck
+			for i := 0; i < tc.records; i++ {
+				if err := w.WriteRecord(4663, tickTestFields()); err != nil {
+					t.Fatalf("WriteRecord %d: %v", i, err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
 
-	for i := 0; i < 25; i++ {
-		if err := w.WriteRecord(4663, tickTestFields()); err != nil {
-			t.Fatalf("WriteRecord %d: %v", i, err)
-		}
-		w.mu.Lock()
-		got := w.recordsCRC
-		want := crc32.Checksum(w.records, crc32.IEEETable)
-		w.mu.Unlock()
-		if got != want {
-			t.Fatalf("after record %d: recordsCRC = %#08x, full scan = %#08x", i, got, want)
-		}
-	}
-}
-
-// TestRecordsCRC_ResetOnFlush verifies the running CRC is reset together with
-// w.records when a chunk is sealed. A stale CRC would corrupt the next chunk.
-func TestRecordsCRC_ResetOnFlush(t *testing.T) {
-	dir := t.TempDir()
-	w, err := New(filepath.Join(dir, "crcreset.evtx"), RotationConfig{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer w.Close() //nolint:errcheck
-
-	if err := w.WriteRecord(4663, tickTestFields()); err != nil {
-		t.Fatalf("WriteRecord: %v", err)
-	}
-	w.mu.Lock()
-	err = w.flushChunkLocked()
-	crcAfter := w.recordsCRC
-	nRecords := len(w.records)
-	w.mu.Unlock()
-	if err != nil {
-		t.Fatalf("flushChunkLocked: %v", err)
-	}
-	if nRecords != 0 {
-		t.Fatalf("records not reset: %d bytes", nRecords)
-	}
-	if crcAfter != 0 {
-		t.Fatalf("recordsCRC = %#08x after flush, want 0", crcAfter)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			nChunks := (len(raw) - evtxFileHeaderSize) / evtxChunkSize
+			if nChunks < 1 {
+				t.Fatalf("file holds %d chunks", nChunks)
+			}
+			if tc.name == "multi_chunk" && nChunks < 2 {
+				t.Fatalf("wanted a multi-chunk file, got %d chunk(s)", nChunks)
+			}
+			for c := 0; c < nChunks; c++ {
+				off := evtxFileHeaderSize + c*evtxChunkSize
+				chunk := raw[off : off+evtxChunkSize]
+				// FreeSpaceOffset is at chunk header offset 48; offset 44 is
+				// LastEventRecordDataOffset.
+				freeSpaceOffset := binary.LittleEndian.Uint32(chunk[48:])
+				if freeSpaceOffset < evtxRecordsStart || int(freeSpaceOffset) > evtxChunkSize {
+					t.Fatalf("chunk %d: FreeSpaceOffset %d out of range", c, freeSpaceOffset)
+				}
+				stored := binary.LittleEndian.Uint32(chunk[52:])
+				want := crc32.Checksum(chunk[evtxRecordsStart:freeSpaceOffset], crc32.IEEETable)
+				if stored != want {
+					t.Errorf("chunk %d: EventRecords CRC = 0x%08x, records region "+
+						"checksums to 0x%08x — the stored value does not cover the "+
+						"bytes on disk", c, stored, want)
+				}
+			}
+		})
 	}
 }
 

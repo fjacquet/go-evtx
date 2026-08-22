@@ -106,13 +106,6 @@ type Writer struct {
 	// record in the pending chunk begins. Committed and reset alongside
 	// w.records; zero when the chunk is empty.
 	lastRecordOffset uint32
-	// recordsCRC is the running CRC32 (IEEE) of w.records, maintained
-	// incrementally on every append rather than rescanned per flush.
-	// crc32.Update over the appended bytes yields the checksum of the
-	// concatenation, so this is bit-identical to a full rescan — verified by
-	// TestRecordsCRC_MatchesFullScan. Committed and reset alongside
-	// w.records; zero when the chunk is empty.
-	recordsCRC uint32
 	// tickWrittenLen is how many bytes of w.records the background tick has
 	// already persisted into the current chunk slot. It serves only the idle
 	// check: when it equals len(w.records), nothing arrived since the last
@@ -334,7 +327,6 @@ func (w *Writer) WriteRaw(payload []byte) error {
 
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
-	w.recordsCRC = crc32.Update(w.recordsCRC, crc32.IEEETable, rec)
 	w.recordID++
 	return nil
 }
@@ -463,7 +455,6 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
-	w.recordsCRC = crc32.Update(w.recordsCRC, crc32.IEEETable, rec)
 	w.recordID++
 	return nil
 }
@@ -590,7 +581,6 @@ func (w *Writer) rotate() error {
 	w.recordID = 1
 	w.firstID = 1
 	w.records = w.records[:0]
-	w.recordsCRC = 0
 	w.tickWrittenLen = 0
 	w.slotExtended = false
 	w.chunkNames = w.chunkNames[:0]
@@ -753,7 +743,10 @@ func (w *Writer) flushChunkLocked() error {
 	// covers chunk[128:512], which is exactly the region written here.
 	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
 
-	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
+	// MUST follow fillHashTables: fillOneTable patches chain offsets INTO the
+	// records region, so the bytes this checksums are not the bytes in
+	// w.records. See patchEventRecordsCRC.
+	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(records))
 	patchChunkCRC(chunkBytes)
 
 	// Write chunk at the correct file offset.
@@ -777,7 +770,6 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkCount = nextChunkCount
 	w.currentSize += int64(evtxChunkSize)
 	w.records = w.records[:0]
-	w.recordsCRC = 0
 	w.tickWrittenLen = 0
 	w.slotExtended = false
 	w.chunkNames = w.chunkNames[:0]
@@ -862,7 +854,11 @@ func (w *Writer) tickFlushLocked() error {
 	// MUST precede patchChunkCRC — the chunk header checksum covers
 	// chunk[128:512], which is exactly the region this writes.
 	fillHashTables(chunkBytes, w.chunkNames, w.chunkTemplates)
-	binary.LittleEndian.PutUint32(chunkBytes[52:], w.recordsCRC)
+
+	// MUST follow fillHashTables, for the same reason flushChunkLocked's call
+	// does: the checksummed bytes are the patched buffer, and the patched
+	// buffer is not derivable from w.records.
+	patchEventRecordsCRC(chunkBytes, recordsStart, recordsStart+len(w.records))
 	patchChunkCRC(chunkBytes)
 
 	// Records first, then the header that advertises them.
@@ -1002,6 +998,22 @@ func buildChunkHeader(firstRecordID, lastRecordID uint64, lastRecordOffset, free
 	binary.LittleEndian.PutUint32(buf[44:], lastRecordOffset) // LastEventRecordDataOffset
 	binary.LittleEndian.PutUint32(buf[48:], freeSpaceOffset)  // FreeSpaceOffset
 	return buf
+}
+
+// patchEventRecordsCRC computes CRC32 over the event records region and writes
+// it at chunk[52:56].
+//
+// It MUST run after fillHashTables. fillOneTable writes chain patches inside
+// the records region — a 4-byte chain terminator at chunk[ref.offset:] and,
+// for a colliding key, a non-zero next_offset at chunk[prev:] over a field
+// that was emitted as zero — so chunk[recordsStart:recordsEnd] is not equal to
+// w.records. A checksum maintained incrementally over w.records therefore
+// cannot match the bytes on disk, and collisions are not rare: 64 buckets fill
+// within about 30 distinct names, which a single record already emits. v0.10.0
+// shipped exactly that mistake and it is why this full rescan stays.
+func patchEventRecordsCRC(chunk []byte, recordsStart, recordsEnd int) {
+	c := crc32.Checksum(chunk[recordsStart:recordsEnd], crc32.IEEETable)
+	binary.LittleEndian.PutUint32(chunk[52:], c)
 }
 
 // parseTimeCreated parses the "TimeCreated" field as RFC3339Nano, falling back to time.Now().
