@@ -33,7 +33,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 | File | Purpose |
 |------|---------|
-| `evtx.go` | Writer API: `Writer`, `New()`, `WriteRecord()`, `WriteRaw()`, `Rotate()`, `Close()`, `RotationConfig`, rotation and background-goroutine logic. Since v0.10.0 also carries the incremental tick state (`recordsCRC`, `tickWrittenLen`, `slotExtended`) and `tickFlushLocked()` — see [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md) |
+| `evtx.go` | Writer API: `Writer`, `New()`, `WriteRecord()`, `WriteRaw()`, `Rotate()`, `Close()`, `RotationConfig`, rotation and background-goroutine logic. Since v0.10.0 also carries the incremental tick state (`tickWrittenLen`, `slotExtended`) and `tickFlushLocked()` — see [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md) |
 | `errors.go` | Sentinel errors (`ErrClosed`, `ErrRecordTooLarge`) and capacity limits (`maxChunkPayload`, `maxRecordPayload`) |
 | `reader.go` | Reader API: `Reader`, `Record`, `Open()`, `ReadRecord()`, `ReadRaw()`, `Close()`, `ErrNoMoreRecords` |
 | `binformat.go` | Binary format helpers: file/chunk headers, event record wrapper, CRC32, `toFILETIME`/`fromFILETIME`, UTF-16LE encoding |
@@ -74,7 +74,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `attrlist_test.go` | `attr_list_size` sits after the inline NameNode and carries a real value |
 | `namespace_test.go` | The `<Event>` root declares the event schema namespace |
 | `system_test.go` | `<System>` children, their value types and optional substitutions |
-| `tickflush_test.go` | Incremental background tick: idle writes nothing, file stays chunk-aligned, incremental round-trip, crash snapshot, hash tables populated after a mid-session tick, and the byte-identity invariant against a no-tick writer |
+| `tickflush_test.go` | Incremental background tick: idle writes nothing, file stays chunk-aligned, incremental round-trip, crash snapshot, hash tables populated after a mid-session tick, the byte-identity invariant against a no-tick writer, and `TestWrittenFile_EventRecordsCRCMatchesRecords` — the records-CRC property asserted against a written file |
 | `bench_test.go` | Writer throughput benchmarks backing `docs/perf-baseline.md` |
 
 **Write data flow:**
@@ -91,9 +91,13 @@ This is a single-package Go library (`package evtx`) with zero external dependen
    header — returning immediately when nothing was appended since the previous
    tick. A header-only buffer cannot be used: `fillHashTables` back-patches
    node offsets that live inside the records region, not only `[128:512]`.
-   `w.recordsCRC`, `w.tickWrittenLen` and `w.slotExtended` support that and
-   reset alongside `w.records` in exactly two places — `flushChunkLocked`'s
-   commit block and `rotate` Step 7. See
+   `w.tickWrittenLen` and `w.slotExtended` support that and reset alongside
+   `w.records` in exactly two places — `flushChunkLocked`'s commit block and
+   `rotate` Step 7. Both CRCs are computed by full rescan, **after**
+   `fillHashTables`, on both flush paths: `fillHashTables` patches hash-chain
+   offsets inside the records region, so `chunk[512:]` is not equal to
+   `w.records` and no checksum accumulated over `w.records` can match the bytes
+   on disk. v0.10.0 briefly shipped exactly that mistake and reverted it. See
    [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md).
 
 **Read data flow:**

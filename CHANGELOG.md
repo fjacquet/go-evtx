@@ -24,8 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labeled-as-arithmetic estimate. No API change, and the bytes on disk after
   `Close()` are byte-identical to v0.9.0's — asserted by
   `TestTickFlush_ByteIdenticalToNoTick`. See ADR-007.
-- The event-records CRC is maintained incrementally with `crc32.Update` instead
-  of rescanning the records region on every flush. Bit-identical output.
+- The event-records CRC continues to be computed by a full rescan of the
+  records region on every flush (`patchEventRecordsCRC`). An earlier commit on
+  this release replaced it with a CRC maintained incrementally over `w.records`
+  and claimed bit-identical output; that was **false and was reverted before
+  release**. The checksum at `chunk[52:56]` covers the *patched* chunk buffer,
+  and `fillHashTables` writes hash-chain offsets inside the records region, so
+  the bytes on disk are not the bytes in `w.records`. Every chunk written under
+  the incremental scheme carried a wrong records checksum while the record
+  bytes themselves were unchanged — checksum-invisible corruption, and a
+  violation of this release's byte-identity invariant.
+  `TestWrittenFile_EventRecordsCRCMatchesRecords` now guards the property
+  directly against a written file. See ADR-007's Decision 3.
 
 ### Added
 

@@ -3,6 +3,15 @@
 **Date:** 2026-08-22
 **Status:** Accepted — refines ADR-004
 
+> **Correction, 2026-08-22 (pre-merge).** Decision 3 of this ADR — "the records
+> CRC is maintained incrementally" — was **wrong and has been reverted**. It is
+> kept below, struck through and annotated, rather than deleted, because the
+> reason it was wrong is the *same* reason the abandoned header-plus-delta
+> design under "Alternatives Considered" was wrong: `fillHashTables` patches
+> bytes **inside the records region** of the chunk buffer. Two independent
+> mistakes on this branch, one root cause. Decision 5's crash-ordering claim is
+> also narrowed below: it holds for a process crash, not for power loss.
+
 ## Context
 
 ADR-004 established the open-handle incremental flush model and listed one
@@ -62,9 +71,45 @@ does.
    be correct by construction, independent of buffer size; only writing from
    a fully-patched full-size buffer is.
 
-3. **The records CRC is maintained incrementally.** `w.recordsCRC` is updated
+3. ~~**The records CRC is maintained incrementally.** `w.recordsCRC` is updated
    with `crc32.Update` at each append. This is bit-identical to the rescan it
-   replaces and removes an O(chunk) scan from both flush paths.
+   replaces and removes an O(chunk) scan from both flush paths.~~
+
+   **Reverted, 2026-08-22 (pre-merge). The claim above is false.** The records
+   CRC at `chunk[52:56]` covers `chunk[512:FreeSpaceOffset]` — the **patched**
+   chunk buffer — and, exactly as Decision 2 and the abandoned delta design
+   both establish, `fillHashTables` → `fillOneTable` writes chain patches into
+   that region: a 4-byte terminator at `chunk[ref.offset:]` and, for a
+   colliding key, a non-zero `next_offset` at `chunk[prev:]` over a field the
+   record emitted as zero. So `chunk[512:end] != w.records`, and a checksum
+   over `w.records` cannot equal the checksum of the bytes on disk. `crc32`'s
+   own composition law is not in question — `crc32.Update` does compute the
+   checksum of the concatenation — but the concatenation is the wrong input.
+   Divergence is not a rare case: 64 buckets collide within about 30 distinct
+   names, which a single record already emits, so **every** chunk this branch
+   wrote shipped a wrong records CRC. Measured through the public API with a
+   fixed `TimeCreated`, `crc32.Checksum(chunk[512:FreeSpaceOffset])` against
+   the stored `chunk[52:56]`:
+
+   | records | v0.9.0 stored | branch stored | branch recomputed |
+   |---|---|---|---|
+   | 1 | `0x29e834fd` | `0x2cf15642` | `0x29e834fd` |
+   | 5 | `0xedc0371d` | `0x3ca80680` | `0xedc0371d` |
+   | 30 | `0xf077b9c1` | `0x18b89f10` | `0xf077b9c1` |
+
+   The branch's *recomputed* values are the base's *stored* values: the record
+   bytes never moved, only the 4-byte checksum field diverged — which is
+   precisely checksum-invisible corruption, and a violation of "The invariant"
+   below.
+
+   No incremental scheme over `w.records` can be made correct here, because the
+   checksummed bytes are the patched buffer and the patched buffer is not
+   derivable from `w.records`. Maintaining a *second* running checksum over the
+   patched bytes is not the fix either — it is the same category of assumption
+   that produced the delta design. `patchEventRecordsCRC` (the O(chunk) rescan
+   this decision removed) is restored at both sites, called **after**
+   `fillHashTables`, and `TestWrittenFile_EventRecordsCRCMatchesRecords` now
+   asserts the property against the finished file.
 
 4. **The chunk slot is pre-extended.** Before its first partial write the tick
    calls `Truncate(chunkOffset + evtxChunkSize)`. Without it the file would end
@@ -72,10 +117,20 @@ does.
    EOF — as would Windows. The sparse tail reads back as zeros, which is what
    the sealing write puts there anyway.
 
-5. **Records are written before the header that advertises them.** A crash
-   between the two leaves a header describing fewer records than are on disk,
-   which reads back cleanly. The reverse ordering would advertise records whose
-   bytes never landed.
+5. **Records are written before the header that advertises them.** If the
+   *process* dies between the two `WriteAt` calls, the page cache still holds
+   the records write, so the file reads back as a header describing fewer
+   records than are on disk, which is clean. The reverse ordering would
+   advertise records whose bytes never landed.
+
+   **This ordering does not survive power loss** (narrowed 2026-08-22,
+   pre-merge; the original text claimed "a crash" without qualification).
+   There is no fsync between the two `WriteAt` calls, so writeback may commit
+   them to the platter in either order and a torn power-loss image may show
+   the header without the records behind it. The exposure is not a v0.10.0
+   regression — v0.9.0 had the same gap between its chunk write and its
+   separate file-header write — but the guarantee this decision earns is
+   process-crash ordering only.
 
 6. **Neither `w.chunkCount` nor `w.records` is reset.** The chunk stays open
    for further appends — ADR-004's flush-without-reset, unchanged.
@@ -99,15 +154,20 @@ full 64 KiB when sealing a chunk.
   fills. There is no measured bytes/day figure for the non-idle case; see
   `docs/perf-baseline.md`'s "Derived figures" section, which states plainly
   that its own arithmetic there is unmeasured.
-- One O(chunk) CRC rescan per tick removed regardless of idle/non-idle.
+- ~~One O(chunk) CRC rescan per tick removed regardless of idle/non-idle.~~
+  **Withdrawn with Decision 3.** The rescan is back on both flush paths; it
+  is the only way to checksum the bytes that are actually written. The
+  `WriteRecord` rows appended to `docs/perf-baseline.md` after the fix
+  measure the restored cost.
 - No API change and no on-disk format change.
 
 **Negative:**
 
-- Three more pieces of `Writer` state (`recordsCRC`, `tickWrittenLen`,
-  `slotExtended`) that must be reset in lockstep with `w.records`. They are
-  reset in exactly two places, `flushChunkLocked`'s commit block and `rotate`
-  Step 7; missing either corrupts the following chunk.
+- Two more pieces of `Writer` state (`tickWrittenLen`, `slotExtended`) that
+  must be reset in lockstep with `w.records`. They are reset in exactly two
+  places, `flushChunkLocked`'s commit block and `rotate` Step 7; missing either
+  corrupts the following chunk. (This said *three* while `recordsCRC` existed;
+  it went with Decision 3's revert.)
 - A non-idle tick still allocates and patches a full `evtxChunkSize` buffer —
   the delta design's allocation saving did not survive; only the write-size
   and idle-skip savings did.
@@ -154,6 +214,15 @@ The conformance tests and the Format Verify CI gate continue to apply unchanged.
   correct; only writing from a full, patched buffer is. This is the most
   important entry in this list, because it recorded a design that looked
   correct by inspection and was not, and precisely why.
+  **Postscript, 2026-08-22 (pre-merge).** This entry did not go far enough.
+  The premise it corrects — that `fillHashTables` leaves the records region
+  alone — was load-bearing in a *second* place on this branch, the incremental
+  records CRC of Decision 3, and it was wrong there too. Neither mistake was
+  found by the branch's own tests. The lesson to carry forward is not "delta
+  writes are hard" but: **any optimisation that treats `w.records` as
+  equivalent to the bytes at `chunk[512:]` is wrong**, whether it writes them,
+  checksums them, or reasons about their immutability.
+
 - **Skip-when-idle only, keep the full-chunk write.** Fixes true idle and
   nothing else: at 10 events/sec every tick still has new records, so the
   full 65536-byte write and its fsync stay on every non-idle tick.

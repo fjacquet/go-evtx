@@ -806,11 +806,19 @@ func (w *Writer) flushChunkLocked() error {
 //
 // Only the used prefix is written to disk, as two WriteAt calls sourced
 // from the patched full buffer: the records region first, then the header
-// that advertises them. A crash between the two leaves a header describing
-// fewer records than are on disk, which reads back cleanly; the reverse
-// ordering would advertise records whose bytes never landed. The unwritten
-// tail padding of the chunk slot is left as whatever Truncate zero-filled
-// it to — a parser never reads past FreeSpaceOffset.
+// that advertises them. If the PROCESS dies between the two, the page cache
+// still holds the records write, so the file reads back as a header
+// describing fewer records than are on disk, which is clean; the reverse
+// ordering would advertise records whose bytes never landed.
+//
+// This ordering does NOT survive power loss. There is no fsync between the
+// two WriteAt calls, so writeback may commit them to the platter in either
+// order and a torn power-loss image may show the header without the records.
+// That exposure is not new in v0.10.0 — v0.9.0 had the same gap between its
+// chunk write and its separate file-header write — but the guarantee here is
+// process-crash ordering only. The unwritten tail padding of the chunk slot
+// is left as whatever Truncate zero-filled it to — a parser never reads past
+// FreeSpaceOffset.
 //
 // Neither w.chunkCount nor w.records is reset — the chunk stays open for
 // further appends, exactly as before (ADR-004's flush-without-reset).

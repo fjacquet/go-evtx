@@ -98,10 +98,11 @@ No API change. No on-disk format change.
 | Field | Meaning |
 |---|---|
 | `tickWrittenLen int` | Bytes of `w.records` already persisted into the current chunk slot by a previous tick |
-| `recordsCRC uint32` | Running CRC32 of `w.records`, updated incrementally with `crc32.Update` on each append |
+| ~~`recordsCRC uint32`~~ | ~~Running CRC32 of `w.records`, updated incrementally with `crc32.Update` on each append~~ — **false, reverted**; see the second correction note below |
 | `slotExtended bool` | The current chunk slot has been pre-extended to its full size |
 
-All three reset alongside `w.records` in `flushChunkLocked` and in `rotate`.
+The two that survived (`tickWrittenLen`, `slotExtended`) reset alongside
+`w.records` in `flushChunkLocked` and in `rotate`.
 
 ### New `tickFlushLocked`
 
@@ -151,12 +152,20 @@ sufficient. Kept as originally written for the record.
   4-byte patch at `chunk[prev:]`, both of which land at or beyond
   `evtxRecordsStart+evtxRecordHeaderSize` (>= 536) — inside the records
   region, outside any 512-byte buffer.
-- **The records CRC is incremental.** `patchEventRecordsCRC` currently rescans
-  the whole records region; `crc32.Update` over the appended bytes yields the
-  identical value, removing an O(chunk) scan per tick.
-- **Header is written after the records it advertises.** A crash between the two
-  leaves a header describing fewer records than are on disk, never more. The
-  reverse ordering would advertise records whose bytes never landed.
+- ~~**The records CRC is incremental.**~~ `patchEventRecordsCRC` currently
+  rescans the whole records region; `crc32.Update` over the appended bytes
+  yields the identical value, removing an O(chunk) scan per tick. — **False,
+  and reverted.** `crc32.Update` does yield the checksum of the concatenation,
+  but the concatenation is the wrong input: `chunk[52:56]` covers
+  `chunk[512:FreeSpaceOffset]`, the **patched** buffer, and `fillOneTable`'s
+  chain patches land inside it. Same false premise as the two bullets above.
+  See the second correction note below.
+- **Header is written after the records it advertises.** A *process* crash
+  between the two leaves a header describing fewer records than are on disk,
+  never more. The reverse ordering would advertise records whose bytes never
+  landed. — **Narrowed 2026-08-22:** there is no fsync between the two
+  `WriteAt` calls, so this ordering is not preserved across power loss;
+  writeback may commit them in either order. The exposure predates v0.10.0.
 - **`Truncate` keeps the file chunk-aligned.** Writing only `512 + len(records)`
   bytes into the slot would end the file mid-chunk; `loadChunk` reads a full
   `evtxChunkSize` and would hit EOF, as would Windows. Pre-extending leaves a
@@ -182,8 +191,11 @@ CI gate continue to apply unchanged.
   abandoned. What shipped writes the used prefix of a full chunk buffer, a
   saving that is real but roughly half on average across a chunk's fill, not
   an order of magnitude. See the correction note.
-- One O(chunk) CRC rescan per tick removed. **This figure held** — the CRC is
-  incremental regardless of which write-size design carries it to disk.
+- ~~One O(chunk) CRC rescan per tick removed.~~ **This figure did not hold
+  either.** The claim that it did — "the CRC is incremental regardless of which
+  write-size design carries it to disk" — was written in the same correction
+  pass that caught the delta design, and repeats its false premise. The rescan
+  is back. See the second correction note below.
 
 ## Correction note (v0.10.0 implementation, 2026-08-22)
 
@@ -222,6 +234,33 @@ wrong and are restated in `docs/perf-baseline.md`'s "Derived figures"
 section and in [ADR-007](../../adr/ADR-007-incremental-tick-flush.md),
 which also carries the full "Alternatives Considered" account of the
 abandoned design.
+
+**A second correction, same root cause: the incremental records CRC
+(2026-08-22, pre-merge).** The bullet "the records CRC is incremental" above,
+and the "this figure held" line that survived the first correction pass, are
+both wrong, and wrong for the *identical* reason: `fillHashTables` patches
+bytes inside the records region. The records CRC at `chunk[52:56]` covers
+`chunk[512:FreeSpaceOffset]` — the patched buffer — so a checksum accumulated
+over `w.records` disagrees with the bytes on disk as soon as two keys collide
+on a bucket, which 64 buckets make near-certain within about 30 distinct names,
+fewer than one record emits. Measured through the public API with a fixed
+`TimeCreated`, the stored `chunk[52:56]` differed from
+`crc32.Checksum(chunk[512:FreeSpaceOffset])` for 1, 5 and 30 records, while the
+recomputed values matched v0.9.0's stored values exactly — the record bytes
+never moved, only the checksum field did. Every chunk this branch wrote
+therefore shipped a wrong records CRC, violating the byte-identity invariant
+above and producing exactly the checksum-invisible corruption this repository
+treats as unacceptable.
+
+`patchEventRecordsCRC` is restored at both call sites, ordered after
+`fillHashTables`, and `TestWrittenFile_EventRecordsCRCMatchesRecords` asserts
+the property against the finished file. **The generalisable lesson, since this
+spec produced the same mistake twice:** no optimisation may treat `w.records`
+as equivalent to the bytes at `chunk[512:]` — not writing them, not checksuming
+them, not reasoning about their immutability. The first correction note below
+framed its finding as being about delta *writes*; that framing was too narrow
+and is why the CRC claim survived it. A v0.11.0 plan drawn from this spec must
+apply the wider rule.
 
 **A second, unrelated correction: ADR numbering.** The Documentation section
 below says this release's ADR is "ADR-005, incremental tick flush" and
