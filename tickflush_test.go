@@ -380,6 +380,9 @@ func TestTickFlush_ByteIdenticalToNoTick(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s New: %v", name, err)
 		}
+		// A t.Fatalf below would otherwise leak the tick goroutine and the
+		// file handle. Close is idempotent, so the explicit Close still wins.
+		defer w.Close() //nolint:errcheck
 		for i := 0; i < records; i++ {
 			if err := w.WriteRecord(4663, tickTestFields()); err != nil {
 				t.Fatalf("%s WriteRecord %d: %v", name, i, err)

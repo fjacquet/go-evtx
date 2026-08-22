@@ -126,9 +126,15 @@ func BenchmarkTickFlushIdle(b *testing.B) {
 	if err := w.WriteRecord(4663, benchFields()); err != nil {
 		b.Fatal(err)
 	}
+	// The priming tick does the real work. If it fails, every iteration below
+	// measures the len(w.records) == 0 branch instead of the idle-skip branch,
+	// and the recorded number describes the wrong code.
 	w.mu.Lock()
-	_ = w.tickFlushLocked() // first tick does the real work
+	primeErr := w.tickFlushLocked()
 	w.mu.Unlock()
+	if primeErr != nil {
+		b.Fatalf("priming tick: %v", primeErr)
+	}
 
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -24,6 +24,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - PRD: PRD.md
+  - Performance baseline: perf-baseline.md
   - Architecture Decisions:
       - ADR-001 Pure Go / stdlib only: adr/ADR-001-pure-go-stdlib-only.md
       - ADR-002 Layered API (WriteRaw / WriteRecord): adr/ADR-002-layered-api-writeraw-writerecord.md

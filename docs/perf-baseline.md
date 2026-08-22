@@ -4,6 +4,11 @@ Append-only, under the same discipline as `docs/format-baseline.md`:
 
 - **Add a row; never edit one.** Earlier rows are the evidence later
   comparisons rest on. A correction goes in a new row with a note.
+- **The append-only rule binds from the moment this file merges to `main`.**
+  Rows corrected on the branch before that point were never evidence anyone
+  relied on; once merged, a row is public history and only a new row may
+  correct it. Stated because this file was created on a branch whose own
+  pre-merge review changed the code the first rows measure.
 - **Select a CI run by `head_sha`, never by recency.** A run whose head is
   stale measures a different tree than the one you are attributing it to.
 - **Record the platform.** fsync cost is not portable: darwin's `File.Sync` is
@@ -36,6 +41,22 @@ go test -run XXX -bench . -benchtime 3s .
 | 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecord | 72199 | 6822 | 60 | v0.10.0, `bench_test.go`; 81.86 rec/fsync |
 | 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecordParallel (10) | 65862 | 6827 | 60 | v0.10.0, `bench_test.go` |
 | 2026-08-22 | 98cc202 | darwin/arm64 M1 Pro, APFS, go1.27.0 | TickFlushIdle | 13.84 | 0 | 0 | v0.10.0, `bench_test.go`; a tick with no new records since the previous one is a no-op — the pre-release (v0.9.0) tick instead performed a full-chunk write and fsync on every interval regardless of arrivals |
+| 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EncodeShared | 3274 | 5656 | 58 | **After the records-CRC fix.** Encode path untouched by the fix; delta vs 98cc202 is run-to-run noise |
+| 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EncodeInline | 13150 | 21016 | 182 | **After the records-CRC fix.** Encode path untouched by the fix |
+| 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecord | 68307 | 6822 | 60 | **After the records-CRC fix**; 81.84 rec/fsync. This row restores the O(chunk) `patchEventRecordsCRC` rescan per flush that 98cc202's row was measured without. It is *faster* than 98cc202's 72199, which is not a speed-up from the fix — a 64 KiB CRC32 is a few µs against a ~61 µs amortized `F_FULLFSYNC`, so the rescan is inside this benchmark's run-to-run spread. Do not read either row as evidence about the rescan's cost; the fsync dominates |
+| 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecordParallel (10) | 72424 | 6827 | 60 | **After the records-CRC fix.** Same caveat as the serial row |
+| 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | TickFlushIdle | 13.49 | 0 | 0 | **After the records-CRC fix.** The idle skip does not touch the CRC path, so this is unchanged from 98cc202's 13.84 within noise. Harness change in the same commit: the priming tick's error is now fatal, so this row cannot silently be measuring the `len(w.records) == 0` branch instead of the idle-skip branch — which 98cc202's row, whose harness discarded that error, could not rule out |
+
+### Note on the d8a85e4 rows
+
+These five rows follow the records-CRC fix (`d8a85e4`): v0.10.0 briefly
+replaced `patchEventRecordsCRC`'s full rescan with a checksum maintained
+incrementally over `w.records`, which is unsound because `fillHashTables`
+patches bytes inside the records region. The rescan is restored on both flush
+paths. The 98cc202 rows above are **not** superseded — they correctly describe
+the code as it was measured — but any comparison against them must account for
+one extra O(chunk) CRC32 per flush, which the numbers show is below this
+benchmark's noise floor on an fsync-bound path.
 
 ## Derived figures
 
