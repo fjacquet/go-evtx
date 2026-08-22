@@ -42,9 +42,8 @@ amplification of roughly 8.4x. That ratio alone is not a disk-wear concern —
 5.5 GB/day sits comfortably inside any reasonable SSD endurance budget — but
 the work is still unnecessary and worth not doing.
 
-The driving workload is a Dell CEE (Common Event Enabler) receiver taking CEPA
-audit events from PowerScale/Unity/PowerStore, which must survive both a
-long-running low-rate receiver and a cluster burst.
+The driving workload is a network-attached-storage audit-event receiver, which
+must survive both a long-running low-rate feed and a cluster burst.
 
 ## Decision
 

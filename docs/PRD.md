@@ -16,7 +16,7 @@
 
 | User | Workflow |
 |------|----------|
-| **SIEM adapters** (e.g. `cee-exporter`) | Write structured audit events as `.evtx` for ingestion into Windows-native tooling |
+| **SIEM adapters** | Write structured audit events as `.evtx` for ingestion into Windows-native tooling |
 | **Forensics engineers** | Read `.evtx` files from disk; replay or filter event records |
 | **Log forwarders** | Forward BinXML payloads between systems using `ReadRaw` / `WriteRaw` |
 | **Security researchers** | Generate synthetic EVTX fixtures for tooling tests |

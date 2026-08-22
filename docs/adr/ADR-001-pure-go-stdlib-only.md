@@ -5,7 +5,7 @@
 
 ## Context
 
-`go-evtx` is a library for generating Windows EVTX binary files from Go. It needs to run on Linux, macOS, and Windows without requiring a C compiler or external services. Callers (like `cee-exporter`) set `CGO_ENABLED=0` for static cross-compilation.
+`go-evtx` is a library for generating Windows EVTX binary files from Go. It needs to run on Linux, macOS, and Windows without requiring a C compiler or external services. Callers (SIEM adapters, log forwarders) set `CGO_ENABLED=0` for static cross-compilation.
 
 ## Decision
 
