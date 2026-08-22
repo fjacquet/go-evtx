@@ -33,7 +33,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 | File | Purpose |
 |------|---------|
-| `evtx.go` | Writer API: `Writer`, `New()`, `WriteRecord()`, `WriteRaw()`, `Rotate()`, `Close()`, `RotationConfig`, rotation and background-goroutine logic |
+| `evtx.go` | Writer API: `Writer`, `New()`, `WriteRecord()`, `WriteRaw()`, `Rotate()`, `Close()`, `RotationConfig`, rotation and background-goroutine logic. Since v0.10.0 also carries the incremental tick state (`recordsCRC`, `tickWrittenLen`, `slotExtended`) and `tickFlushLocked()` — see [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md) |
 | `errors.go` | Sentinel errors (`ErrClosed`, `ErrRecordTooLarge`) and capacity limits (`maxChunkPayload`, `maxRecordPayload`) |
 | `reader.go` | Reader API: `Reader`, `Record`, `Open()`, `ReadRecord()`, `ReadRaw()`, `Close()`, `ErrNoMoreRecords` |
 | `binformat.go` | Binary format helpers: file/chunk headers, event record wrapper, CRC32, `toFILETIME`/`fromFILETIME`, UTF-16LE encoding |
@@ -74,13 +74,27 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `attrlist_test.go` | `attr_list_size` sits after the inline NameNode and carries a real value |
 | `namespace_test.go` | The `<Event>` root declares the event schema namespace |
 | `system_test.go` | `<System>` children, their value types and optional substitutions |
+| `tickflush_test.go` | Incremental background tick: idle writes nothing, file stays chunk-aligned, incremental round-trip, crash snapshot, hash tables populated after a mid-session tick, and the byte-identity invariant against a no-tick writer |
+| `bench_test.go` | Writer throughput benchmarks backing `docs/perf-baseline.md` |
 
 **Write data flow:**
 
 1. `buildBinXML()` → constructs a BinXML fragment using a fixed template with 42 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value, plus 13 more added in v0.7.0/Task 8b/8c to round `<System>` out to match a real Windows record — see the index map below)
 2. `wrapEventRecord()` → wraps BinXML payload in a 24-byte event record header (signature, size, recordID, FILETIME timestamp)
 3. Records appended to the `Writer.records` byte buffer (the pending chunk)
-4. The buffer is committed as a chunk by `flushChunkLocked()` when it fills, by `tickFlushLocked()` on the background flush tick, by `rotate()`, and by `Close()`
+4. The buffer is committed as a chunk by `flushChunkLocked()` when it fills, by
+   `rotate()`, and by `Close()`. The background flush tick calls
+   `tickFlushLocked()`, which publishes the in-progress chunk *without*
+   committing it: since v0.10.0 it builds the full chunk buffer exactly as
+   `flushChunkLocked` does, patches it with `fillHashTables` and both CRCs, and
+   writes only the used prefix — the records region then the 512-byte
+   header — returning immediately when nothing was appended since the previous
+   tick. A header-only buffer cannot be used: `fillHashTables` back-patches
+   node offsets that live inside the records region, not only `[128:512]`.
+   `w.recordsCRC`, `w.tickWrittenLen` and `w.slotExtended` support that and
+   reset alongside `w.records` in exactly two places — `flushChunkLocked`'s
+   commit block and `rotate` Step 7. See
+   [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md).
 
 **Read data flow:**
 

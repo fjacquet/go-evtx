@@ -339,6 +339,10 @@ func (w *Writer) WriteRaw(payload []byte) error {
 // eventID is the Windows Event ID (e.g. 4663 for file access).
 // fields is a map of field names to values.
 //
+// The fields map is read during the call and not retained. The caller must
+// not mutate it concurrently with WriteRecord: the writer's lock protects
+// the writer's own state, not the caller's map.
+//
 // Reserved field keys:
 //   - "ProviderName"  — event provider (STRING); must not be empty
 //   - "ProviderGuid"  — provider GUID (STRING); defaults to empty

@@ -322,3 +322,40 @@ that failed), the `Writer`'s internal error is set permanently, and every
 subsequent call — `WriteRecord`, `WriteRaw`, `Rotate`, `Close` — returns it.
 There is no automatic recovery. A half-rotated directory needs an operator to
 inspect it and a new `Writer` to resume writing.
+
+## Choosing FlushIntervalSec
+
+`FlushIntervalSec` sets how long a record can sit in memory before it is
+guaranteed to be on disk. It is a durability window, and since v0.10.0 it is
+no longer also a write-amplification setting to the degree it once was.
+
+Before v0.10.0 each tick rewrote the whole 64 KiB chunk and fsynced, whether
+or not anything had arrived — at `FlushIntervalSec: 1` that was roughly 5.5 GB
+and 86 400 fsyncs a day to persist about 600 KB of events, and the same cost
+at idle to persist nothing.
+
+Since v0.10.0 a tick with no new records does nothing at all — no write, no
+fsync — which is where the largest win lands: a workload with gaps between
+arrivals turns what would have been up to 86 400 fsyncs/day into zero on every
+tick where nothing arrived. A tick with new records still builds and patches
+a full chunk buffer internally (`fillHashTables` back-patches offsets inside
+the records region, so a smaller buffer cannot be used safely — see
+[ADR-007](adr/ADR-007-incremental-tick-flush.md)), but writes only the used
+prefix to disk — the records region plus the 512-byte header, skipping the
+unwritten tail. That is a real reduction versus the flat 65536 bytes every
+tick used to write, but it is roughly half on average across a chunk's fill,
+not close to the size of what arrived — see the "Derived figures" section of
+[`perf-baseline.md`](perf-baseline.md) for the honest, labeled-as-arithmetic
+estimate.
+
+```go
+w, err := evtx.New("/var/log/audit.evtx", evtx.RotationConfig{
+    FlushIntervalSec: 1, // at most one second of events lost on a crash
+})
+```
+
+`FlushIntervalSec: 0` disables the background goroutine entirely. Records then
+reach disk only when a chunk fills (roughly every 64 KiB) or on `Close()`.
+
+Measured figures are in [`perf-baseline.md`](perf-baseline.md); the reasoning is
+in [ADR-007](adr/ADR-007-incremental-tick-flush.md).

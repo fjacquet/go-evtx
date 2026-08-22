@@ -84,6 +84,13 @@ work:
 
 ## Release 1 — v0.10.0: incremental tick flush
 
+**Superseded by implementation — see the correction note at the end of this
+section.** This section is kept as originally written, for the record; the
+design it describes (a 512-byte header buffer plus the appended delta) was
+implemented, failed review, and was abandoned. What shipped instead is a
+full-size chunk buffer with only the used prefix written to disk. Read the
+correction note before relying on anything below it as current.
+
 No API change. No on-disk format change.
 
 ### New `Writer` state
@@ -124,13 +131,26 @@ w.queueFsyncLocked()
 
 ### Why each piece is safe
 
-- **Records are append-only.** `w.records` is only ever appended to and reset
-  wholesale; bytes already written to the slot never change, so writing only the
-  delta is equivalent to rewriting the whole region.
-- **A 512-byte header buffer suffices.** `fillHashTables` writes only
+**The first two bullets below are false — see the "Correction note" at the
+end of this section.** `fillHashTables` patches offsets inside the records
+region, not only `[128:512]`, so records are not in fact append-only on
+disk once hash chaining is considered, and a 512-byte buffer is not
+sufficient. Kept as originally written for the record.
+
+- ~~**Records are append-only.**~~ `w.records` is only ever appended to and
+  reset wholesale; bytes already written to the slot never change, so
+  writing only the delta is equivalent to rewriting the whole region. —
+  **False.** `fillOneTable`'s chain-patch write can rewrite a byte at an
+  *earlier* node's offset, inside record bytes a previous tick already
+  wrote to disk.
+- ~~**A 512-byte header buffer suffices.**~~ `fillHashTables` writes only
   `[128:512]`; `patchChunkCRC` reads `[0:120]` and `[128:512]` and writes
   `[120:128]`. Neither touches anything above 512. The tick path therefore
-  allocates no 64 KiB buffer at all.
+  allocates no 64 KiB buffer at all. — **False.** `fillOneTable` also writes
+  a 4-byte chain terminator at `chunk[ref.offset:]` and, when chaining, a
+  4-byte patch at `chunk[prev:]`, both of which land at or beyond
+  `evtxRecordsStart+evtxRecordHeaderSize` (>= 536) — inside the records
+  region, outside any 512-byte buffer.
 - **The records CRC is incremental.** `patchEventRecordsCRC` currently rescans
   the whole records region; `crc32.Update` over the appended bytes yields the
   identical value, removing an O(chunk) scan per tick.
@@ -154,11 +174,65 @@ chunk, once per ~84 records.
 about the sealed-chunk format changes. Conformance tests and the Format Verify
 CI gate continue to apply unchanged.
 
-### Expected effect
+### Expected effect (superseded — see correction note below)
 
-- Idle (no new records): 86 400 fsyncs/day → 0.
+- Idle (no new records): 86 400 fsyncs/day → 0. **This figure held.**
 - 10 events/sec: ~64 KiB/tick → ~1 KiB/tick, i.e. ~5.5 GB/day → ~90 MB/day.
-- One O(chunk) CRC rescan per tick removed.
+  **This figure did not hold** — it assumed the delta design below, which was
+  abandoned. What shipped writes the used prefix of a full chunk buffer, a
+  saving that is real but roughly half on average across a chunk's fill, not
+  an order of magnitude. See the correction note.
+- One O(chunk) CRC rescan per tick removed. **This figure held** — the CRC is
+  incremental regardless of which write-size design carries it to disk.
+
+## Correction note (v0.10.0 implementation, 2026-08-22)
+
+**The false premise.** "A 512-byte header buffer suffices" and "records are
+append-only on disk" above are both wrong. `fillHashTables` does not confine
+itself to `chunk[128:512]`: `fillOneTable` (`chunkhash.go`) also writes a
+4-byte chain terminator at `chunk[ref.offset:]`, and — when chaining a new
+node onto a bucket whose tail is an *earlier* node — a 4-byte chain patch at
+`chunk[prev:]`. Both are chunk-absolute offsets that land inside the records
+region (>= `evtxRecordsStart+evtxRecordHeaderSize`, i.e. >= 536), which the
+delta design above treated as immutable once written.
+
+**How it was found.** The header-plus-delta design above was implemented
+(`ceb9531`) against a 512-byte header buffer. It passed `go build`/`go vet`
+and the existing suite, because every one of `fillOneTable`'s out-of-range
+writes silently failed its own bounds guard
+(`int(ref.offset)+4 > len(chunk)`) instead of panicking or returning an
+error — the hash tables were left entirely zero, with a CRC computed over
+the zeros, so nothing already in the suite could flag it. It was caught in
+code review, not by an existing test, and confirmed by probing a
+mid-session chunk directly: `chunk[128:512]` held 0 non-zero bytes under the
+delta design against 44 once the fix (`916e843`) landed. A regression test,
+`TestTickFlush_SnapshotHashTablesPopulated`, now guards exactly this failure
+mode.
+
+**What this means for the numbers above.** Because a later record's chain
+patch can rewrite a byte an earlier tick already wrote to disk, "records are
+append-only on disk" does not hold once hash chaining is considered — no
+buffer size makes header-plus-delta correct, not just 512 bytes. What
+shipped instead builds the full chunk buffer, patches it exactly as
+`flushChunkLocked` does, and writes only the used prefix (records region
+then 512-byte header) to disk, skipping just the unwritten tail. The idle
+result above is unaffected and is the larger win for the driving workload;
+the non-idle "~64 KiB → ~1 KiB" and "~5.5 GB/day → ~90 MB/day" figures are
+wrong and are restated in `docs/perf-baseline.md`'s "Derived figures"
+section and in [ADR-007](../../adr/ADR-007-incremental-tick-flush.md),
+which also carries the full "Alternatives Considered" account of the
+abandoned design.
+
+**A second, unrelated correction: ADR numbering.** The Documentation section
+below says this release's ADR is "ADR-005, incremental tick flush" and
+plans "ADR-006, sync policy" and "ADR-007, batch write API" for release 2.
+At the time this spec was written, `docs/adr/ADR-005-ship-cli-binaries.md`
+and `docs/adr/ADR-006-corpus-derived-format-method.md` already existed in
+the repository — this spec's author did not check the current highest ADR
+number before assigning new ones. The incremental-tick-flush ADR shipped as
+**ADR-007**, not ADR-005. A v0.11.0 plan written from this spec must number
+its own new ADRs from the next available number at the time it is written
+(ADR-008 onward), not reuse 006/007 as stated below.
 
 ## Release 2 — v0.11.0: throughput
 
@@ -275,7 +349,9 @@ Also:
 
 **Not covered:** the header-after-records write ordering. `w.f` is a concrete
 `*os.File`, so there is no injection seam. Code review plus the crash-snapshot
-test is the coverage, and ADR-005 says so rather than implying it is tested.
+test is the coverage, and ADR-007 (shipped number — see the correction note
+above; this said ADR-005 originally) says so rather than implying it is
+tested.
 
 ### v0.11.0
 
@@ -302,22 +378,30 @@ allocs/op, fsyncs per record, bytes/day at 10 events/sec.
 
 ## Documentation
 
-Three ADRs, matching the existing pattern in `docs/adr/`:
+Three ADRs, matching the existing pattern in `docs/adr/`. **Numbering below is
+as originally planned; see the correction note above — ADR-005 and ADR-006
+were already taken by existing ADRs, so the first of these shipped as
+ADR-007, and the two v0.11.0 ADRs must take the next available numbers when
+that release is planned (ADR-008 onward), not 006/007 as written here:**
 
-- **ADR-005, incremental tick flush.** Refines ADR-004, which already lists the
-  full-chunk rewrite as a known negative. Records the measured amplification,
-  the header-after-records ordering, the `Truncate` constraint, and the untested
+- **Incremental tick flush** (shipped as **ADR-007**, not ADR-005 as
+  originally planned). Refines ADR-004, which already lists the full-chunk
+  rewrite as a known negative. Records the measured amplification, the
+  header-after-records ordering, the `Truncate` constraint, and the untested
   ordering gap.
-- **ADR-006, sync policy and group commit.** The durability-for-throughput
-  trade, why the default stays fsync-per-chunk in a forensic-artifact library,
-  why `SyncOnTick` requires a tick, and the sticky-error timing shift.
-- **ADR-007, batch write API.** The all-or-nothing contract, its exact scope,
-  and why it needs an analytic size bound rather than encode-and-rollback.
+- **Sync policy and group commit** (originally planned as ADR-006; renumber
+  at write time). The durability-for-throughput trade, why the default stays
+  fsync-per-chunk in a forensic-artifact library, why `SyncOnTick` requires a
+  tick, and the sticky-error timing shift.
+- **Batch write API** (originally planned as ADR-007; renumber at write
+  time). The all-or-nothing contract, its exact scope, and why it needs an
+  analytic size bound rather than encode-and-rollback.
 
 Also:
 
-- `mkdocs.yml`: nav entries for ADR-005/006/007, and `extra.version`, which is
-  stale at v0.5.1.
+- `mkdocs.yml`: nav entry for the incremental-tick-flush ADR (added as
+  `ADR-007-incremental-tick-flush.md`), and `extra.version`, which was stale
+  at v0.5.1 and is now v0.10.0.
 - `docs/user-guide.md`: a section on choosing `FlushIntervalSec` and
   `SyncPolicy`, with the measured numbers.
 - `CLAUDE.md`: the write data-flow section, the file and test-file tables, and
@@ -343,7 +427,7 @@ Both releases are minor and non-breaking.
 |---|---|
 | Partial tick write corrupts the in-progress chunk | Byte-identity test plus crash-snapshot test |
 | File left mid-chunk, unreadable by `loadChunk` or Windows | `Truncate` pre-extension, asserted by the chunk-alignment test |
-| `SyncOnTick` used without understanding the loss window | `New()` hard-errors on the unbounded configuration; ADR-006 and the user guide state the window |
+| `SyncOnTick` used without understanding the loss window | `New()` hard-errors on the unbounded configuration; the sync-policy ADR (see the correction note's renumbering) and the user guide state the window |
 | `estimateMaxPayload` under-counts, breaking all-or-nothing | Fuzz target on the bound; post-encode check retained as an assertion |
 | Shared encode buffer aliased into `w.records` | Explicit aliasing test |
 | Four write-path changes make a regression unattributable | Two releases, each with its own `perf-baseline.md` rows |
