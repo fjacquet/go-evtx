@@ -36,6 +36,33 @@ import (
 	"time"
 )
 
+// SyncPolicy selects when the writer calls f.Sync().
+//
+// The zero value, SyncEveryChunk, is the durability model go-evtx has always
+// had: every sealed chunk is fsynced before the writer commits it in memory,
+// so at most one chunk of events can be lost to a crash.
+//
+// SyncOnTick is group commit. Sealed chunks are written and the file header is
+// patched, but the fsync is deferred to the background flush tick, to rotate()
+// and to Close(), each of which syncs unconditionally under every policy. One
+// tick fsync then covers every chunk written since the previous one. The
+// crash-loss window becomes FlushIntervalSec rather than one chunk, which is
+// why New rejects SyncOnTick when no tick is configured.
+//
+// The trade is throughput: fsync is the dominant per-record cost — measured at
+// 82% of WriteRecord's wall clock on darwin/APFS, where f.Sync() is
+// F_FULLFSYNC — so amortizing it across many chunks is the only change that
+// moves the ceiling. See docs/perf-baseline.md.
+type SyncPolicy int
+
+const (
+	// SyncEveryChunk fsyncs each sealed chunk before committing it. Default.
+	SyncEveryChunk SyncPolicy = iota
+	// SyncOnTick defers the fsync of sealed chunks to the flush tick.
+	// Requires FlushIntervalSec > 0.
+	SyncOnTick
+)
+
 // RotationConfig holds periodic flush and rotation configuration for the Writer.
 //
 // FlushIntervalSec is the interval between checkpoint writes in seconds.
@@ -55,6 +82,11 @@ type RotationConfig struct {
 	MaxFileSizeMB     int // 0 = disabled; rotate when file >= N MiB
 	MaxFileCount      int // 0 = unlimited; keep only N newest archives
 	RotationIntervalH int // 0 = disabled; rotate every N hours
+
+	// SyncPolicy selects when f.Sync() is called. The zero value keeps the
+	// durability model every existing caller already has. SyncOnTick requires
+	// FlushIntervalSec > 0 and is rejected by New without it.
+	SyncPolicy SyncPolicy
 
 	// OnFsync is called after each successful f.Sync() with the time of the
 	// sync. nil = no callback. Useful for exposing the fsync timestamp to a
@@ -193,6 +225,11 @@ func New(path string, cfg RotationConfig) (*Writer, error) {
 	}
 	if cfg.FlushIntervalSec < 0 {
 		return nil, fmt.Errorf("go_evtx: FlushIntervalSec must be >= 0 (got %d)", cfg.FlushIntervalSec)
+	}
+	if cfg.SyncPolicy == SyncOnTick && cfg.FlushIntervalSec <= 0 {
+		return nil, fmt.Errorf(
+			"go_evtx: SyncOnTick requires FlushIntervalSec > 0, otherwise nothing " +
+				"syncs until Close and the crash-loss window is unbounded")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("go_evtx: create parent directory: %w", err)
