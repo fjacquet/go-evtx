@@ -157,7 +157,7 @@ recs := []evtx.RecordInput{
     {EventID: 4625, Fields: otherFields},
 }
 if err := w.WriteRecords(recs); err != nil {
-    // e.g. "go_evtx: record 1: go_evtx: missing ProviderName"
+    // e.g. "go_evtx: record 1: go_evtx: ProviderName must not be empty"
     log.Fatal(err)
 }
 ```

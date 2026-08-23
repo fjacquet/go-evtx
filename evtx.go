@@ -64,6 +64,19 @@ const (
 	SyncOnTick
 )
 
+// String returns the SyncPolicy's name, or a SyncPolicy(%d) form for any
+// value outside the two defined constants.
+func (p SyncPolicy) String() string {
+	switch p {
+	case SyncEveryChunk:
+		return "SyncEveryChunk"
+	case SyncOnTick:
+		return "SyncOnTick"
+	default:
+		return fmt.Sprintf("SyncPolicy(%d)", int(p))
+	}
+}
+
 // RotationConfig holds periodic flush and rotation configuration for the Writer.
 //
 // FlushIntervalSec is the interval between checkpoint writes in seconds.
@@ -250,6 +263,9 @@ func New(path string, cfg RotationConfig) (*Writer, error) {
 	}
 	if cfg.FlushIntervalSec < 0 {
 		return nil, fmt.Errorf("go_evtx: FlushIntervalSec must be >= 0 (got %d)", cfg.FlushIntervalSec)
+	}
+	if cfg.SyncPolicy != SyncEveryChunk && cfg.SyncPolicy != SyncOnTick {
+		return nil, fmt.Errorf("go_evtx: SyncPolicy must be SyncEveryChunk or SyncOnTick (got %v)", cfg.SyncPolicy)
 	}
 	if cfg.SyncPolicy == SyncOnTick && cfg.FlushIntervalSec <= 0 {
 		return nil, fmt.Errorf(
@@ -555,6 +571,11 @@ type RecordInput struct {
 // one chunk seals chunks as it goes, which is normal; if a write fails partway
 // through, the records already committed to earlier chunks stay written. The
 // error says which record was reached.
+//
+// It is not faster per record than a WriteRecord loop — at batch size 100 it
+// measures roughly 1.4× slower, because the validation pre-pass collects each
+// record's substitution values and the encode collects them again. Adopt it
+// for the all-or-nothing guarantee, not for throughput. See ADR-009.
 //
 // An empty or nil slice is a no-op returning nil.
 //

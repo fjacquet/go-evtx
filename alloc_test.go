@@ -125,7 +125,7 @@ func TestWriteRecord_AllocationCeiling(t *testing.T) {
 		}
 	}
 
-	const ceiling = 12
+	const ceiling = 8
 	got := testing.AllocsPerRun(200, func() {
 		if err := w.WriteRecord(4663, fields); err != nil {
 			t.Fatalf("WriteRecord: %v", err)

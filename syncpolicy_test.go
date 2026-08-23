@@ -44,6 +44,44 @@ func TestSyncPolicy_RejectsUnboundedWindow(t *testing.T) {
 	}
 }
 
+// TestSyncPolicy_RejectsOutOfRangeValue verifies New refuses a SyncPolicy
+// value outside the two defined constants, rather than silently treating it
+// as SyncEveryChunk (every check in the codebase tests only == SyncOnTick or
+// != SyncOnTick, so an unrecognized value would otherwise pass through
+// unnoticed as the more durable policy).
+func TestSyncPolicy_RejectsOutOfRangeValue(t *testing.T) {
+	dir := t.TempDir()
+	w, err := New(filepath.Join(dir, "bad-policy.evtx"), RotationConfig{
+		SyncPolicy: SyncPolicy(2),
+	})
+	if err == nil {
+		_ = w.Close()
+		t.Fatal("New accepted SyncPolicy(2); want an error")
+	}
+	if w != nil {
+		t.Fatal("New returned a non-nil Writer alongside an error")
+	}
+}
+
+// TestSyncPolicy_StringerFormatsKnownAndUnknownValues verifies SyncPolicy's
+// String method names the two defined constants and falls back to a
+// SyncPolicy(%d) form for anything else.
+func TestSyncPolicy_StringerFormatsKnownAndUnknownValues(t *testing.T) {
+	cases := []struct {
+		p    SyncPolicy
+		want string
+	}{
+		{SyncEveryChunk, "SyncEveryChunk"},
+		{SyncOnTick, "SyncOnTick"},
+		{SyncPolicy(2), "SyncPolicy(2)"},
+	}
+	for _, c := range cases {
+		if got := c.p.String(); got != c.want {
+			t.Errorf("SyncPolicy(%d).String() = %q, want %q", int(c.p), got, c.want)
+		}
+	}
+}
+
 // TestSyncPolicy_AcceptsBoundedWindow verifies the valid combination is accepted.
 func TestSyncPolicy_AcceptsBoundedWindow(t *testing.T) {
 	dir := t.TempDir()
