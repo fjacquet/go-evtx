@@ -193,8 +193,15 @@ func BenchmarkWriteRecordsBatch(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
+	// Submit exactly b.N records. Writing a full batch on every iteration
+	// would submit ceil(b.N/batch)*batch, so ns/op, B/op and allocs/op would
+	// be divided by a record count smaller than the one actually written.
 	for i := 0; i < b.N; i += batch {
-		if err := w.WriteRecords(recs); err != nil {
+		n := batch
+		if rem := b.N - i; rem < n {
+			n = rem
+		}
+		if err := w.WriteRecords(recs[:n]); err != nil {
 			b.Fatal(err)
 		}
 	}

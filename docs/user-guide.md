@@ -486,8 +486,11 @@ window you are willing to lose. The reasoning is in
 ## 9. Memory per `Writer`
 
 v0.11.0's allocation work moved per-call scratch onto the `Writer`, which cut
-`WriteRecord` from 54.0 to 5.0 allocations per call. The buffers are retained
-for the `Writer`'s lifetime:
+`BenchmarkWriteRecord` from **60 to 5 allocs/op** (`B/op` from 6822 to 5033) on
+`darwin/arm64 M1 Pro, APFS, go1.27.0` — the v0.10.0 row at commit `d8a85e4`
+against the v0.11.0 row, both in
+[`docs/perf-baseline.md`](perf-baseline.md). The buffers are retained for the
+`Writer`'s lifetime:
 
 - **64 KiB** for the chunk assembly buffer, allocated on the first flush.
 - A BinXML encode buffer grown to the **largest record encoded so far** and

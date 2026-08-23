@@ -693,6 +693,12 @@ func (w *Writer) rotate() error {
 		return w.err
 	}
 	w.pendingSync = false
+	// Report this sync: it is the one that makes the archived file's data
+	// durable. Under SyncEveryChunk, Step 1's flushChunkLocked already fired
+	// OnFsync and this adds a second callback for the same rotation; under
+	// SyncOnTick that flush deferred its sync, so without this a rotation
+	// would fire no callback at all.
+	w.queueFsyncLocked()
 	if err := w.closeFileLocked(); err != nil {
 		w.err = fmt.Errorf("go_evtx: rotate close: %w", err)
 		return w.err

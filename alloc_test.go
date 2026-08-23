@@ -89,9 +89,14 @@ func TestChunkScratch_NoStaleBytesInPadding(t *testing.T) {
 	}
 }
 
-// TestBuildBinXML_PayloadSurvivesNextEncode guards the aliasing hazard. If the
-// encoder returns a slice into a reused buffer, the previous record's payload
-// is silently rewritten by the next encode.
+// TestBuildBinXML_PayloadSurvivesNextEncode pins buildBinXML's own contract:
+// it hands each call a fresh buffer, so its result is safe to retain.
+//
+// This does NOT guard the writer's aliasing hazard. buildBinXML allocates a
+// new bytes.Buffer per call, so nothing here reuses a buffer and this test
+// cannot fail no matter what the writer does. The hazard lives on the
+// buildBinXMLInto path, where the writer passes its own reused
+// w.encodeScratch — see TestWriteRecord_EarlierRecordSurvivesNextEncode.
 func TestBuildBinXML_PayloadSurvivesNextEncode(t *testing.T) {
 	first := buildBinXML(4663, 1, allocFields("/nas/first-record.txt"), 4096, 512)
 	kept := first.payload
@@ -104,6 +109,71 @@ func TestBuildBinXML_PayloadSurvivesNextEncode(t *testing.T) {
 	if !bytes.Equal(kept, snapshot) {
 		t.Fatal("the first payload changed after a second encode — buildBinXML's " +
 			"result aliases a reused buffer and the caller must copy")
+	}
+}
+
+// TestWriteRecord_EarlierRecordSurvivesNextEncode writes two records whose
+// field values differ in length and content, then reads them back and checks
+// each kept its own. Every other multi-record test in this package writes
+// identical fields, so none of them can see one record's payload appearing in
+// another.
+//
+// Two things this does NOT do, both deliberate. It does not compare bytes in
+// w.records: that buffer is grown with append(w.records, rec...), which
+// copies, so no aliasing regression is ever visible there and such an
+// assertion could not fail. And it is not a guard on wrapEventRecord's copy —
+// rewriting wrapEventRecord to reuse a shared buffer passes the entire suite,
+// because w.records' own append is what takes ownership of the bytes.
+//
+// What it does guard is the decoded output, which is where corruption from
+// any future aliasing regression would actually surface. That matters here
+// because corruption is checksum-invisible: both chunk CRCs are computed over
+// whatever bytes are present, so a mangled payload verifies.
+func TestWriteRecord_EarlierRecordSurvivesNextEncode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "alias.evtx")
+	w, err := New(path, RotationConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Values of different lengths: a shared buffer reused for the second
+	// record would grow and rewrite the first, rather than happening to
+	// overwrite it with equal bytes.
+	const (
+		firstObject  = "/nas/first.txt"
+		secondObject = "/nas/second-record-with-a-much-longer-object-name.txt"
+	)
+	if err := w.WriteRecord(4663, allocFields(firstObject)); err != nil {
+		t.Fatalf("WriteRecord 1: %v", err)
+	}
+	if err := w.WriteRecord(4625, allocFields(secondObject)); err != nil {
+		t.Fatalf("WriteRecord 2: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	for i, want := range []string{firstObject, secondObject} {
+		ev, err := r.ReadEvent()
+		if err != nil {
+			t.Fatalf("ReadEvent %d: %v", i, err)
+		}
+		var got string
+		for _, d := range ev.EventData {
+			if d.Name == "ObjectName" {
+				got = d.Value.String()
+			}
+		}
+		if got != want {
+			t.Errorf("record %d ObjectName = %q, want %q — an earlier record's "+
+				"payload was rewritten by a later encode", i, got, want)
+		}
 	}
 }
 

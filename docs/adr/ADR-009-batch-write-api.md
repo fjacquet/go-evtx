@@ -270,15 +270,33 @@ retained: it is allocated per call at 1 KiB capacity and dropped. Only the two
 buffers above live on the `Writer`.
 
 `TestWriteRecord_AllocationCeiling` fails the build if per-record allocation
-regresses past 12, so this does not quietly slide back.
+regresses past 8, so this does not quietly slide back.
 
 ### The aliasing hazard
 
 `buildBinXMLInto` writes into `w.encodeScratch` and `res.payload` points into
-it, so the payload is invalidated by the next encode. `wrapEventRecord`
-copies, and that copy is the only thing the writer retains.
-`TestBuildBinXML_PayloadSurvivesNextEncode` asserts it, rather than leaving it
-to a comment — the failure mode is silent data corruption, not a panic.
+it, so the payload is invalidated by the next encode. `appendRecordLocked`
+consumes it synchronously — `wrapEventRecord` builds the 24-byte header, the
+payload and the trailing size copy into one fresh slice, which
+`append(w.records, rec...)` then copies into the pending chunk.
+
+**The mechanism is `w.records`' append, not `wrapEventRecord`'s copy.** An
+earlier draft of this ADR said the copy in `wrapEventRecord` was "the only
+thing the writer retains", and that is wrong: rewriting `wrapEventRecord` to
+build into a reused package-level buffer passes the entire test suite, because
+the pending chunk owns its bytes either way. The writer is safe here
+structurally — `res.payload` has no reachable path to outliving the next
+encode — which is also why no test can guard the copy directly.
+
+What is tested is the decoded output.
+`TestWriteRecord_EarlierRecordSurvivesNextEncode` writes two records with
+distinct field values and reads both back; every other multi-record test in
+the package writes identical fields and so cannot see one record's payload in
+another. `TestBuildBinXML_PayloadSurvivesNextEncode` covers only
+`buildBinXML`'s own contract — it allocates a fresh buffer per call, so its
+result is safe to retain — and is not a guard on the writer path. The failure
+mode being guarded is silent data corruption, not a panic: both chunk CRCs are
+computed over whatever bytes are present and verify.
 
 ## Alternatives Considered
 
