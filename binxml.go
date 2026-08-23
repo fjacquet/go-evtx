@@ -274,6 +274,78 @@ type substitutionEntry struct {
 	data []byte // raw value bytes
 }
 
+// subCollector accumulates every substitution value's bytes into one arena
+// instead of one []byte per value. Encoding each value separately cost three
+// allocations per string across roughly 22 strings a record, which was the
+// bulk of WriteRecord's allocation count (v0.11.0).
+//
+// A value's bytes cannot be sliced out of the arena while the arena is still
+// growing — append may move it, leaving earlier slices pointing at the old
+// backing array. So the adders record spans, and finish() materialises the
+// entries once the arena is final. The arena is not reused across calls: the
+// entries alias it, and buildBinXML's caller (and the tests) may hold the
+// returned slice past the next encode.
+type subCollector struct {
+	arena []byte
+	spans []subSpan
+}
+
+// subSpan is one recorded value: its declared type and its half-open range in
+// the arena. null marks a value with no bytes at all, whose entry keeps a nil
+// data slice exactly as the hand-written entries used to.
+type subSpan struct {
+	typ        byte
+	start, end int
+	null       bool
+}
+
+// str records a STRING-typed value, encoded UTF-16LE without a terminator.
+func (c *subCollector) str(typ byte, s string) {
+	start := len(c.arena)
+	c.arena = appendUTF16LE(c.arena, s)
+	c.spans = append(c.spans, subSpan{typ: typ, start: start, end: len(c.arena)})
+}
+
+// u8, u16 and u64 record the fixed-width little-endian values.
+func (c *subCollector) u8(typ byte, v uint8) {
+	start := len(c.arena)
+	c.arena = append(c.arena, v)
+	c.spans = append(c.spans, subSpan{typ: typ, start: start, end: len(c.arena)})
+}
+
+func (c *subCollector) u16(typ byte, v uint16) {
+	start := len(c.arena)
+	c.arena = binary.LittleEndian.AppendUint16(c.arena, v)
+	c.spans = append(c.spans, subSpan{typ: typ, start: start, end: len(c.arena)})
+}
+
+func (c *subCollector) u64(typ byte, v uint64) {
+	start := len(c.arena)
+	c.arena = binary.LittleEndian.AppendUint64(c.arena, v)
+	c.spans = append(c.spans, subSpan{typ: typ, start: start, end: len(c.arena)})
+}
+
+// null records a value with no bytes. The declared type still matters: F15's
+// resolved rule is that the token declares the field's own type while the
+// array entry declares NULL, and writeSubstitutionArray derives the latter
+// from the empty data rather than from typ.
+func (c *subCollector) null(typ byte) {
+	c.spans = append(c.spans, subSpan{typ: typ, null: true})
+}
+
+// finish materialises the entries against the now-final arena.
+func (c *subCollector) finish() []substitutionEntry {
+	subs := make([]substitutionEntry, len(c.spans))
+	for i, sp := range c.spans {
+		if sp.null {
+			subs[i] = substitutionEntry{typ: sp.typ}
+			continue
+		}
+		subs[i] = substitutionEntry{typ: sp.typ, data: c.arena[sp.start:sp.end:sp.end]}
+	}
+	return subs
+}
+
 // dataFieldNames defines the 12 data field names carried in the contiguous
 // 5..28 substitution block, in substitution order. The thirteenth field,
 // extraDataFieldName, lives at subExtraDataName/subExtraDataValue — see the
@@ -361,9 +433,22 @@ type binXMLResult struct {
 // reads it) but costs roughly 800 KB of duplication in a 1.7 MB 403-record
 // file.
 func buildBinXML(eventID int, recordID uint64, fields map[string]string, binXMLChunkOffset, sharedTemplateOffset uint32) binXMLResult {
+	return buildBinXMLInto(&bytes.Buffer{}, eventID, recordID, fields,
+		binXMLChunkOffset, sharedTemplateOffset)
+}
+
+// buildBinXMLInto encodes into the caller's buffer, which it resets first. The
+// returned payload aliases that buffer, so the caller must copy it before the
+// next call — the writer does, via wrapEventRecord. buildBinXML wraps this for
+// callers that want a fresh allocation (tests, and the fixture generators).
+//
+// The returned names and templates slices are freshly allocated and do not
+// alias the buffer, so they are safe to retain.
+func buildBinXMLInto(out *bytes.Buffer, eventID int, recordID uint64, fields map[string]string,
+	binXMLChunkOffset, sharedTemplateOffset uint32) binXMLResult {
 	subs := collectSubstitutionsFromFields(eventID, recordID, fields)
 
-	out := &bytes.Buffer{}
+	out.Reset()
 
 	// 1. Fragment header (4 bytes).
 	//
@@ -482,23 +567,30 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	opcode, _ := parseSystemUint(fields, "Opcode", 8)
 	keywords, _ := parseSystemUint(fields, "Keywords", 64)
 
-	subs := make([]substitutionEntry, 0, totalSubstitutions)
+	// One arena for every value's bytes; see subCollector. The capacity is a
+	// typical record's total value data, so the common case grows it once at
+	// most. 1 KiB of scratch is cheap against the 22-odd string allocations it
+	// replaces.
+	c := subCollector{
+		arena: make([]byte, 0, 1024),
+		spans: make([]subSpan, 0, totalSubstitutions),
+	}
 
 	// Sub 0: ProviderName (STRING)
-	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderName"])})
+	c.str(binXMLTypeString, fields["ProviderName"])
 	// Sub 1: EventID (UINT16)
-	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(uint16(eventID))})
+	c.u16(binXMLTypeUint16, uint16(eventID))
 	// Sub 2: Level (UINT8) — F12a; sourced from fields since v0.7.4
-	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{uint8(level)}})
+	c.u8(binXMLTypeUint8, uint8(level))
 	// Sub 3: SystemTime (FILETIME)
-	subs = append(subs, substitutionEntry{binXMLTypeFiletime, uint64LEBytes(toFILETIME(systemTime))})
+	c.u64(binXMLTypeFiletime, toFILETIME(systemTime))
 	// Sub 4: Computer (STRING)
-	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["Computer"])})
+	c.str(binXMLTypeString, fields["Computer"])
 
 	// Sub 5..28: Data field names and values (pairs).
 	for _, name := range dataFieldNames {
-		subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(name)})
-		subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields[name])})
+		c.str(binXMLTypeString, name)
+		c.str(binXMLTypeString, fields[name])
 	}
 
 	// Sub 29..39 (F12b): the nine added System children. Version/Task/Opcode/
@@ -520,17 +612,17 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// types instead — see the F14 doc comment by the type constants for the
 	// full story and how the correction was verified three independent
 	// ways). Channel follows Computer's existing pattern.
-	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{uint8(fieldVersion)}})         // 29 Version
-	subs = append(subs, substitutionEntry{binXMLTypeUint16, uint16LEBytes(uint16(task))})        // 30 Task
-	subs = append(subs, substitutionEntry{binXMLTypeUint8, []byte{uint8(opcode)}})               // 31 Opcode
-	subs = append(subs, substitutionEntry{binXMLTypeHexInt64, uint64LEBytes(keywords)})          // 32 Keywords
-	subs = append(subs, substitutionEntry{binXMLTypeUint64, uint64LEBytes(recordID)})            // 33 EventRecordID
-	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 34 Correlation/@ActivityID
-	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 35 Correlation/@RelatedActivityID
-	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 36 Execution/@ProcessID
-	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 37 Execution/@ThreadID
-	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["Channel"])}) // 38 Channel
-	subs = append(subs, substitutionEntry{binXMLTypeNull, nil})                                  // 39 Security/@UserID
+	c.u8(binXMLTypeUint8, uint8(fieldVersion)) // 29 Version
+	c.u16(binXMLTypeUint16, uint16(task))      // 30 Task
+	c.u8(binXMLTypeUint8, uint8(opcode))       // 31 Opcode
+	c.u64(binXMLTypeHexInt64, keywords)        // 32 Keywords
+	c.u64(binXMLTypeUint64, recordID)          // 33 EventRecordID
+	c.null(binXMLTypeNull)                     // 34 Correlation/@ActivityID
+	c.null(binXMLTypeNull)                     // 35 Correlation/@RelatedActivityID
+	c.null(binXMLTypeNull)                     // 36 Execution/@ProcessID
+	c.null(binXMLTypeNull)                     // 37 Execution/@ThreadID
+	c.str(binXMLTypeString, fields["Channel"]) // 38 Channel
+	c.null(binXMLTypeNull)                     // 39 Security/@UserID
 
 	// Sub 40..41 (F13b/F13c): the two remaining named divergences.
 	//
@@ -547,16 +639,16 @@ func collectSubstitutionsFromFields(eventID int, recordID uint64, fields map[str
 	// on record 0 — reverted back to UNSIGNED_WORD on that stronger, directly
 	// measured signal. See the F14 doc comment by the type constants for the
 	// full, unresolved story.
-	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields["ProviderGuid"])}) // 40 Provider/@Guid
-	subs = append(subs, substitutionEntry{binXMLTypeUint16, nil})                                     // 41 EventID/@Qualifiers
+	c.str(binXMLTypeString, fields["ProviderGuid"]) // 40 Provider/@Guid
+	c.null(binXMLTypeUint16)                        // 41 EventID/@Qualifiers
 
 	// Sub 42..43: the thirteenth EventData field. Same name/value pair shape
 	// as the twelve in 5..28, just at an index that did not require moving
 	// anything already named.
-	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(extraDataFieldName)})         // 42 Data[12] @Name
-	subs = append(subs, substitutionEntry{binXMLTypeString, encodeSubString(fields[extraDataFieldName])}) // 43 Data[12] value
+	c.str(binXMLTypeString, extraDataFieldName)         // 42 Data[12] @Name
+	c.str(binXMLTypeString, fields[extraDataFieldName]) // 43 Data[12] value
 
-	return subs
+	return c.finish()
 }
 
 // writeSubstitutionArray writes the substitution array after the template body.

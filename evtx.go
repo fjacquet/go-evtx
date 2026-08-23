@@ -24,6 +24,7 @@
 package evtx
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -163,10 +164,27 @@ type Writer struct {
 	// without this the tick would return immediately and the sealed chunk
 	// would wait for Close. Cleared by every successful f.Sync().
 	pendingSync bool
-	recordID    uint64   // monotonically incrementing record ID, starts at 1
-	firstID     uint64   // first record ID in current chunk
-	f           *os.File // open file handle; created in New(), closed in Close()
-	chunkCount  uint16   // number of COMPLETE chunks written to disk so far
+	// chunkScratch is a reused 64 KiB assembly buffer for the two flush paths,
+	// replacing a make() per flush.
+	//
+	// It MUST be cleared before each use. flushChunkLocked writes the whole
+	// chunk including its padding tail, and a reused buffer still holds the
+	// previous chunk's records — writing those into this chunk's padding would
+	// both leak data into the file and break byte-identity with v0.10.0, whose
+	// freshly allocated buffers were zero-filled.
+	chunkScratch []byte
+	// encodeScratch is the BinXML encoder's reused output buffer, passed to
+	// buildBinXMLInto by appendRecordLocked. It is a value rather than a
+	// pointer because it is only ever touched under w.mu.
+	//
+	// The encoded payload aliases it, so the payload must be copied before the
+	// next encode — wrapEventRecord already does that, and it is the only
+	// thing the writer keeps.
+	encodeScratch bytes.Buffer
+	recordID      uint64   // monotonically incrementing record ID, starts at 1
+	firstID       uint64   // first record ID in current chunk
+	f             *os.File // open file handle; created in New(), closed in Close()
+	chunkCount    uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -462,7 +480,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 // CALLER MUST HOLD w.mu.
 func (w *Writer) appendRecordLocked(eventID int, fields map[string]string) error {
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
-	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, w.chunkTemplateOffset)
+	res := buildBinXMLInto(&w.encodeScratch, eventID, w.recordID, fields, binXMLChunkOffset, w.chunkTemplateOffset)
 
 	// A record larger than a chunk can never be written. Splitting one logical
 	// event across chunks is not valid EVTX, so reject it and write nothing.
@@ -487,7 +505,7 @@ func (w *Writer) appendRecordLocked(eventID int, fields map[string]string) error
 		// declare one inline — passing the old chunk's offset here would point
 		// the instance at bytes belonging to a chunk that is already on disk.
 		binXMLChunkOffset = evtxRecordsStart + evtxRecordHeaderSize
-		res = buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, 0)
+		res = buildBinXMLInto(&w.encodeScratch, eventID, w.recordID, fields, binXMLChunkOffset, 0)
 
 		// The rebuilt payload must be re-checked, and this is not belt and
 		// braces: before F19 both builds were byte-identical in length, so the
@@ -862,6 +880,19 @@ func (w *Writer) queueFsyncLocked() {
 	}
 }
 
+// chunkScratchLocked returns a zeroed 64 KiB assembly buffer, allocating it on
+// first use. The clear is mandatory — see the field comment.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) chunkScratchLocked() []byte {
+	if w.chunkScratch == nil {
+		w.chunkScratch = make([]byte, evtxChunkSize)
+		return w.chunkScratch
+	}
+	clear(w.chunkScratch)
+	return w.chunkScratch
+}
+
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
 // padded 65536-byte EVTX chunk and patches the file header at offset 0. Under
 // SyncEveryChunk it then calls f.Sync() and only once the chunk is durable
@@ -888,7 +919,7 @@ func (w *Writer) flushChunkLocked() error {
 	freeSpaceOffset := uint32(recordsStart + len(records))
 	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
-	chunkBytes := make([]byte, evtxChunkSize)
+	chunkBytes := w.chunkScratchLocked()
 	copy(chunkBytes[0:], chunkHeader)
 	copy(chunkBytes[recordsStart:], records)
 
@@ -1043,7 +1074,7 @@ func (w *Writer) tickFlushLocked() error {
 	freeSpaceOffset := uint32(recordsStart + len(w.records))
 	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
-	chunkBytes := make([]byte, evtxChunkSize)
+	chunkBytes := w.chunkScratchLocked()
 	copy(chunkBytes[0:], chunkHeader)
 	copy(chunkBytes[recordsStart:], w.records)
 
