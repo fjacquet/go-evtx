@@ -450,6 +450,17 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		return err
 	}
 
+	return w.appendRecordLocked(eventID, fields)
+}
+
+// appendRecordLocked encodes one record and appends it to the pending chunk,
+// flushing and rebuilding if it will not fit. Shared by WriteRecord and
+// WriteRecords so the two cannot drift.
+//
+// The caller has already validated the fields.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) appendRecordLocked(eventID int, fields map[string]string) error {
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
 	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, w.chunkTemplateOffset)
 
@@ -502,6 +513,78 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
 	w.recordID++
+	return nil
+}
+
+// RecordInput is one event for WriteRecords: the same two arguments
+// WriteRecord takes, in a struct so a slice of them can be passed at once.
+type RecordInput struct {
+	EventID int
+	Fields  map[string]string
+}
+
+// WriteRecords writes a batch of events under a single lock acquisition.
+//
+// Every record is validated before any record is encoded, so a batch
+// containing an invalid record writes nothing at all and returns an error
+// naming that record's index. The checks are the same ones WriteRecord makes —
+// a non-empty ProviderName, parseable numeric <System> fields, and a payload
+// that fits in a chunk — with the size check made against an analytic upper
+// bound (estimateMaxPayload) rather than by encoding, since encoding to find
+// out would defeat the guarantee.
+//
+// The all-or-nothing guarantee covers validation, not I/O. A batch larger than
+// one chunk seals chunks as it goes, which is normal; if a write fails partway
+// through, the records already committed to earlier chunks stay written. The
+// error says which record was reached.
+//
+// An empty or nil slice is a no-op returning nil.
+//
+// The Fields maps are read during the call and not retained. As with
+// WriteRecord, the caller must not mutate them concurrently.
+//
+// WriteRecords must not be mixed with WriteRaw in the same session, the same
+// restriction WriteRecord carries.
+func (w *Writer) WriteRecords(recs []RecordInput) error {
+	if len(recs) == 0 {
+		return nil
+	}
+
+	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
+	defer w.mu.Unlock()
+
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
+
+	// Validate the whole batch before encoding any of it. Nothing below this
+	// loop can reject a record, which is what makes the guarantee true.
+	for i, rec := range recs {
+		if rec.Fields["ProviderName"] == "" {
+			return fmt.Errorf("go_evtx: record %d: %w", i, ErrMissingProviderName)
+		}
+		if err := validateSystemFields(rec.Fields); err != nil {
+			return fmt.Errorf("go_evtx: record %d: %w", i, err)
+		}
+		if est := estimateMaxPayload(rec.EventID, w.recordID, rec.Fields); est > maxRecordPayload {
+			return fmt.Errorf("go_evtx: record %d: %w: estimated payload %d bytes exceeds maximum %d",
+				i, ErrRecordTooLarge, est, maxRecordPayload)
+		}
+	}
+
+	// Size-based rotation, once for the batch rather than per record.
+	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
+		if err := w.rotate(); err != nil {
+			return err
+		}
+	}
+
+	for i, rec := range recs {
+		if err := w.appendRecordLocked(rec.EventID, rec.Fields); err != nil {
+			return fmt.Errorf("go_evtx: record %d: %w", i, err)
+		}
+	}
 	return nil
 }
 
