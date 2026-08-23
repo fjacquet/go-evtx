@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -72,6 +73,46 @@ func validateSystemFields(fields map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// templateBodySize is the encoded length of the fixed <Event> template body.
+// It is constant for a given build, and computed from buildTemplateBody itself
+// rather than written down, so it cannot drift when the template changes.
+//
+// The offset passed here only affects the name offsets written inside the
+// body, never its length.
+var templateBodySize = sync.OnceValue(func() int {
+	var names []chunkRef
+	return len(buildTemplateBody(evtxRecordsStart+evtxRecordHeaderSize+preambleSize, &names))
+})
+
+// estimateMaxPayload returns an upper bound on len(buildBinXML(...).payload)
+// for the same arguments, without encoding the record.
+//
+// WriteRecords needs this because ErrRecordTooLarge is otherwise only knowable
+// after encoding, and discovering it mid-batch would break the all-or-nothing
+// validation contract. The bound must never be below the real size: an
+// under-estimate lets an oversized record reach the chunk buffer.
+//
+// It is derived from the encoder's own pieces — the preamble constants, the
+// template body's real length, and the substitution array the record would
+// actually produce — plus slack for the fragment EOF token and its 8-alignment
+// padding. The inline-template case is the larger of the two encodings, so
+// bounding it bounds both.
+func estimateMaxPayload(eventID int, recordID uint64, fields map[string]string) int {
+	subs := collectSubstitutionsFromFields(eventID, recordID, fields)
+
+	// Substitution array: count, then a 4-byte descriptor per entry, then the
+	// value bytes themselves.
+	arraySize := 4 + 4*len(subs)
+	for _, s := range subs {
+		arraySize += len(s.data)
+	}
+
+	// preambleSize covers the fragment header, the template instance node and
+	// the template node header. The trailing 8 bytes bound the EOF token plus
+	// at most 7 bytes of alignment padding.
+	return preambleSize + templateBodySize() + arraySize + 8
 }
 
 // BinXML token type constants (per libevtx / MS-EVEN6 specification).
