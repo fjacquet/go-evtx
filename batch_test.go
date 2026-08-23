@@ -299,3 +299,61 @@ func TestWriteRecords_ConcurrentWithWriteRecord(t *testing.T) {
 		t.Fatalf("read %d records, wrote %d", count, want)
 	}
 }
+
+// TestWriteRecords_RotatesLikeIndividualWrites is the regression test for
+// Finding 1 of the task-4 review: a size-based rotation check hoisted to run
+// once per WriteRecords call, instead of once per record, lets a single
+// batch call grow the active file arbitrarily far past MaxFileSizeMB, while
+// the same records through WriteRecord would have rotated several times.
+// That breaks both MaxFileCount-driven archive retention and the plan's
+// byte-identical-output requirement. This asserts WriteRecords produces the
+// same number of archives as N sequential WriteRecord calls under an
+// identical MaxFileSizeMB config.
+func TestWriteRecords_RotatesLikeIndividualWrites(t *testing.T) {
+	const n = 4000 // matches rotation_test.go's TestWriter_SizeRotation margin
+
+	fields := func() map[string]string {
+		return batchFields("/nas/share/file.txt")
+	}
+
+	batchDir := t.TempDir()
+	batchPath := filepath.Join(batchDir, "batch_rot.evtx")
+	wb, err := New(batchPath, RotationConfig{MaxFileSizeMB: 1})
+	if err != nil {
+		t.Fatalf("New batch: %v", err)
+	}
+	recs := make([]RecordInput, 0, n)
+	for i := 0; i < n; i++ {
+		recs = append(recs, RecordInput{EventID: 4663, Fields: fields()})
+	}
+	if err := wb.WriteRecords(recs); err != nil {
+		t.Fatalf("WriteRecords: %v", err)
+	}
+	if err := wb.Close(); err != nil {
+		t.Fatalf("batch Close: %v", err)
+	}
+
+	oneDir := t.TempDir()
+	onePath := filepath.Join(oneDir, "batch_rot.evtx")
+	wo, err := New(onePath, RotationConfig{MaxFileSizeMB: 1})
+	if err != nil {
+		t.Fatalf("New single: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		if err := wo.WriteRecord(4663, fields()); err != nil {
+			t.Fatalf("WriteRecord %d: %v", i, err)
+		}
+	}
+	if err := wo.Close(); err != nil {
+		t.Fatalf("single Close: %v", err)
+	}
+
+	batchArchives := archiveGlob(batchDir, "batch_rot")
+	oneArchives := archiveGlob(oneDir, "batch_rot")
+	if len(batchArchives) != len(oneArchives) {
+		t.Fatalf("archive count differs: WriteRecords produced %d (%v), "+
+			"WriteRecord loop produced %d (%v) — size-based rotation is not "+
+			"being applied per record inside the batch",
+			len(batchArchives), batchArchives, len(oneArchives), oneArchives)
+	}
+}

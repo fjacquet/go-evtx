@@ -545,17 +545,28 @@ type RecordInput struct {
 //
 // WriteRecords must not be mixed with WriteRaw in the same session, the same
 // restriction WriteRecord carries.
+//
+// The size check is stricter than WriteRecord's: it validates against
+// estimateMaxPayload, an analytic upper bound sized for the worst case where
+// the record's BinXML template must be inlined rather than referencing one
+// already in the chunk. WriteRecord's own first check instead sizes the
+// cheaper reference-encoding it will actually attempt first, which runs
+// roughly 2 KB smaller. A record whose reference encoding lands in
+// approximately the top 2 KB of maxRecordPayload is therefore accepted by
+// WriteRecord but rejected by WriteRecords — a deliberate, safe divergence:
+// validating the whole batch before encoding any of it requires a bound that
+// holds regardless of which chunk state a given record lands in.
 func (w *Writer) WriteRecords(recs []RecordInput) error {
-	if len(recs) == 0 {
-		return nil
-	}
-
 	w.mu.Lock()
 	defer w.drainFsyncCallbacks()
 	defer w.mu.Unlock()
 
 	if err := w.checkStateLocked(); err != nil {
 		return err
+	}
+
+	if len(recs) == 0 {
+		return nil
 	}
 
 	// Validate the whole batch before encoding any of it. Nothing below this
@@ -573,14 +584,22 @@ func (w *Writer) WriteRecords(recs []RecordInput) error {
 		}
 	}
 
-	// Size-based rotation, once for the batch rather than per record.
-	if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
-		if err := w.rotate(); err != nil {
-			return err
-		}
-	}
-
 	for i, rec := range recs {
+		// Size-based rotation check: rotate before adding more data, exactly as
+		// WriteRecord does per call. Checked per record rather than once for
+		// the whole batch — hoisting it, as an earlier version of this method
+		// did, let a single large batch grow the active file arbitrarily far
+		// past MaxFileSizeMB (w.currentSize only advances inside
+		// flushChunkLocked, so nothing re-triggers rotation mid-batch without
+		// this), breaking both MaxFileCount-driven retention and the
+		// byte-identical-output guarantee against N individual WriteRecord
+		// calls under the same config. See
+		// TestWriteRecords_RotatesLikeIndividualWrites.
+		if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
+			if err := w.rotate(); err != nil {
+				return fmt.Errorf("go_evtx: record %d: %w", i, err)
+			}
+		}
 		if err := w.appendRecordLocked(rec.EventID, rec.Fields); err != nil {
 			return fmt.Errorf("go_evtx: record %d: %w", i, err)
 		}
