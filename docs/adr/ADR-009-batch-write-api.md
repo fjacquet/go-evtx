@@ -296,8 +296,16 @@ caller who wants per-record outcomes already has `WriteRecord` in a loop.
 unbounded memory, and the format's chunk granularity means the "transaction"
 would still be committed in 64 KiB pieces. See Decision 2.
 
-**A fuzz target on `estimateMaxPayload` versus the real encoder.** Proposed in
-the design spec, not shipped in this release. `estimate_test.go`'s
-table-driven upper-bound assertion covers the cases the encoder actually
-distinguishes; a fuzz target remains a reasonable addition if the estimator
-and the encoder ever gain independent code paths.
+**Relying on the table-driven bound test alone.** Rejected. The design spec
+proposed a fuzz target against the real encoder and it **shipped**:
+`estimate_test.go` carries both `TestEstimateMaxPayload_IsUpperBound` (the
+table of cases the encoder actually distinguishes, which also asserts the
+bound is not absurdly loose) and `FuzzEstimateMaxPayload_IsUpperBound`, which
+seeds ASCII, non-BMP runes, empty strings and oversize values and then asserts
+`est >= len(buildBinXML(...).payload)` for both `shared = 0` (inline template)
+and `shared = 512` (backward reference). The property is the one the
+all-or-nothing contract rests on, and a table of hand-picked cases is exactly
+the kind of evidence this repository has learned not to trust on its own — an
+under-estimate is checksum-invisible, so the guard has to explore inputs
+nobody thought of. The one thing not done is running the fuzz target as a
+long-running corpus job in CI; it runs its seeds on every `go test`.
