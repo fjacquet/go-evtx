@@ -10,7 +10,6 @@ package evtx
 
 import (
 	"bytes"
-	"encoding/binary"
 	"unicode/utf16"
 )
 
@@ -232,8 +231,21 @@ func writeNameNode(b *bytes.Buffer, name string, binXMLBase uint32, refs *[]chun
 	writeUint16LE(b, 0) // null terminator
 }
 
-// encodeSubString encodes a string as raw UTF-16LE for use in the
+// appendUTF16LE appends s to dst as raw UTF-16LE for use in the
 // substitution value data, WITHOUT a null terminator.
+//
+// It appends rather than returning a fresh slice so the whole substitution
+// array's value data lands in one arena: encoding each value separately cost
+// three allocations per string (the []rune conversion, utf16.Encode's result,
+// and the byte buffer) and roughly 22 strings per record, which dominated
+// WriteRecord's allocation count.
+//
+// The bytes are identical to the previous utf16.Encode([]rune(s)) form.
+// Ranging a string yields exactly what []rune(s) yields — invalid UTF-8, an
+// unpaired surrogate encoded as UTF-8 included, decodes to utf8.RuneError
+// (U+FFFD), which is also what utf16.Encode substitutes — so neither the
+// surrogate-range nor the out-of-range case utf16.Encode guards against can
+// reach here.
 //
 // F15 (Task 8f): real Windows never null-terminates a String-typed
 // substitution-array VALUE — confirmed independently against
@@ -255,13 +267,16 @@ func writeNameNode(b *bytes.Buffer, name string, binXMLBase uint32, refs *[]chun
 // exactly. writeNameNode's own terminator is therefore untouched by this
 // change — only this function, which feeds substitution-array value data,
 // changes.
-func encodeSubString(s string) []byte {
-	u16 := utf16.Encode([]rune(s))
-	buf := make([]byte, len(u16)*2)
-	for i, v := range u16 {
-		binary.LittleEndian.PutUint16(buf[i*2:], v)
+func appendUTF16LE(dst []byte, s string) []byte {
+	for _, r := range s {
+		if r > 0xFFFF {
+			r1, r2 := utf16.EncodeRune(r)
+			dst = append(dst, byte(r1), byte(r1>>8), byte(r2), byte(r2>>8))
+			continue
+		}
+		dst = append(dst, byte(r), byte(r>>8))
 	}
-	return buf
+	return dst
 }
 
 // ---------------------------------------------------------------------------
@@ -278,16 +293,4 @@ func writeUint32LE(b *bytes.Buffer, v uint32) {
 	_ = b.WriteByte(byte(v >> 8))
 	_ = b.WriteByte(byte(v >> 16))
 	_ = b.WriteByte(byte(v >> 24))
-}
-
-func uint16LEBytes(v uint16) []byte {
-	buf := make([]byte, 2)
-	binary.LittleEndian.PutUint16(buf, v)
-	return buf
-}
-
-func uint64LEBytes(v uint64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, v)
-	return buf
 }

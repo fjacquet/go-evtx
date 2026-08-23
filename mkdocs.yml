@@ -30,7 +30,11 @@ nav:
       - ADR-002 Layered API (WriteRaw / WriteRecord): adr/ADR-002-layered-api-writeraw-writerecord.md
       - ADR-003 Write-on-close model: adr/ADR-003-write-on-close-model.md
       - ADR-004 Open-handle incremental flush: adr/ADR-004-open-handle-incremental-flush.md
+      - ADR-005 Ship CLI binaries: adr/ADR-005-ship-cli-binaries.md
+      - ADR-006 Corpus-derived format method: adr/ADR-006-corpus-derived-format-method.md
       - ADR-007 Incremental tick flush: adr/ADR-007-incremental-tick-flush.md
+      - ADR-008 Sync policy and group commit: adr/ADR-008-sync-policy-group-commit.md
+      - ADR-009 The WriteRecords batch API: adr/ADR-009-batch-write-api.md
 
 extra:
-  version: v0.10.0
+  version: v0.11.0

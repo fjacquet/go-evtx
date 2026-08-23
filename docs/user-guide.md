@@ -146,6 +146,57 @@ BinXML payload — for example, one read back out with `ReadRaw` from another
 file. Do not mix `WriteRecord` and `WriteRaw` calls within the same `Writer`
 session.
 
+### Writing a batch: `WriteRecords`
+
+Since v0.11.0, `WriteRecords` takes a slice of events and writes them under a
+single lock acquisition:
+
+```go
+recs := []evtx.RecordInput{
+    {EventID: 4663, Fields: fields},
+    {EventID: 4625, Fields: otherFields},
+}
+if err := w.WriteRecords(recs); err != nil {
+    // e.g. "go_evtx: record 1: go_evtx: ProviderName must not be empty"
+    log.Fatal(err)
+}
+```
+
+`RecordInput` is exactly `WriteRecord`'s two arguments in a struct, and a nil
+or empty slice is a no-op returning nil.
+
+**All-or-nothing validation.** Every record in the slice is validated before
+any record is encoded, so a batch containing one bad record writes *nothing*
+and returns an error naming that record's index — `go_evtx: record 3: …`. The
+checks are the same ones `WriteRecord` makes: a non-empty `ProviderName`, the
+numeric `<System>` fields parsing, and a payload that fits in a chunk.
+
+**The guarantee covers validation, not I/O.** A batch larger than one chunk
+seals chunks as it goes, which is normal. If a *write* fails partway through,
+the records already committed to earlier chunks stay written, and the error
+says which record was reached. `WriteRecords` is not a transaction against the
+disk.
+
+**`WriteRecords` is not faster per record — it is measurably slower.** At a
+batch size of 100 it runs roughly **1.4x slower per record** than 100
+sequential `WriteRecord` calls (3934 vs 2770 ns/op under an identical sync
+policy), because the validation pre-pass builds each record's substitution
+values once to size them and the encode then builds them again. What
+`WriteRecords` buys is the all-or-nothing guarantee and one lock acquisition
+per batch. Choose it for the contract, not for throughput. See
+[ADR-009](adr/ADR-009-batch-write-api.md) and
+[`perf-baseline.md`](perf-baseline.md).
+
+One deliberate divergence: `WriteRecords`'s size check is stricter than
+`WriteRecord`'s. It validates against an analytic upper bound sized for the
+worst case where the record's template must be inlined rather than referencing
+one already in the chunk, which runs roughly 2 KB larger. A record whose
+payload lands in approximately the top 2 KB of the 64 996-byte limit is
+therefore accepted by `WriteRecord` and rejected by `WriteRecords`.
+
+Like `WriteRecord`, `WriteRecords` must not be mixed with `WriteRaw` in the
+same session.
+
 ## 4. Rotation
 
 `New(path, cfg)` starts a background goroutine whenever any tick-driven field
@@ -157,7 +208,12 @@ of `RotationConfig` is set:
 | `MaxFileSizeMB` | 0 = disabled; rotate when the file reaches N MiB (checked on write) |
 | `MaxFileCount` | 0 = unlimited; keep only the N newest archives |
 | `RotationIntervalH` | 0 = disabled; rotate every N hours |
+| `SyncPolicy` | `SyncEveryChunk` (zero value) or `SyncOnTick`; see [§8](#8-choosing-a-syncpolicy) |
 | `OnFsync func(time.Time)` | nil = none; called after each successful `f.Sync()` |
+
+`RotationConfig` gained `SyncPolicy` in v0.11.0. Keyed struct literals — which
+is how every example here and in the godoc writes it — are unaffected; an
+unkeyed literal would not compile.
 
 A rotation flushes any pending records, syncs and closes the active file,
 commits it as an archive, then opens and syncs a fresh replacement at the
@@ -323,6 +379,13 @@ subsequent call — `WriteRecord`, `WriteRaw`, `Rotate`, `Close` — returns it.
 There is no automatic recovery. A half-rotated directory needs an operator to
 inspect it and a new `Writer` to resume writing.
 
+Under `SyncOnTick` ([§8](#8-choosing-a-syncpolicy)) this error arrives later
+than you might expect. A chunk's fsync happens on the background tick, so a
+failing sync has no caller to be returned to and sets the sticky error there —
+the write that lost the data succeeded, and a later, unrelated call fails.
+That has always been true of the background flush; `SyncOnTick` makes it the
+normal path for chunk durability rather than an edge case.
+
 ## Choosing FlushIntervalSec
 
 `FlushIntervalSec` sets how long a record can sit in memory before it is
@@ -364,3 +427,77 @@ on `Close()`.
 
 Measured figures are in [`perf-baseline.md`](perf-baseline.md); the reasoning is
 in [ADR-007](adr/ADR-007-incremental-tick-flush.md).
+
+## 8. Choosing a `SyncPolicy`
+
+`SyncPolicy` decides when the writer calls `f.Sync()`. It is new in v0.11.0
+and its zero value is the behaviour go-evtx has always had, so doing nothing
+keeps today's semantics exactly.
+
+| Policy | When it fsyncs | Crash-loss window |
+|---|---|---|
+| `SyncEveryChunk` (zero value, default) | every sealed 64 KiB chunk, before committing it | at most one chunk — roughly 81 records |
+| `SyncOnTick` | on the flush tick, on `Rotate()`, and on `Close()` | up to `FlushIntervalSec` seconds of arrivals |
+
+```go
+w, err := evtx.New("/var/log/audit.evtx", evtx.RotationConfig{
+    SyncPolicy:       evtx.SyncOnTick,
+    FlushIntervalSec: 1, // required: SyncOnTick without a tick is rejected by New
+})
+```
+
+**`SyncOnTick` requires `FlushIntervalSec > 0`.** `New` returns an error
+otherwise, rather than picking a default: with no tick the only remaining sync
+points are `Rotate()` and `Close()`, which a long-running daemon may not reach
+for hours, and the loss window would be unbounded rather than merely large.
+
+**What it buys.** Measured on `darwin/arm64 M1 Pro, APFS, go1.27.0`:
+2770 ns/op under `SyncOnTick` against 77 373 ns/op under `SyncEveryChunk` —
+**about 27.9x** — with 1 total fsync across the benchmark run instead of one
+per ~81 records. The ratio is darwin-specific (`f.Sync()` there is
+`F_FULLFSYNC`, roughly an order of magnitude more expensive than a Linux
+`fsync`), and the measurement machine was loaded; see
+[`perf-baseline.md`](perf-baseline.md) for the methodology note.
+
+**What it costs.** Three things, and all three matter:
+
+1. **The loss window widens to `FlushIntervalSec`.** It is now a *time*, not a
+   record count: at 10 events/sec and `FlushIntervalSec: 1` that is about 10
+   records, but at 10 000 events/sec it is 10 000.
+2. **A `Sync` failure surfaces at tick time**, on the background goroutine,
+   which has no caller to return it to — so it sets the sticky error, and the
+   *next* `WriteRecord`, `WriteRaw` or `Rotate` from any goroutine gets it
+   back. The call that actually lost the data succeeded. `OnFsync`
+   correspondingly fires less often and its timestamps are no longer
+   per-chunk.
+3. **A power loss can leave a file a parser rejects, not merely a short one.**
+   Under `SyncOnTick` the chunk bytes and the file header that advertises them
+   are both written with no sync in between and none after, so writeback may
+   commit them in either order. A torn power-loss image can show a header
+   claiming a chunk whose bytes never landed. A process crash is fine under
+   both policies — the page cache still holds both writes.
+
+Keep `SyncEveryChunk` for anything that is evidence. Choose `SyncOnTick` when
+the writer is on the hot path of a high-rate collector, the events are
+reproducible or replayable upstream, and you have set `FlushIntervalSec` to a
+window you are willing to lose. The reasoning is in
+[ADR-008](adr/ADR-008-sync-policy-group-commit.md).
+
+## 9. Memory per `Writer`
+
+v0.11.0's allocation work moved per-call scratch onto the `Writer`, which cut
+`BenchmarkWriteRecord` from **60 to 5 allocs/op** (`B/op` from 6822 to 5033) on
+`darwin/arm64 M1 Pro, APFS, go1.27.0` — the v0.10.0 row at commit `d8a85e4`
+against the v0.11.0 row, both in
+[`docs/perf-baseline.md`](perf-baseline.md). The buffers are retained for the
+`Writer`'s lifetime:
+
+- **64 KiB** for the chunk assembly buffer, allocated on the first flush.
+- A BinXML encode buffer grown to the **largest record encoded so far** and
+  never shrunk — typically a few KiB, bounded above by the 64 996-byte maximum
+  record payload.
+
+So budget roughly **64 KiB per `Writer`** in steady state, rising toward
+**128 KiB** for a writer that has encoded a near-chunk-sized record. This was
+previously near zero between calls, so a process holding many concurrent
+`Writer`s — one per channel, one per tenant — should size for it.

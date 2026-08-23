@@ -33,11 +33,11 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 | File | Purpose |
 |------|---------|
-| `evtx.go` | Writer API: `Writer`, `New()`, `WriteRecord()`, `WriteRaw()`, `Rotate()`, `Close()`, `RotationConfig`, rotation and background-goroutine logic. Since v0.10.0 also carries the incremental tick state (`tickWrittenLen`, `slotExtended`) and `tickFlushLocked()` — see [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md) |
+| `evtx.go` | Writer API: `Writer`, `New()`, `WriteRecord()`, `WriteRecords()`/`RecordInput`, `WriteRaw()`, `Rotate()`, `Close()`, `RotationConfig`, rotation and background-goroutine logic. Since v0.10.0 also carries the incremental tick state (`tickWrittenLen`, `slotExtended`) and `tickFlushLocked()` — see [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md). Since v0.11.0 also carries `SyncPolicy`/`pendingSync` group commit ([ADR-008](docs/adr/ADR-008-sync-policy-group-commit.md)), the shared `appendRecordLocked()` encode path behind both write entry points ([ADR-009](docs/adr/ADR-009-batch-write-api.md)), and the reused `chunkScratch`/`encodeScratch` buffers |
 | `errors.go` | Sentinel errors (`ErrClosed`, `ErrRecordTooLarge`) and capacity limits (`maxChunkPayload`, `maxRecordPayload`) |
 | `reader.go` | Reader API: `Reader`, `Record`, `Open()`, `ReadRecord()`, `ReadRaw()`, `Close()`, `ErrNoMoreRecords` |
 | `binformat.go` | Binary format helpers: file/chunk headers, event record wrapper, CRC32, `toFILETIME`/`fromFILETIME`, UTF-16LE encoding |
-| `binxml.go` | BinXML encoder, record assembly: `buildBinXML`, the substitution array, the substitution index map |
+| `binxml.go` | BinXML encoder, record assembly: `buildBinXML`/`buildBinXMLInto`, the substitution array and its single-arena collector (`subCollector`), the substitution index map, and `estimateMaxPayload` — the analytic payload upper bound `WriteRecords` validates against, derived from `templateBodySize()` and the real substitution entries rather than from constants |
 | `binxml_template.go` | The `<Event>` template body — which element gets which token, in which order, with which substitution index. **This is the file a format fix touches.** `fieldPatch` back-patching for `data_size`/`attr_list_size` lives here |
 | `binxml_tokens.go` | The token writers and little-endian helpers. Knows nothing about `<System>`; writes one token as the format defines it |
 | `binxml_reader.go` | BinXML decoder: `decodeBinXML()`, substitution array parser, UTF-16LE decoder |
@@ -63,7 +63,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `example_test.go` | Godoc examples |
 | `reader_concurrency_test.go` | `Reader` is safe for concurrent use: parallel callers, `r.mu` held for each exported method |
 | `flush_atomicity_test.go` | `flushChunkLocked` commits `chunkCount`/`currentSize`/`records`/`firstID`/`lastRecordOffset` together or not at all |
-| `onfsync_test.go` | `OnFsync` fires on every sync, and outside `w.mu` |
+| `onfsync_test.go` | `OnFsync` fires on every sync, outside `w.mu`, and on `rotate`'s own sync under both sync policies |
 | `evtx_unix_test.go` / `evtx_windows_test.go` | `isLinkUnsupported` classification per platform |
 | `chunkhash_test.go` | Bucket rules validated against `$EVTX_FIXTURE` (skips without one); the template GUID rule is 3.1-only and skips on 3.2; `fillHashTables` unit tests |
 | `nodecollect_test.go` | `buildBinXML` reports NameNode/TemplateNode offsets; `goldenFields()` lives here |
@@ -75,11 +75,26 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 | `namespace_test.go` | The `<Event>` root declares the event schema namespace |
 | `system_test.go` | `<System>` children, their value types and optional substitutions |
 | `tickflush_test.go` | Incremental background tick: idle writes nothing, file stays chunk-aligned, incremental round-trip, crash snapshot, hash tables populated after a mid-session tick, the byte-identity invariant against a no-tick writer, and `TestWrittenFile_EventRecordsCRCMatchesRecords` — the records-CRC property asserted against a written file |
-| `bench_test.go` | Writer throughput benchmarks backing `docs/perf-baseline.md` |
+| `bench_test.go` | Writer throughput benchmarks backing `docs/perf-baseline.md`, including the `SyncOnTick`, batch and estimator rows |
+| `syncpolicy_test.go` | `SyncPolicy`: the zero value is `SyncEveryChunk`, `New` rejects `SyncOnTick` without a tick, `SyncOnTick` fsyncs fewer times, output is byte-identical across policies, and `TestSyncPolicy_TickSyncsASealedChunkWithNoPendingRecords` — the `pendingSync` hole, which no continuously-writing test can reach |
+| `batch_test.go` | `WriteRecords`: byte-identical to N `WriteRecord` calls, empty slice is a no-op, an invalid record writes nothing, batches spanning chunks, concurrency with `WriteRecord`, and `TestWriteRecords_RotatesLikeIndividualWrites` — the per-record `MaxFileSizeMB` check |
+| `estimate_test.go` | `estimateMaxPayload` is a true upper bound on the encoded payload, and is not absurdly loose — plus `FuzzEstimateMaxPayload_IsUpperBound`, which fuzzes the bound against the real encoder for both the inline-template (`shared = 0`) and backward-reference (`shared = 512`) encodings. Its seeds run on every `go test`; it is not run as a long-running corpus job in CI |
+| `alloc_test.go` | Allocation ceilings and buffer-reuse safety: no stale bytes in chunk padding, `buildBinXML`'s payload survives the next encode (the aliasing hazard), `TestWriteRecord_AllocationCeiling`, and `appendUTF16LE` against an oracle |
 
 **Write data flow:**
 
-1. `buildBinXML()` → constructs a BinXML fragment using a fixed template with 42 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value, plus 13 more added in v0.7.0/Task 8b/8c to round `<System>` out to match a real Windows record — see the index map below)
+0. `WriteRecord` and `WriteRecords` both validate first (`ProviderName`
+   non-empty, `validateSystemFields`) and then call the single shared
+   `appendRecordLocked()`, so the two entry points cannot produce different
+   bytes — the identity is structural, not merely asserted by a test.
+   `WriteRecords` validates the *whole* slice before encoding any of it, using
+   `estimateMaxPayload` for the size check because `ErrRecordTooLarge` is
+   otherwise only knowable after encoding and discovering it mid-batch would
+   break the all-or-nothing contract. That bound covers the inline-template
+   worst case, so it is ~2 KB stricter than `WriteRecord`'s own post-encode
+   check — a deliberate divergence. See
+   [ADR-009](docs/adr/ADR-009-batch-write-api.md).
+1. `buildBinXML()`/`buildBinXMLInto()` → constructs a BinXML fragment using a fixed template with 42 substitution slots (ProviderName, EventID, Level, SystemTime, Computer, 12×data name+value, plus 13 more added in v0.7.0/Task 8b/8c to round `<System>` out to match a real Windows record — see the index map below). Since v0.11.0 `appendRecordLocked` encodes into the writer-owned `w.encodeScratch`, so `res.payload` **aliases a reused buffer** and is invalid after the next encode. It is consumed synchronously by `wrapEventRecord`, and the bytes are then owned by `w.records` via `append(w.records, rec...)` — **that append, not `wrapEventRecord`'s copy, is the mechanism**: rewriting `wrapEventRecord` to build into a reused buffer passes the whole suite. `res.payload` has no reachable path to outliving the next encode, so no test guards the copy; `TestWriteRecord_EarlierRecordSurvivesNextEncode` guards the decoded output instead
 2. `wrapEventRecord()` → wraps BinXML payload in a 24-byte event record header (signature, size, recordID, FILETIME timestamp)
 3. Records appended to the `Writer.records` byte buffer (the pending chunk)
 4. The buffer is committed as a chunk by `flushChunkLocked()` when it fills, by
@@ -99,6 +114,21 @@ This is a single-package Go library (`package evtx`) with zero external dependen
    `w.records` and no checksum accumulated over `w.records` can match the bytes
    on disk. v0.10.0 briefly shipped exactly that mistake and reverted it. See
    [ADR-007](docs/adr/ADR-007-incremental-tick-flush.md).
+5. Both flush paths assemble into the one reused 64 KiB `w.chunkScratch`,
+   obtained through `chunkScratchLocked()`, which **clears it before every
+   use**. There is no separate header-sized scratch — `fillHashTables` needs
+   the full-size buffer — and skipping the clear would write the previous
+   chunk's records into this chunk's padding tail, leaking data and breaking
+   byte-identity with v0.10.0's zero-filled fresh buffers.
+6. Under `SyncPolicy: SyncOnTick`, `flushChunkLocked` still writes the chunk
+   and patches the file header but skips `f.Sync()`, setting `w.pendingSync`
+   instead; the flush tick, `rotate()` Step 3 and `finalizeLocked` each sync
+   unconditionally and clear it. `tickFlushLocked` discharges `w.pendingSync`
+   as its **first** action, ahead of both of its early returns — a burst that
+   seals a chunk and then goes quiet leaves `w.records` empty, so a flag
+   checked after those returns would never be reached and the sealed chunk
+   would wait for `Close()`: the unbounded window `New` refuses to configure.
+   See [ADR-008](docs/adr/ADR-008-sync-policy-group-commit.md).
 
 **Read data flow:**
 
@@ -109,7 +139,7 @@ This is a single-package Go library (`package evtx`) with zero external dependen
 
 ## `cmd/` — two fixture generators
 
-Neither is shipped: `.goreleaser.yaml` sets `builds: [{skip: true}]` because this is a library. They exist so a CI job can produce a specific `.evtx` file and a Windows runner can report whether it parses.
+Neither is shipped, but not because nothing is: `.goreleaser.yaml` names `./cmd/evtx` as the one `main` package it builds, and naming it explicitly is what keeps these two fixture generators out of the release. (The claim that the config sets `builds: [{skip: true}]` was true when the library shipped no binaries; it has not been true since ADR-005, and the v0.10.0 release carried 7 assets.) They exist so a CI job can produce a specific `.evtx` file and a Windows runner can report whether it parses.
 
 | Command | Role |
 |---|---|
@@ -180,6 +210,7 @@ This format was implemented against another parser's behaviour before it was imp
 | `MaxFileSizeMB` | 0 = disabled; rotate when the file reaches N MiB (checked on write) |
 | `MaxFileCount` | 0 = unlimited; keep only the N newest archives |
 | `RotationIntervalH` | 0 = disabled; rotate every N hours |
+| `SyncPolicy` | `SyncEveryChunk` (zero value; fsync per sealed chunk) or `SyncOnTick` (group commit; `New` errors without `FlushIntervalSec > 0`) — see [ADR-008](docs/adr/ADR-008-sync-policy-group-commit.md) |
 | `OnFsync func(time.Time)` | nil = none; called after each successful `f.Sync()` |
 
 `rotate()` is transactional: flush pending records → skip if nothing was ever written → `Sync` and close the active file → commit the archive with `os.Link` then unlink the active path (`os.Rename` would silently replace an existing archive; `Link` fails atomically instead, with a `Stat`+`Rename` fallback where hard links are unsupported) → open and `Sync` a replacement file → `syncDir()` → reset counters → enforce `MaxFileCount`.
@@ -189,19 +220,22 @@ Archive names are `base-2006-01-02T15-04-05.000000000.evtx` (nanosecond-resoluti
 ## Key constraints
 
 - **Records larger than a chunk are rejected, never truncated.** `maxChunkPayload` = 65024 (`evtxChunkSize - evtxRecordsStart`); `maxRecordPayload` = 64996 (`maxChunkPayload - evtxRecordHeaderSize - 4`). `WriteRecord`/`WriteRaw` return an error wrapping `ErrRecordTooLarge` and write nothing. Truncating would be checksum-invisible: the CRCs are computed over the corrupt bytes and verify.
-- **`WriteRecord` and `WriteRaw` must not be mixed in the same session.**
+- **`WriteRecord`/`WriteRecords` and `WriteRaw` must not be mixed in the same session.**
+- **`WriteRecords` is all-or-nothing against *validation*, not against the disk.** A batch spanning chunks seals them as it goes; a write failure partway through leaves earlier records written, and the error names the index reached. It is also **slower per record** than sequential `WriteRecord` calls — ~1.4x at batch size 100 (3934 vs 2770 ns/op, matched sync policy) — because `estimateMaxPayload` collects each record's substitutions to size them and `appendRecordLocked` then collects them again. What it buys is the contract and one lock acquisition per batch, not throughput. Collecting once is the obvious follow-up.
+- **Each `Writer` retains ~64 KiB (`chunkScratch`) after its first flush, plus an `encodeScratch` grown to the largest record it has encoded** — roughly a 128 KiB/writer ceiling, against near-zero before v0.11.0. The substitution arena in `collectSubstitutionsFromFields` is per-call and adds nothing to that.
 - **File is only created if at least one record was written** — an empty session removes the placeholder on `Close()`.
 - Reader supports multi-chunk files (Windows-generated); the decoder targets our own template format.
 
 ## Concurrency and lifecycle
 
 - `Writer` is concurrency-safe (mutex-guarded). Unexported helpers whose name ends `Locked` require the caller to hold `w.mu` and carry a `// CALLER MUST HOLD w.mu.` comment.
-- **`rotate()` requires `w.mu` held by the caller and must never acquire it itself.** Every caller (`Rotate`, `WriteRecord`, `WriteRaw`, the background rotation tick) holds it.
+- **`rotate()` requires `w.mu` held by the caller and must never acquire it itself.** Every caller (`Rotate`, `WriteRecord`, `WriteRecords` — from its per-record `MaxFileSizeMB` branch — `WriteRaw`, and the background rotation tick) holds it.
 - `Close()` is idempotent via `closeOnce sync.Once`; concurrent callers block until the first completes and all observe the same result.
 - **Sticky error.** Once durability can no longer be guaranteed (a rotation that failed after closing the active file, or a failed background flush), `w.err` is set permanently and every entry point returns it. There is no automatic recovery — a half-rotated directory needs an operator and a new `Writer`. A transient I/O failure inside `flushChunkLocked` before that point (e.g. a `WriteAt` or `Sync` that fails while the file handle is still valid) is *not* sticky and is safe to retry — `rotate()`'s Step 1 comment calls this out explicitly. `chunkCapacityLocked`'s chunk-count ceiling (`w.chunkCount >= maxChunksPerFile`, `ErrTooManyChunks`) is sticky for a different reason than durability loss: at 65535 chunks (the top of `chunkCount`'s `uint16` range) no further chunk can ever be written to this file — continuing would wrap the counter and silently overwrite chunk 0 — so there is nothing to retry, and `w.err` is set the same way a durability failure would be.
-- `checkStateLocked()` gates `WriteRecord`, `WriteRaw` and `Rotate`. Precedence is part of the API contract: the sticky error outranks `ErrClosed`, so a caller learns that data was lost rather than only that the writer shut down.
+- **`SyncOnTick` shifts *when* a sync failure is observed, not what it means.** Under `SyncEveryChunk` a failing `f.Sync()` returns to the `WriteRecord` that filled the chunk, and `flushChunkLocked` commits its in-memory state only after the sync succeeds — which is what makes that path retriable. Under `SyncOnTick` the commit happens after a successful *write*, and the sync failure surfaces later inside `tickFlushLocked`, on the background goroutine, which has no caller and therefore sets `w.err`. The write that lost the data succeeded; a later, unrelated call fails. This is the background flush's long-standing property becoming the normal path for chunk durability rather than an edge case. It also changes the power-loss failure *shape*: with no sync between the chunk write and the file-header write, a torn image can advertise a chunk whose bytes never landed — a file a parser rejects, not merely a short one. Process crashes are unaffected (ADR-007's "process-crash ordering only" caveat, widened to `FlushIntervalSec`).
+- `checkStateLocked()` gates `WriteRecord`, `WriteRecords`, `WriteRaw` and `Rotate`. Precedence is part of the API contract: the sticky error outranks `ErrClosed`, so a caller learns that data was lost rather than only that the writer shut down.
 - `closeFileLocked()` closes `w.f` exactly once, guarded by `w.fileClosed`; `rotate()` maintains that flag across the close/reopen.
-- **`OnFsync` fires on every sync** — from `WriteRecord`, `rotate`, `Close` and the background flush tick, not only when `FlushIntervalSec > 0`. It is invoked after `w.mu` is released, so a callback may safely call most `Writer` methods — except `Close`: a callback fired from the background goroutine's own fsync drain that calls `Close` deadlocks, because `Close` waits for that same goroutine to exit while it is blocked inside the callback. A callback that itself triggers a further flush recurses on its own call stack.
+- **`OnFsync` fires on every sync that makes caller data durable** — from `WriteRecord`, `WriteRecords`, `WriteRaw`, `rotate`, `Close` and the background flush tick, not only when `FlushIntervalSec > 0`. `rotate` reports its own Step 3 sync explicitly (added in v0.11.0): under `SyncEveryChunk` Step 1's `flushChunkLocked` already fired the callback, so a rotation fires twice, but under `SyncOnTick` that flush defers its sync and Step 3 is the only one — without it a rotation would fire no callback at all. Step 5's sync of the *replacement* file's placeholder header is **not** reported: it makes an empty header durable, not caller data. It is invoked after `w.mu` is released, so a callback may safely call most `Writer` methods — except `Close`: a callback fired from the background goroutine's own fsync drain that calls `Close` deadlocks, because `Close` waits for that same goroutine to exit while it is blocked inside the callback. A callback that itself triggers a further flush recurses on its own call stack.
 - **`Reader` is also concurrency-safe:** a mutex (`r.mu`) is held for the duration of every exported method. `Open` does not lock — it constructs the `Reader` before it can be shared with another goroutine. `nextRecord` and `loadChunk` are unexported helpers carrying `// CALLER MUST HOLD r.mu.`. `nextRecord` copies each payload out of the shared chunk buffer before returning it; that copy is what makes `ReadRaw`'s returned bytes safe to retain past the next call.
 
 ## BinXML substitution index map

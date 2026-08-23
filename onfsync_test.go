@@ -5,6 +5,7 @@ package evtx
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -50,5 +51,65 @@ func TestOnFsync_NotCalledUnderLock(t *testing.T) {
 	case <-reentered:
 	default:
 		t.Fatal("OnFsync was never invoked")
+	}
+}
+
+// TestOnFsync_RotateReportsItsOwnSync covers the hole SyncOnTick opened.
+//
+// rotate's Step 3 f.Sync() is what makes the archived file durable. Under
+// SyncEveryChunk it was invisible that this sync went unreported, because
+// Step 1's flushChunkLocked had already fired the callback for the same
+// rotation. Under SyncOnTick that flush defers its sync, so before the fix a
+// rotation fired no callback at all — a caller counting durability points
+// would never learn the archive had landed.
+func TestOnFsync_RotateReportsItsOwnSync(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy SyncPolicy
+		tick   int
+	}{
+		{"SyncEveryChunk", SyncEveryChunk, 0},
+		{"SyncOnTick", SyncOnTick, 3600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls int
+			cfg := RotationConfig{
+				FlushIntervalSec: tc.tick,
+				SyncPolicy:       tc.policy,
+				OnFsync: func(time.Time) {
+					mu.Lock()
+					calls++
+					mu.Unlock()
+				},
+			}
+			w, err := New(filepath.Join(t.TempDir(), "rot.evtx"), cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer w.Close() //nolint:errcheck
+
+			if err := w.WriteRecord(4663, testFields()); err != nil {
+				t.Fatalf("WriteRecord: %v", err)
+			}
+
+			mu.Lock()
+			before := calls
+			mu.Unlock()
+
+			if err := w.Rotate(); err != nil {
+				t.Fatalf("Rotate: %v", err)
+			}
+
+			mu.Lock()
+			after := calls
+			mu.Unlock()
+
+			if after <= before {
+				t.Errorf("Rotate fired no OnFsync callback (count stayed at %d); "+
+					"rotate's Step 3 sync makes the archive durable and must be reported",
+					before)
+			}
+		})
 	}
 }

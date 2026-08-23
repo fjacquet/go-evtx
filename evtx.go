@@ -24,6 +24,7 @@
 package evtx
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -35,6 +36,46 @@ import (
 	"sync"
 	"time"
 )
+
+// SyncPolicy selects when the writer calls f.Sync().
+//
+// The zero value, SyncEveryChunk, is the durability model go-evtx has always
+// had: every sealed chunk is fsynced before the writer commits it in memory,
+// so at most one chunk of events can be lost to a crash.
+//
+// SyncOnTick is group commit. Sealed chunks are written and the file header is
+// patched, but the fsync is deferred to the background flush tick, to rotate()
+// and to Close(), each of which syncs unconditionally under every policy. One
+// tick fsync then covers every chunk written since the previous one. The
+// crash-loss window becomes FlushIntervalSec rather than one chunk, which is
+// why New rejects SyncOnTick when no tick is configured.
+//
+// The trade is throughput: fsync is the dominant per-record cost — measured at
+// 82% of WriteRecord's wall clock on darwin/APFS, where f.Sync() is
+// F_FULLFSYNC — so amortizing it across many chunks is the only change that
+// moves the ceiling. See docs/perf-baseline.md.
+type SyncPolicy int
+
+const (
+	// SyncEveryChunk fsyncs each sealed chunk before committing it. Default.
+	SyncEveryChunk SyncPolicy = iota
+	// SyncOnTick defers the fsync of sealed chunks to the flush tick.
+	// Requires FlushIntervalSec > 0.
+	SyncOnTick
+)
+
+// String returns the SyncPolicy's name, or a SyncPolicy(%d) form for any
+// value outside the two defined constants.
+func (p SyncPolicy) String() string {
+	switch p {
+	case SyncEveryChunk:
+		return "SyncEveryChunk"
+	case SyncOnTick:
+		return "SyncOnTick"
+	default:
+		return fmt.Sprintf("SyncPolicy(%d)", int(p))
+	}
+}
 
 // RotationConfig holds periodic flush and rotation configuration for the Writer.
 //
@@ -55,6 +96,11 @@ type RotationConfig struct {
 	MaxFileSizeMB     int // 0 = disabled; rotate when file >= N MiB
 	MaxFileCount      int // 0 = unlimited; keep only N newest archives
 	RotationIntervalH int // 0 = disabled; rotate every N hours
+
+	// SyncPolicy selects when f.Sync() is called. The zero value keeps the
+	// durability model every existing caller already has. SyncOnTick requires
+	// FlushIntervalSec > 0 and is rejected by New without it.
+	SyncPolicy SyncPolicy
 
 	// OnFsync is called after each successful f.Sync() with the time of the
 	// sync. nil = no callback. Useful for exposing the fsync timestamp to a
@@ -124,10 +170,34 @@ type Writer struct {
 	// would Windows. The sparse tail reads back as zeros, which is what the
 	// sealing write puts there anyway. Reset alongside w.records.
 	slotExtended bool
-	recordID     uint64   // monotonically incrementing record ID, starts at 1
-	firstID      uint64   // first record ID in current chunk
-	f            *os.File // open file handle; created in New(), closed in Close()
-	chunkCount   uint16   // number of COMPLETE chunks written to disk so far
+	// pendingSync reports that at least one chunk has been written and
+	// committed without an fsync, which only happens under SyncOnTick. The
+	// background tick must honour it before its own early returns: a burst
+	// that seals a chunk and then goes quiet leaves nothing in w.records, so
+	// without this the tick would return immediately and the sealed chunk
+	// would wait for Close. Cleared by every successful f.Sync().
+	pendingSync bool
+	// chunkScratch is a reused 64 KiB assembly buffer for the two flush paths,
+	// replacing a make() per flush.
+	//
+	// It MUST be cleared before each use. flushChunkLocked writes the whole
+	// chunk including its padding tail, and a reused buffer still holds the
+	// previous chunk's records — writing those into this chunk's padding would
+	// both leak data into the file and break byte-identity with v0.10.0, whose
+	// freshly allocated buffers were zero-filled.
+	chunkScratch []byte
+	// encodeScratch is the BinXML encoder's reused output buffer, passed to
+	// buildBinXMLInto by appendRecordLocked. It is a value rather than a
+	// pointer because it is only ever touched under w.mu.
+	//
+	// The encoded payload aliases it, so the payload must be copied before the
+	// next encode — wrapEventRecord already does that, and it is the only
+	// thing the writer keeps.
+	encodeScratch bytes.Buffer
+	recordID      uint64   // monotonically incrementing record ID, starts at 1
+	firstID       uint64   // first record ID in current chunk
+	f             *os.File // open file handle; created in New(), closed in Close()
+	chunkCount    uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -194,6 +264,14 @@ func New(path string, cfg RotationConfig) (*Writer, error) {
 	if cfg.FlushIntervalSec < 0 {
 		return nil, fmt.Errorf("go_evtx: FlushIntervalSec must be >= 0 (got %d)", cfg.FlushIntervalSec)
 	}
+	if cfg.SyncPolicy != SyncEveryChunk && cfg.SyncPolicy != SyncOnTick {
+		return nil, fmt.Errorf("go_evtx: SyncPolicy must be SyncEveryChunk or SyncOnTick (got %v)", cfg.SyncPolicy)
+	}
+	if cfg.SyncPolicy == SyncOnTick && cfg.FlushIntervalSec <= 0 {
+		return nil, fmt.Errorf(
+			"go_evtx: SyncOnTick requires FlushIntervalSec > 0, otherwise nothing " +
+				"syncs until Close and the crash-loss window is unbounded")
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("go_evtx: create parent directory: %w", err)
 	}
@@ -257,14 +335,16 @@ func (w *Writer) backgroundLoop() {
 		select {
 		case <-flushC:
 			w.mu.Lock()
-			if len(w.records) > 0 {
-				if err := w.tickFlushLocked(); err != nil {
-					// The only persistence path with no caller to return to.
-					// Poison the writer rather than let the next WriteRecord
-					// report success for data that never reached disk.
-					w.err = fmt.Errorf("go_evtx: background flush: %w", err)
-					slog.Error("go_evtx_background_flush_failed", "path", w.path, "err", err)
-				}
+			// Always call in, even with nothing in w.records: a chunk sealed
+			// under SyncOnTick can be owed an fsync (w.pendingSync) with
+			// w.records empty, and only tickFlushLocked itself knows to
+			// discharge that debt before its own early returns.
+			if err := w.tickFlushLocked(); err != nil {
+				// The only persistence path with no caller to return to.
+				// Poison the writer rather than let the next WriteRecord
+				// report success for data that never reached disk.
+				w.err = fmt.Errorf("go_evtx: background flush: %w", err)
+				slog.Error("go_evtx_background_flush_failed", "path", w.path, "err", err)
 			}
 			w.mu.Unlock()
 			w.drainFsyncCallbacks()
@@ -404,8 +484,19 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		return err
 	}
 
+	return w.appendRecordLocked(eventID, fields)
+}
+
+// appendRecordLocked encodes one record and appends it to the pending chunk,
+// flushing and rebuilding if it will not fit. Shared by WriteRecord and
+// WriteRecords so the two cannot drift.
+//
+// The caller has already validated the fields.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) appendRecordLocked(eventID int, fields map[string]string) error {
 	binXMLChunkOffset := evtxRecordsStart + uint32(len(w.records)) + evtxRecordHeaderSize
-	res := buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, w.chunkTemplateOffset)
+	res := buildBinXMLInto(&w.encodeScratch, eventID, w.recordID, fields, binXMLChunkOffset, w.chunkTemplateOffset)
 
 	// A record larger than a chunk can never be written. Splitting one logical
 	// event across chunks is not valid EVTX, so reject it and write nothing.
@@ -430,7 +521,7 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 		// declare one inline — passing the old chunk's offset here would point
 		// the instance at bytes belonging to a chunk that is already on disk.
 		binXMLChunkOffset = evtxRecordsStart + evtxRecordHeaderSize
-		res = buildBinXML(eventID, w.recordID, fields, binXMLChunkOffset, 0)
+		res = buildBinXMLInto(&w.encodeScratch, eventID, w.recordID, fields, binXMLChunkOffset, 0)
 
 		// The rebuilt payload must be re-checked, and this is not belt and
 		// braces: before F19 both builds were byte-identical in length, so the
@@ -456,6 +547,102 @@ func (w *Writer) WriteRecord(eventID int, fields map[string]string) error {
 	w.lastRecordOffset = evtxRecordsStart + uint32(len(w.records))
 	w.records = append(w.records, rec...)
 	w.recordID++
+	return nil
+}
+
+// RecordInput is one event for WriteRecords: the same two arguments
+// WriteRecord takes, in a struct so a slice of them can be passed at once.
+type RecordInput struct {
+	EventID int
+	Fields  map[string]string
+}
+
+// WriteRecords writes a batch of events under a single lock acquisition.
+//
+// Every record is validated before any record is encoded, so a batch
+// containing an invalid record writes nothing at all and returns an error
+// naming that record's index. The checks are the same ones WriteRecord makes —
+// a non-empty ProviderName, parseable numeric <System> fields, and a payload
+// that fits in a chunk — with the size check made against an analytic upper
+// bound (estimateMaxPayload) rather than by encoding, since encoding to find
+// out would defeat the guarantee.
+//
+// The all-or-nothing guarantee covers validation, not I/O. A batch larger than
+// one chunk seals chunks as it goes, which is normal; if a write fails partway
+// through, the records already committed to earlier chunks stay written. The
+// error says which record was reached.
+//
+// It is not faster per record than a WriteRecord loop — at batch size 100 it
+// measures roughly 1.4× slower, because the validation pre-pass collects each
+// record's substitution values and the encode collects them again. Adopt it
+// for the all-or-nothing guarantee, not for throughput. See ADR-009.
+//
+// An empty or nil slice is a no-op returning nil.
+//
+// The Fields maps are read during the call and not retained. As with
+// WriteRecord, the caller must not mutate them concurrently.
+//
+// WriteRecords must not be mixed with WriteRaw in the same session, the same
+// restriction WriteRecord carries.
+//
+// The size check is stricter than WriteRecord's: it validates against
+// estimateMaxPayload, an analytic upper bound sized for the worst case where
+// the record's BinXML template must be inlined rather than referencing one
+// already in the chunk. WriteRecord's own first check instead sizes the
+// cheaper reference-encoding it will actually attempt first, which runs
+// roughly 2 KB smaller. A record whose reference encoding lands in
+// approximately the top 2 KB of maxRecordPayload is therefore accepted by
+// WriteRecord but rejected by WriteRecords — a deliberate, safe divergence:
+// validating the whole batch before encoding any of it requires a bound that
+// holds regardless of which chunk state a given record lands in.
+func (w *Writer) WriteRecords(recs []RecordInput) error {
+	w.mu.Lock()
+	defer w.drainFsyncCallbacks()
+	defer w.mu.Unlock()
+
+	if err := w.checkStateLocked(); err != nil {
+		return err
+	}
+
+	if len(recs) == 0 {
+		return nil
+	}
+
+	// Validate the whole batch before encoding any of it. Nothing below this
+	// loop can reject a record, which is what makes the guarantee true.
+	for i, rec := range recs {
+		if rec.Fields["ProviderName"] == "" {
+			return fmt.Errorf("go_evtx: record %d: %w", i, ErrMissingProviderName)
+		}
+		if err := validateSystemFields(rec.Fields); err != nil {
+			return fmt.Errorf("go_evtx: record %d: %w", i, err)
+		}
+		if est := estimateMaxPayload(rec.EventID, w.recordID, rec.Fields); est > maxRecordPayload {
+			return fmt.Errorf("go_evtx: record %d: %w: estimated payload %d bytes exceeds maximum %d",
+				i, ErrRecordTooLarge, est, maxRecordPayload)
+		}
+	}
+
+	for i, rec := range recs {
+		// Size-based rotation check: rotate before adding more data, exactly as
+		// WriteRecord does per call. Checked per record rather than once for
+		// the whole batch — hoisting it, as an earlier version of this method
+		// did, let a single large batch grow the active file arbitrarily far
+		// past MaxFileSizeMB (w.currentSize only advances inside
+		// flushChunkLocked, so nothing re-triggers rotation mid-batch without
+		// this), breaking both MaxFileCount-driven retention and the
+		// byte-identical-output guarantee against N individual WriteRecord
+		// calls under the same config. See
+		// TestWriteRecords_RotatesLikeIndividualWrites.
+		if w.cfg.MaxFileSizeMB > 0 && w.currentSize >= int64(w.cfg.MaxFileSizeMB)*1024*1024 {
+			if err := w.rotate(); err != nil {
+				return fmt.Errorf("go_evtx: record %d: %w", i, err)
+			}
+		}
+		if err := w.appendRecordLocked(rec.EventID, rec.Fields); err != nil {
+			return fmt.Errorf("go_evtx: record %d: %w", i, err)
+		}
+	}
 	return nil
 }
 
@@ -505,6 +692,13 @@ func (w *Writer) rotate() error {
 		w.err = fmt.Errorf("go_evtx: rotate sync: %w", err)
 		return w.err
 	}
+	w.pendingSync = false
+	// Report this sync: it is the one that makes the archived file's data
+	// durable. Under SyncEveryChunk, Step 1's flushChunkLocked already fired
+	// OnFsync and this adds a second callback for the same rotation; under
+	// SyncOnTick that flush deferred its sync, so without this a rotation
+	// would fire no callback at all.
+	w.queueFsyncLocked()
 	if err := w.closeFileLocked(); err != nil {
 		w.err = fmt.Errorf("go_evtx: rotate close: %w", err)
 		return w.err
@@ -583,6 +777,7 @@ func (w *Writer) rotate() error {
 	w.records = w.records[:0]
 	w.tickWrittenLen = 0
 	w.slotExtended = false
+	w.pendingSync = false
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -712,12 +907,29 @@ func (w *Writer) queueFsyncLocked() {
 	}
 }
 
+// chunkScratchLocked returns a zeroed 64 KiB assembly buffer, allocating it on
+// first use. The clear is mandatory — see the field comment.
+//
+// CALLER MUST HOLD w.mu.
+func (w *Writer) chunkScratchLocked() []byte {
+	if w.chunkScratch == nil {
+		w.chunkScratch = make([]byte, evtxChunkSize)
+		return w.chunkScratch
+	}
+	clear(w.chunkScratch)
+	return w.chunkScratch
+}
+
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
-// padded 65536-byte EVTX chunk, patches the file header at offset 0, and calls
-// f.Sync(). Only once the chunk is durable does it commit w.chunkCount,
-// w.currentSize, w.records, and w.firstID together — if any I/O step fails,
-// none of that in-memory state has moved, so the call is genuinely retriable
-// and a retry cannot write the same records into a second chunk slot.
+// padded 65536-byte EVTX chunk and patches the file header at offset 0. Under
+// SyncEveryChunk it then calls f.Sync() and only once the chunk is durable
+// does it commit w.chunkCount, w.currentSize, w.records, and w.firstID
+// together — if any I/O step fails, none of that in-memory state has moved,
+// so the call is genuinely retriable and a retry cannot write the same
+// records into a second chunk slot. Under SyncOnTick the sync is skipped:
+// the commit happens after the successful write instead, w.pendingSync is
+// set to record the fsync debt, and the flush tick, rotate() or Close()
+// discharges it later.
 //
 // Must be called with w.mu held. Does nothing if len(w.records) == 0.
 func (w *Writer) flushChunkLocked() error {
@@ -734,7 +946,7 @@ func (w *Writer) flushChunkLocked() error {
 	freeSpaceOffset := uint32(recordsStart + len(records))
 	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
-	chunkBytes := make([]byte, evtxChunkSize)
+	chunkBytes := w.chunkScratchLocked()
 	copy(chunkBytes[0:], chunkHeader)
 	copy(chunkBytes[recordsStart:], records)
 
@@ -760,8 +972,22 @@ func (w *Writer) flushChunkLocked() error {
 	if _, err := w.f.WriteAt(buildFileHeader(nextChunkCount, w.recordID, w.activeFlagsLocked()), 0); err != nil {
 		return fmt.Errorf("go_evtx: patch file header: %w", err)
 	}
-	if err := w.f.Sync(); err != nil {
-		return fmt.Errorf("go_evtx: sync: %w", err)
+	// Under SyncOnTick the fsync is deferred to the flush tick, rotate() or
+	// Close(). The chunk's bytes and the patched file header are already
+	// written; only durability is postponed, which is what makes this group
+	// commit rather than a weaker write.
+	//
+	// The retriability note below still holds under SyncEveryChunk. Under
+	// SyncOnTick the commit happens after a successful write rather than
+	// after a successful sync, so a later Sync failure surfaces at tick time
+	// and is sticky there — see rotate()'s Step 1 comment and ADR-008.
+	if w.cfg.SyncPolicy == SyncOnTick {
+		w.pendingSync = true
+	} else {
+		if err := w.f.Sync(); err != nil {
+			return fmt.Errorf("go_evtx: sync: %w", err)
+		}
+		w.pendingSync = false
 	}
 
 	// The chunk is durable. Commit every piece of in-memory state together, so
@@ -777,7 +1003,9 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkTemplateOffset = 0
 	w.lastRecordOffset = 0
 	w.firstID = w.recordID
-	w.queueFsyncLocked()
+	if w.cfg.SyncPolicy != SyncOnTick {
+		w.queueFsyncLocked()
+	}
 
 	slog.Info("go_evtx_chunk_flushed",
 		"path", w.path,
@@ -823,9 +1051,27 @@ func (w *Writer) flushChunkLocked() error {
 // Neither w.chunkCount nor w.records is reset — the chunk stays open for
 // further appends, exactly as before (ADR-004's flush-without-reset).
 //
-// Must be called with w.mu held. Does nothing if len(w.records) == 0, or if
-// nothing was appended since the previous tick.
+// Must be called with w.mu held. Does nothing if nothing is pending — either
+// len(w.records) == 0, or nothing was appended since the previous tick — AND
+// no sealed chunk is owed an fsync (w.pendingSync). When w.pendingSync is
+// set, either of those otherwise-idle conditions still triggers an f.Sync()
+// to discharge the debt before returning: a chunk committed without a sync
+// under SyncOnTick must not wait for Close just because no further records
+// arrived.
 func (w *Writer) tickFlushLocked() error {
+	// A chunk sealed under SyncOnTick is owed an fsync even when nothing is
+	// pending in w.records. Both early returns below would skip it, leaving
+	// the chunk durable only at Close — the unbounded window New refuses to
+	// configure. Discharge that debt first.
+	if w.pendingSync && (len(w.records) == 0 || len(w.records) == w.tickWrittenLen) {
+		if err := w.f.Sync(); err != nil {
+			return fmt.Errorf("go_evtx: tick sync of sealed chunks: %w", err)
+		}
+		w.pendingSync = false
+		w.queueFsyncLocked()
+		return nil
+	}
+
 	if len(w.records) == 0 {
 		return nil
 	}
@@ -855,7 +1101,7 @@ func (w *Writer) tickFlushLocked() error {
 	freeSpaceOffset := uint32(recordsStart + len(w.records))
 	chunkHeader := buildChunkHeader(w.firstID, w.recordID-1, w.lastRecordOffset, freeSpaceOffset)
 
-	chunkBytes := make([]byte, evtxChunkSize)
+	chunkBytes := w.chunkScratchLocked()
 	copy(chunkBytes[0:], chunkHeader)
 	copy(chunkBytes[recordsStart:], w.records)
 
@@ -887,6 +1133,7 @@ func (w *Writer) tickFlushLocked() error {
 	}
 
 	w.tickWrittenLen = len(w.records)
+	w.pendingSync = false
 	w.queueFsyncLocked()
 
 	return nil
@@ -966,6 +1213,7 @@ func (w *Writer) finalizeLocked() error {
 		} else if serr := w.f.Sync(); serr != nil {
 			err = fmt.Errorf("go_evtx: finalize sync: %w", serr)
 		} else {
+			w.pendingSync = false
 			w.queueFsyncLocked()
 		}
 	}
