@@ -46,6 +46,13 @@ go test -run XXX -bench . -benchtime 3s -benchmem .
 | 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecord | 68307 | 6822 | 60 | **After the records-CRC fix**; 81.84 rec/fsync. This row restores the O(chunk) `patchEventRecordsCRC` rescan per flush that 98cc202's row was measured without. It is *faster* than 98cc202's 72199, which is not a speed-up from the fix — a 64 KiB CRC32 is a few µs against a ~61 µs amortized `F_FULLFSYNC`, so the rescan is inside this benchmark's run-to-run spread. Do not read either row as evidence about the rescan's cost; the fsync dominates |
 | 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecordParallel (10) | 72424 | 6827 | 60 | **After the records-CRC fix.** Same caveat as the serial row |
 | 2026-08-22 | d8a85e4 | darwin/arm64 M1 Pro, APFS, go1.27.0 | TickFlushIdle | 13.49 | 0 | 0 | **After the records-CRC fix.** The idle skip does not touch the CRC path, so this is unchanged from 98cc202's 13.84 within noise. Harness change in the same commit: the priming tick's error is now fatal, so this row cannot silently be measuring the `len(w.records) == 0` branch instead of the idle-skip branch — which 98cc202's row, whose harness discarded that error, could not rule out |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EncodeShared | 2183 | 6720 | 9 | v0.11.0, `bench_test.go`; encode path unchanged from v0.10.0/d8a85e4 (3274 → 2183 is run-to-run/toolchain spread, not a code change) |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EncodeInline | 11814 | 22080 | 133 | v0.11.0, `bench_test.go`; encode path unchanged from v0.10.0/d8a85e4 |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecord | 77373 | 5033 | 5 | v0.11.0, `bench_test.go`; default config (`SyncEveryChunk`), byte-identical write path to v0.10.0; 80.79 rec/fsync. allocs/op fell from d8a85e4's 60 to 5 and B/op from 6822 to 5033 — the Task 1-5 buffer-reuse work (`chunkScratch`/`encodeScratch`, the substitution arena) |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecordSyncOnTick | 2770 | 5025 | 5 | v0.11.0, `bench_test.go`; group commit — `FlushIntervalSec: 3600` so no tick fires during the run; the `fsyncs` metric is the raw total sync count across the whole run (not per-op): 1, from `Close()` only. ~27.9x lower ns/op than WriteRecord's 77373 in the same run — see paragraph below the table |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | WriteRecordsBatch (100) | 3934 | 8997 | 8 | v0.11.0, `bench_test.go`; ns/op, B/op and allocs/op are already per-record (`b.N` counts records; the loop calls `WriteRecords` once per 100). ~1.4x *slower* per record than WriteRecordSyncOnTick's single-record loop under the identical `SyncOnTick` policy — see paragraph below the table |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | EstimateMaxPayload | 1128 | 3968 | 3 | v0.11.0, `bench_test.go`; the per-record validation-pass cost `WriteRecords` pays before encoding, dominated by the ~1 KiB substitution arena; its B/op and allocs/op are almost exactly the WriteRecordsBatch-minus-WriteRecordSyncOnTick delta (8997−5025=3972 B, 8−5=3 allocs) |
+| 2026-08-23 | 717e122 | darwin/arm64 M1 Pro, APFS, go1.27.0 | TickFlushIdle | 13.87 | 0 | 0 | v0.11.0, `bench_test.go`; unchanged code path — compare to d8a85e4's 13.49, within noise |
 
 ### Note on the d8a85e4 rows
 
@@ -57,6 +64,64 @@ paths. The 98cc202 rows above are **not** superseded — they correctly describe
 the code as it was measured — but any comparison against them must account for
 one extra O(chunk) CRC32 per flush, which the numbers show is below this
 benchmark's noise floor on an fsync-bound path.
+
+### v0.11.0 rows (Task 6)
+
+Measured on branch `feat/v0.11.0-impl` at commit 717e122, after Tasks 1-5
+(`SyncPolicy`, `WriteRecords`, and the chunk/encoder buffer reuse). Two
+comparisons this release's design decisions actually turn on:
+
+**Sync policy.** `WriteRecordSyncOnTick` (2770 ns/op, 1 total fsync across
+the whole benchmark run — none mid-run, only `Close()`'s) is ~27.9x faster
+per op than `WriteRecord` under the default `SyncEveryChunk` policy (77373
+ns/op, one `F_FULLFSYNC` roughly every 80.79 records). That ratio is
+arithmetic over the two rows above, not a measurement of its own, and it is
+darwin-specific: `F_FULLFSYNC` is roughly an order of magnitude more
+expensive than a Linux `fsync`, so a Linux row would be expected to show a
+smaller ratio. It is the shape `TickFlushIdle`'s existing 13.87 ns/op,
+zero-alloc no-op row already implies: under `SyncOnTick` with a real
+(non-3600s) tick interval, the fsync cost this table shows amortizes across
+every record that arrived since the previous tick instead of every ~81
+records, and a tick with nothing new to flush costs nothing at all.
+
+**Batch API.** `WriteRecordsBatch` at the brief's batch size of 100 does
+**not** beat 100x `WriteRecordSyncOnTick` — it loses, at ~3934 ns/op per
+record against ~2770 ns/op, roughly 1.4x slower (arithmetic over the two
+rows, both measured under the identical `SyncOnTick` policy so the fsync
+cost is not a confound). The allocation rows explain why: `WriteRecords`'s
+`estimateMaxPayload` validation pre-pass costs 1128 ns/op, 3968 B/op, 3
+allocs/op on its own, and that is almost exactly the per-record delta
+between the batch and single-record paths (8997−5025=3972 B, 8−5=3
+allocs). This is the double substitution-collection cost the Task 5 review
+flagged, confirmed here rather than assumed: at batch size 100, in a single
+uncontended goroutine, `WriteRecords` trades a real cost (one collection
+pass, paid twice) for a saving (fewer lock acquisitions and state checks)
+that this benchmark cannot show any benefit from, because it never
+contends the lock. Whether the trade lands the other way under concurrent
+callers, or at a batch size small enough that per-call fixed overhead
+dominates, is not established by anything measured here.
+
+**A methodology note on ns/op stability.** This machine's load average was
+20-29 during measurement (multiple concurrent unrelated processes).
+Allocation figures (`B/op`, `allocs/op`) were stable to the byte/alloc
+across every repeated run; `ns/op` was not — `WriteRecordSyncOnTick` and
+`WriteRecordsBatch` were each re-run 6 times at `-benchtime 3s` to find a
+stable range (2591-2827 ns/op and 3841-3990 ns/op respectively) before the
+rows above were taken as representative medians; `WriteRecord` and
+`EstimateMaxPayload` similarly varied by up to ~50% across single runs
+under load and are medians of 5 repeated runs each. Full raw output is in
+`.superpowers/sdd/2026-08-22-v0.11.0-throughput/task-6-report.md`.
+
+**Integer-division caveat.** Go's `testing.BenchmarkResult.AllocsPerOp`/
+`AllocedBytesPerOp` (and `testing.AllocsPerRun`, used nowhere in this file)
+both divide by `b.N` with integer division. None of the rows above are at
+risk of a rare per-chunk-flush allocation being silently rounded to zero:
+chunk flushes occur roughly once per 81 records and every affected
+benchmark ran into the hundreds of thousands to millions of iterations, so
+flush-driven allocations are proportionally represented, not truncated
+away — but a benchmark whose rare event occurs far less than once per `b.N`
+iterations would not show it at all, and that risk is inherent to the
+measurement technique, not specific to this table.
 
 ## Derived figures
 

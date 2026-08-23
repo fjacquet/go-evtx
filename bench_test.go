@@ -147,3 +147,68 @@ func BenchmarkTickFlushIdle(b *testing.B) {
 		w.mu.Unlock()
 	}
 }
+
+// BenchmarkWriteRecordSyncOnTick measures the group-commit path: chunks are
+// sealed without an fsync, so the tick interval is set beyond the benchmark's
+// life and the cost reported is encode plus write.
+func BenchmarkWriteRecordSyncOnTick(b *testing.B) {
+	quietLogs(b)
+	var syncs int64
+	w, err := New(filepath.Join(b.TempDir(), "bench-tick.evtx"), RotationConfig{
+		FlushIntervalSec: 3600,
+		SyncPolicy:       SyncOnTick,
+		OnFsync:          func(time.Time) { atomic.AddInt64(&syncs, 1) },
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	f := benchFields()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := w.WriteRecord(4663, f); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	_ = w.Close()
+	b.ReportMetric(float64(atomic.LoadInt64(&syncs)), "fsyncs")
+}
+
+// BenchmarkWriteRecordsBatch measures the batch entry point at a batch size an
+// audit-event receiver would plausibly use.
+func BenchmarkWriteRecordsBatch(b *testing.B) {
+	quietLogs(b)
+	w, err := New(filepath.Join(b.TempDir(), "bench-batch.evtx"), RotationConfig{
+		FlushIntervalSec: 3600,
+		SyncPolicy:       SyncOnTick,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	const batch = 100
+	recs := make([]RecordInput, batch)
+	for i := range recs {
+		recs[i] = RecordInput{EventID: 4663, Fields: benchFields()}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i += batch {
+		if err := w.WriteRecords(recs); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	_ = w.Close()
+}
+
+// BenchmarkEstimateMaxPayload measures the bound WriteRecords pays per record
+// in its validation pass.
+func BenchmarkEstimateMaxPayload(b *testing.B) {
+	f := benchFields()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = estimateMaxPayload(4663, uint64(i), f)
+	}
+}
