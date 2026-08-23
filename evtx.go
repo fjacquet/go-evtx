@@ -156,10 +156,17 @@ type Writer struct {
 	// would Windows. The sparse tail reads back as zeros, which is what the
 	// sealing write puts there anyway. Reset alongside w.records.
 	slotExtended bool
-	recordID     uint64   // monotonically incrementing record ID, starts at 1
-	firstID      uint64   // first record ID in current chunk
-	f            *os.File // open file handle; created in New(), closed in Close()
-	chunkCount   uint16   // number of COMPLETE chunks written to disk so far
+	// pendingSync reports that at least one chunk has been written and
+	// committed without an fsync, which only happens under SyncOnTick. The
+	// background tick must honour it before its own early returns: a burst
+	// that seals a chunk and then goes quiet leaves nothing in w.records, so
+	// without this the tick would return immediately and the sealed chunk
+	// would wait for Close. Cleared by every successful f.Sync().
+	pendingSync bool
+	recordID    uint64   // monotonically incrementing record ID, starts at 1
+	firstID     uint64   // first record ID in current chunk
+	f           *os.File // open file handle; created in New(), closed in Close()
+	chunkCount  uint16   // number of COMPLETE chunks written to disk so far
 	// Phase 9 additions:
 	cfg  RotationConfig
 	done chan struct{}
@@ -294,14 +301,16 @@ func (w *Writer) backgroundLoop() {
 		select {
 		case <-flushC:
 			w.mu.Lock()
-			if len(w.records) > 0 {
-				if err := w.tickFlushLocked(); err != nil {
-					// The only persistence path with no caller to return to.
-					// Poison the writer rather than let the next WriteRecord
-					// report success for data that never reached disk.
-					w.err = fmt.Errorf("go_evtx: background flush: %w", err)
-					slog.Error("go_evtx_background_flush_failed", "path", w.path, "err", err)
-				}
+			// Always call in, even with nothing in w.records: a chunk sealed
+			// under SyncOnTick can be owed an fsync (w.pendingSync) with
+			// w.records empty, and only tickFlushLocked itself knows to
+			// discharge that debt before its own early returns.
+			if err := w.tickFlushLocked(); err != nil {
+				// The only persistence path with no caller to return to.
+				// Poison the writer rather than let the next WriteRecord
+				// report success for data that never reached disk.
+				w.err = fmt.Errorf("go_evtx: background flush: %w", err)
+				slog.Error("go_evtx_background_flush_failed", "path", w.path, "err", err)
 			}
 			w.mu.Unlock()
 			w.drainFsyncCallbacks()
@@ -542,6 +551,7 @@ func (w *Writer) rotate() error {
 		w.err = fmt.Errorf("go_evtx: rotate sync: %w", err)
 		return w.err
 	}
+	w.pendingSync = false
 	if err := w.closeFileLocked(); err != nil {
 		w.err = fmt.Errorf("go_evtx: rotate close: %w", err)
 		return w.err
@@ -620,6 +630,7 @@ func (w *Writer) rotate() error {
 	w.records = w.records[:0]
 	w.tickWrittenLen = 0
 	w.slotExtended = false
+	w.pendingSync = false
 	w.chunkNames = w.chunkNames[:0]
 	w.chunkTemplates = w.chunkTemplates[:0]
 	w.chunkTemplateOffset = 0
@@ -797,8 +808,22 @@ func (w *Writer) flushChunkLocked() error {
 	if _, err := w.f.WriteAt(buildFileHeader(nextChunkCount, w.recordID, w.activeFlagsLocked()), 0); err != nil {
 		return fmt.Errorf("go_evtx: patch file header: %w", err)
 	}
-	if err := w.f.Sync(); err != nil {
-		return fmt.Errorf("go_evtx: sync: %w", err)
+	// Under SyncOnTick the fsync is deferred to the flush tick, rotate() or
+	// Close(). The chunk's bytes and the patched file header are already
+	// written; only durability is postponed, which is what makes this group
+	// commit rather than a weaker write.
+	//
+	// The retriability note below still holds under SyncEveryChunk. Under
+	// SyncOnTick the commit happens after a successful write rather than
+	// after a successful sync, so a later Sync failure surfaces at tick time
+	// and is sticky there — see rotate()'s Step 1 comment and ADR-008.
+	if w.cfg.SyncPolicy == SyncOnTick {
+		w.pendingSync = true
+	} else {
+		if err := w.f.Sync(); err != nil {
+			return fmt.Errorf("go_evtx: sync: %w", err)
+		}
+		w.pendingSync = false
 	}
 
 	// The chunk is durable. Commit every piece of in-memory state together, so
@@ -814,7 +839,9 @@ func (w *Writer) flushChunkLocked() error {
 	w.chunkTemplateOffset = 0
 	w.lastRecordOffset = 0
 	w.firstID = w.recordID
-	w.queueFsyncLocked()
+	if w.cfg.SyncPolicy != SyncOnTick {
+		w.queueFsyncLocked()
+	}
 
 	slog.Info("go_evtx_chunk_flushed",
 		"path", w.path,
@@ -863,6 +890,19 @@ func (w *Writer) flushChunkLocked() error {
 // Must be called with w.mu held. Does nothing if len(w.records) == 0, or if
 // nothing was appended since the previous tick.
 func (w *Writer) tickFlushLocked() error {
+	// A chunk sealed under SyncOnTick is owed an fsync even when nothing is
+	// pending in w.records. Both early returns below would skip it, leaving
+	// the chunk durable only at Close — the unbounded window New refuses to
+	// configure. Discharge that debt first.
+	if w.pendingSync && (len(w.records) == 0 || len(w.records) == w.tickWrittenLen) {
+		if err := w.f.Sync(); err != nil {
+			return fmt.Errorf("go_evtx: tick sync of sealed chunks: %w", err)
+		}
+		w.pendingSync = false
+		w.queueFsyncLocked()
+		return nil
+	}
+
 	if len(w.records) == 0 {
 		return nil
 	}
@@ -924,6 +964,7 @@ func (w *Writer) tickFlushLocked() error {
 	}
 
 	w.tickWrittenLen = len(w.records)
+	w.pendingSync = false
 	w.queueFsyncLocked()
 
 	return nil

@@ -6,8 +6,12 @@
 package evtx
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestSyncPolicy_ZeroValueIsEveryChunk pins the compatibility invariant: a
@@ -52,5 +56,170 @@ func TestSyncPolicy_AcceptsBoundedWindow(t *testing.T) {
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// syncCountingWriter returns a Writer whose fsyncs are counted.
+func syncCountingWriter(t *testing.T, path string, cfg RotationConfig, n *int64) *Writer {
+	t.Helper()
+	cfg.OnFsync = func(time.Time) { atomic.AddInt64(n, 1) }
+	w, err := New(path, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return w
+}
+
+func syncTestFields() map[string]string {
+	return map[string]string{
+		"ProviderName": "Microsoft-Windows-Security-Auditing",
+		"Computer":     "testhost",
+		"ObjectName":   "/nas/share/file.txt",
+		"TimeCreated":  "2026-08-22T12:00:00.000000000Z",
+	}
+}
+
+// recordsPerChunkApprox is enough records to seal several chunks. Records run
+// roughly 780 bytes and maxChunkPayload is 65024, so ~83 records fill a chunk.
+const recordsForSeveralChunks = 300
+
+// TestSyncPolicy_OnTickFsyncsFewerTimes verifies group commit: with SyncOnTick,
+// sealing chunks does not fsync, so the count is far below the number of chunks.
+func TestSyncPolicy_OnTickFsyncsFewerTimes(t *testing.T) {
+	dir := t.TempDir()
+
+	var everyChunk, onTick int64
+	we := syncCountingWriter(t, filepath.Join(dir, "every.evtx"),
+		RotationConfig{FlushIntervalSec: 3600}, &everyChunk)
+	wt := syncCountingWriter(t, filepath.Join(dir, "tick.evtx"),
+		RotationConfig{FlushIntervalSec: 3600, SyncPolicy: SyncOnTick}, &onTick)
+
+	for i := 0; i < recordsForSeveralChunks; i++ {
+		if err := we.WriteRecord(4663, syncTestFields()); err != nil {
+			t.Fatalf("every-chunk WriteRecord %d: %v", i, err)
+		}
+		if err := wt.WriteRecord(4663, syncTestFields()); err != nil {
+			t.Fatalf("on-tick WriteRecord %d: %v", i, err)
+		}
+	}
+
+	// Read the counts before Close, which syncs under both policies.
+	gotEvery := atomic.LoadInt64(&everyChunk)
+	gotTick := atomic.LoadInt64(&onTick)
+
+	if gotEvery < 2 {
+		t.Fatalf("SyncEveryChunk fsynced %d times; expected one per sealed chunk", gotEvery)
+	}
+	if gotTick != 0 {
+		t.Fatalf("SyncOnTick fsynced %d times while sealing chunks; expected 0 "+
+			"(the tick interval is an hour, so no tick can have fired)", gotTick)
+	}
+
+	if err := we.Close(); err != nil {
+		t.Fatalf("every-chunk Close: %v", err)
+	}
+	if err := wt.Close(); err != nil {
+		t.Fatalf("on-tick Close: %v", err)
+	}
+
+	// Close syncs under every policy.
+	if atomic.LoadInt64(&onTick) == 0 {
+		t.Fatal("SyncOnTick never fsynced even at Close")
+	}
+}
+
+// TestSyncPolicy_ByteIdenticalAcrossPolicies pins the compatibility invariant:
+// the policy changes when bytes are made durable, never which bytes land.
+func TestSyncPolicy_ByteIdenticalAcrossPolicies(t *testing.T) {
+	write := func(name string, cfg RotationConfig) []byte {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), name)
+		w, err := New(p, cfg)
+		if err != nil {
+			t.Fatalf("%s New: %v", name, err)
+		}
+		defer w.Close() //nolint:errcheck
+		for i := 0; i < recordsForSeveralChunks; i++ {
+			if err := w.WriteRecord(4663, syncTestFields()); err != nil {
+				t.Fatalf("%s WriteRecord %d: %v", name, i, err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("%s Close: %v", name, err)
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("%s ReadFile: %v", name, err)
+		}
+		return raw
+	}
+
+	every := write("every.evtx", RotationConfig{FlushIntervalSec: 3600})
+	tick := write("tick.evtx", RotationConfig{FlushIntervalSec: 3600, SyncPolicy: SyncOnTick})
+
+	if len(every) != len(tick) {
+		t.Fatalf("sizes differ: SyncEveryChunk %d, SyncOnTick %d", len(every), len(tick))
+	}
+	if !bytes.Equal(every, tick) {
+		for i := range every {
+			if every[i] != tick[i] {
+				t.Fatalf("files differ at offset %d (0x%x): every %#02x, tick %#02x",
+					i, i, every[i], tick[i])
+			}
+		}
+	}
+}
+
+// TestSyncPolicy_TickSyncsASealedChunkWithNoPendingRecords is the regression
+// guard for the defect this task fixes. Under SyncOnTick a burst can seal a
+// chunk and then stop. The tick's early returns (no records at all, or nothing
+// appended since last tick) must not skip the fsync that chunk is still owed,
+// or the data sits in the page cache until Close and the loss window is
+// unbounded — the very thing New refuses to allow.
+func TestSyncPolicy_TickSyncsASealedChunkWithNoPendingRecords(t *testing.T) {
+	dir := t.TempDir()
+	var syncs int64
+	w := syncCountingWriter(t, filepath.Join(dir, "pending.evtx"),
+		RotationConfig{FlushIntervalSec: 1, SyncPolicy: SyncOnTick}, &syncs)
+	defer w.Close() //nolint:errcheck
+
+	// Seal at least one chunk, then leave nothing pending.
+	w.mu.Lock()
+	for len(w.records) == 0 || w.chunkCount == 0 {
+		w.mu.Unlock()
+		if err := w.WriteRecord(4663, syncTestFields()); err != nil {
+			t.Fatalf("WriteRecord: %v", err)
+		}
+		w.mu.Lock()
+	}
+	w.mu.Unlock()
+
+	// Drain the pending records into the sealed chunk so w.records is empty.
+	w.mu.Lock()
+	if err := w.flushChunkLocked(); err != nil {
+		w.mu.Unlock()
+		t.Fatalf("flushChunkLocked: %v", err)
+	}
+	pending := w.pendingSync
+	w.mu.Unlock()
+	w.drainFsyncCallbacks()
+
+	if !pending {
+		t.Fatal("pendingSync is false after sealing a chunk under SyncOnTick")
+	}
+	before := atomic.LoadInt64(&syncs)
+
+	// Wait for a tick with nothing appended.
+	time.Sleep(2500 * time.Millisecond)
+
+	if atomic.LoadInt64(&syncs) <= before {
+		t.Fatalf("no fsync after %d ticks with a chunk owed one: count stayed at %d",
+			2, before)
+	}
+	w.mu.Lock()
+	still := w.pendingSync
+	w.mu.Unlock()
+	if still {
+		t.Fatal("pendingSync still set after the tick fsynced")
 	}
 }
