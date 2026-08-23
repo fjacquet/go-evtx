@@ -101,6 +101,13 @@ func TestBuildTemplateBody_NewSystemChildrenPresent(t *testing.T) {
 
 // utf16Bytes returns the UTF-16LE encoding of s with no null terminator —
 // how a NameNode's own character run is stored, matching writeNameNode.
+//
+// This body is the pre-v0.11.0 encoder verbatim (binxml_tokens.go's old
+// encodeSubString, utf16.Encode over []rune). It is deliberately NOT expressed
+// in terms of appendUTF16LE, which replaced it: TestAppendUTF16LE_MatchesOracle
+// in alloc_test.go differentially tests the new encoder against this one, and
+// rewriting this to call appendUTF16LE would make that comparison compare the
+// new implementation with itself. Leave it alone.
 func utf16Bytes(s string) []byte {
 	u16 := utf16.Encode([]rune(s))
 	buf := make([]byte, len(u16)*2)
@@ -252,12 +259,12 @@ func TestCollectSubstitutions_ProviderGuidIsString(t *testing.T) {
 }
 
 // decodeSubStringForTest decodes raw UTF-16LE substitution value bytes, as
-// produced by encodeSubString, for writer-side test assertions. This used to
+// produced by appendUTF16LE, for writer-side test assertions. This used to
 // be binxml_reader.go's decodeSubString; that file (the old template-specific
 // reader) is gone as of the generic decoder, but this writer test still needs
-// the inverse of encodeSubString to check what collectSubstitutionsFromFields
+// the inverse of appendUTF16LE to check what collectSubstitutionsFromFields
 // produced. Tolerant of a trailing null terminator for the same reason the
-// original was: encodeSubString itself stopped appending one (F15), but a
+// original was: appendUTF16LE itself stopped appending one (F15), but a
 // caller that fed raw bytes carrying one anyway must still decode correctly.
 func decodeSubStringForTest(data []byte) string {
 	end := len(data)

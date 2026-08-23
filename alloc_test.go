@@ -136,3 +136,61 @@ func TestWriteRecord_AllocationCeiling(t *testing.T) {
 	}
 	t.Logf("WriteRecord: %.1f allocs/op", got)
 }
+
+// TestAppendUTF16LE_MatchesOracle pins v0.11.0's substitution-value encoder
+// against the one it replaced.
+//
+// appendUTF16LE took over from encodeSubString, whose body survives verbatim as
+// utf16Bytes in system_test.go — an independent oracle, since it still goes
+// through utf16.Encode over []rune rather than ranging the string. See the
+// comment there before "simplifying" it.
+//
+// The surrogate-pair branch (r > 0xFFFF) is the only genuinely new encoding
+// logic in that change and the reason this test exists: goldenFields() is pure
+// ASCII, so testdata/binxml-golden.bin exercises only the r <= 0xFFFF path, and
+// the non-BMP literals elsewhere in the suite assert sizes, never bytes. A
+// regression here would corrupt exactly the non-BMP names cmd/gen-fixture-system
+// exists to exercise, and would surface only in the Windows CI gate.
+func TestAppendUTF16LE_MatchesOracle(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"empty", ""},
+		{"ascii", "Microsoft-Windows-Security-Auditing"},
+		{"latin1_supplement", "ünïcödé-höst-ÆØÅ"},
+		{"cjk", "日本語"},
+		{"non_bmp_pair", "\U0001F600\U0001F601"},
+		{"max_rune", "\U0010FFFF"},
+		{"embedded_nul", "a\x00b"},
+		{"invalid_utf8", "\xff\xfe"},
+		{"cesu8_unpaired_surrogate", "\xed\xa0\x80"},
+		{"overlong_nul", "\xc0\x80"},
+		{"out_of_range_4byte", "\xf4\x90\x80\x80"},
+		{"mixed", "log \xff 𝔘 日 a\x00b \U0001F600"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := utf16Bytes(tc.in)
+			got := appendUTF16LE(nil, tc.in)
+			if !bytes.Equal(want, got) {
+				t.Errorf("appendUTF16LE(%q)\n got % x\nwant % x", tc.in, got, want)
+			}
+		})
+	}
+}
+
+// TestAppendUTF16LE_AppendsInPlace covers what the oracle test cannot: the
+// arena property subCollector depends on. Encoding into a non-empty destination
+// must leave the existing bytes untouched and append after them, because
+// collectSubstitutionsFromFields packs every value into one buffer and slices
+// each back out by offset.
+func TestAppendUTF16LE_AppendsInPlace(t *testing.T) {
+	prefix := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	dst := append([]byte(nil), prefix...)
+	dst = appendUTF16LE(dst, "日 \U0001F600")
+
+	if !bytes.Equal(dst[:len(prefix)], prefix) {
+		t.Errorf("prefix was modified: got % x, want % x", dst[:len(prefix)], prefix)
+	}
+	if want := utf16Bytes("日 \U0001F600"); !bytes.Equal(dst[len(prefix):], want) {
+		t.Errorf("appended bytes = % x, want % x", dst[len(prefix):], want)
+	}
+}
