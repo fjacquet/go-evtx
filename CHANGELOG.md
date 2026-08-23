@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-23
+
 ### Added
 
 - `RotationConfig.SyncPolicy`, with `SyncEveryChunk` and `SyncOnTick`.
@@ -57,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Per-record allocation cut by roughly an order of magnitude. `WriteRecord`
-  fell from **54.0 to 5.0** allocations per call by `testing.AllocsPerRun`
+  fell from **49.0 to 5.0** allocations per call by `testing.AllocsPerRun`
   (60 → 5 allocs/op and 6822 → 5033 B/op in the benchmark rows), via a reused
   64 KiB chunk assembly buffer shared by both flush paths, a reused BinXML
   encode buffer, and a single arena backing every substitution value.
@@ -75,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   form used in every example, godoc snippet and test in this repository — are
   unaffected. An unkeyed `RotationConfig{...}` literal would no longer
   compile.
+
+- `rotate()` now reports its own `f.Sync()` through `OnFsync`. This closes a
+  gap that only `SyncOnTick` exposed: under `SyncEveryChunk` the pending-chunk
+  flush at the start of a rotation had already fired the callback, but
+  `SyncOnTick` defers that flush's sync, so a rotation fired **no** callback at
+  all and a caller counting durability points never learned the archive had
+  landed.
+
+  **Callers that count callbacks will see one more per rotation under
+  `SyncEveryChunk`** — the flush's and the rotation's, where previously only
+  the flush's was reported. The sync of the *replacement* file's placeholder
+  header is deliberately not reported: it makes an empty header durable, not
+  caller data.
 
 ## [0.10.0] - 2026-08-22
 
@@ -635,7 +650,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/fjacquet/go-evtx/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/fjacquet/go-evtx/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/fjacquet/go-evtx/compare/v0.8.3...v0.9.0
 [0.8.2]: https://github.com/fjacquet/go-evtx/compare/v0.8.1...v0.8.2

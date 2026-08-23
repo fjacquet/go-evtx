@@ -404,6 +404,14 @@ Writer-owned scratch buffers replace per-call allocation:
 > memory. The target of "56 allocs/record to under 10" was met: 54.0 measured
 > before, 5.0 after (`testing.AllocsPerRun`).
 
+**Correction (2026-08-23).** The "54.0 measured before" above is wrong. Re-run
+against the `v0.10.0` tag with the same harness the shipped
+`TestWriteRecord_AllocationCeiling` uses — same fields, same 50-record warmup,
+`testing.AllocsPerRun(200, …)` — the figure is **49.0**, not 54.0. The "after"
+figure of 5.0 reproduces exactly. The conclusion is unchanged; only the
+starting number was misreported. `CHANGELOG.md`, `docs/user-guide.md` and
+ADR-009 carried the same wrong value and are corrected.
+
 All encoding happens under `w.mu`, so Writer-owned buffers beat a `sync.Pool` —
 no pool overhead and no escape-analysis surprises. Target: 56 allocs/record to
 under 10, ~5.6 KB to near zero in steady state.

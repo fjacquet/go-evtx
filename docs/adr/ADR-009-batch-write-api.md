@@ -259,7 +259,7 @@ allocations with `Writer`-owned scratch:
 
 So a `Writer`'s steady-state floor is about **64 KiB**, rising toward **128
 KiB** for a writer that has encoded a near-chunk-sized record. That is the
-point of the work — `WriteRecord` fell from **54.0 to 5.0** allocations per
+point of the work — `WriteRecord` fell from **49.0 to 5.0** allocations per
 call by `testing.AllocsPerRun`, and from 60 to 5 allocs/op with 6 822 → 5 033
 B/op in the benchmark rows — but it is a real change in resident memory and a
 caller holding many concurrent `Writer`s (one per channel, one per tenant)
