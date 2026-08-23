@@ -761,11 +761,15 @@ func (w *Writer) queueFsyncLocked() {
 }
 
 // flushChunkLocked writes the current in-progress chunk to disk as a complete,
-// padded 65536-byte EVTX chunk, patches the file header at offset 0, and calls
-// f.Sync(). Only once the chunk is durable does it commit w.chunkCount,
-// w.currentSize, w.records, and w.firstID together — if any I/O step fails,
-// none of that in-memory state has moved, so the call is genuinely retriable
-// and a retry cannot write the same records into a second chunk slot.
+// padded 65536-byte EVTX chunk and patches the file header at offset 0. Under
+// SyncEveryChunk it then calls f.Sync() and only once the chunk is durable
+// does it commit w.chunkCount, w.currentSize, w.records, and w.firstID
+// together — if any I/O step fails, none of that in-memory state has moved,
+// so the call is genuinely retriable and a retry cannot write the same
+// records into a second chunk slot. Under SyncOnTick the sync is skipped:
+// the commit happens after the successful write instead, w.pendingSync is
+// set to record the fsync debt, and the flush tick, rotate() or Close()
+// discharges it later.
 //
 // Must be called with w.mu held. Does nothing if len(w.records) == 0.
 func (w *Writer) flushChunkLocked() error {
@@ -887,8 +891,13 @@ func (w *Writer) flushChunkLocked() error {
 // Neither w.chunkCount nor w.records is reset — the chunk stays open for
 // further appends, exactly as before (ADR-004's flush-without-reset).
 //
-// Must be called with w.mu held. Does nothing if len(w.records) == 0, or if
-// nothing was appended since the previous tick.
+// Must be called with w.mu held. Does nothing if nothing is pending — either
+// len(w.records) == 0, or nothing was appended since the previous tick — AND
+// no sealed chunk is owed an fsync (w.pendingSync). When w.pendingSync is
+// set, either of those otherwise-idle conditions still triggers an f.Sync()
+// to discharge the debt before returning: a chunk committed without a sync
+// under SyncOnTick must not wait for Close just because no further records
+// arrived.
 func (w *Writer) tickFlushLocked() error {
 	// A chunk sealed under SyncOnTick is owed an fsync even when nothing is
 	// pending in w.records. Both early returns below would skip it, leaving
@@ -1044,6 +1053,7 @@ func (w *Writer) finalizeLocked() error {
 		} else if serr := w.f.Sync(); serr != nil {
 			err = fmt.Errorf("go_evtx: finalize sync: %w", serr)
 		} else {
+			w.pendingSync = false
 			w.queueFsyncLocked()
 		}
 	}
