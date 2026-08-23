@@ -21,7 +21,20 @@ go test -race -cover ./...
 
 # Lint (requires golangci-lint)
 golangci-lint run
+
+# Release: promote CHANGELOG's [Unreleased] to a version + compare links, then
+git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z   # release.yml fires on v*
+# Tagging alone does NOT publish. Warm the proxy or downstream `go get` fails:
+(cd $(mktemp -d) && go mod init warm && go get github.com/fjacquet/go-evtx@vX.Y.Z)
+curl -s https://proxy.golang.org/github.com/fjacquet/go-evtx/@latest   # verify
 ```
+
+**CodeRabbit.** Auto-review is off for this repo (under 10 stars) — post
+`@coderabbitai review` on the PR to trigger it. It cannot review a closed or
+merged PR, and a merged one cannot be reopened, so trigger it while the PR is
+live. The plan allows one included review per hour: a fix commit pushed right
+after a review is typically **not** reviewed, and its check still shows green.
+Do not read that as a second approval.
 
 ## Architecture
 
@@ -187,6 +200,26 @@ The release's method is a table of CI measurements compared across commits. Thre
 - **`docs/format-baseline.md` is append-only.** Earlier rows are the evidence later comparisons rest on. Add a row; never edit one. A correction goes in a new row or a clearly marked correction note.
 - **Select a CI run by `head_sha`, never by recency.** `rtk gh api repos/fjacquet/go-evtx/actions/runs/<id> --jq '.head_sha'` must equal the commit you are measuring. A run was once cited whose head was two commits stale, so its "identical" result was mechanically guaranteed and proved nothing.
 - **A message comparison is only valid across a byte-identical fixture.** Windows' rejection message is content-dependent: the same writer produced `The event log file is corrupted.` on one fixture and `The data is invalid.` on another with no code change. Whether the file *opens* is the one signal immune to this.
+- **A performance figure in prose needs a source too.** v0.11.0 shipped "54.0 allocations before" in `CHANGELOG.md`, `docs/user-guide.md` and ADR-009. It was measured nowhere; the real figure is 49.0. Cite a `perf-baseline.md` row, or name the harness. To measure a previous release, run the *current* test against that tag in a scratch worktree — `git worktree add --detach <dir> <tag>`, drop the probe in, `go test -run`, remove the worktree — so both numbers come from one harness rather than two.
+
+## A guard test must be able to fail
+
+Before trusting a test that guards an invariant, break the invariant and watch
+it fail. Three guards in this repo could not:
+
+- `TestBuildBinXML_PayloadSurvivesNextEncode` "guarded" the encoder's aliasing
+  hazard, but `buildBinXML` allocates a fresh buffer per call — nothing there
+  reuses one, so no change to the writer could fail it.
+- A replacement that compared bytes in `w.records` was no better:
+  `append(w.records, rec...)` copies, so an aliasing regression is invisible
+  there by construction.
+- ADR-009 and this file both named `wrapEventRecord`'s copy as what keeps
+  buffered records intact. Rewriting `wrapEventRecord` to build into a reused
+  package-level buffer passes the **entire suite** — the pending chunk's own
+  append is the real mechanism. Nobody had checked.
+
+The mutation costs one `cp`, one edit, one `go test`, one `cp` back. It is the
+difference between a test and a comment that compiles.
 
 ## Reverse-engineering discipline
 
