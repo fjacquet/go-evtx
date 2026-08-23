@@ -1,7 +1,7 @@
 # Writer Throughput and Flush Policy — Design
 
 **Date:** 2026-08-22
-**Status:** Release 1 (v0.10.0, flush amplification) shipped; Release 2 (v0.11.0 — `SyncPolicy`, `WriteRecords`, allocation reuse) not yet implemented
+**Status:** Both releases shipped. Release 1 (v0.10.0, flush amplification) shipped 2026-08-22; Release 2 (v0.11.0 — `SyncPolicy`, `WriteRecords`, allocation reuse) implemented 2026-08-23 on `feat/v0.11.0-impl`, recorded in [ADR-008](../../adr/ADR-008-sync-policy-group-commit.md) and [ADR-009](../../adr/ADR-009-batch-write-api.md). Two claims below did not survive implementation; both carry dated notes in place.
 **Releases:** v0.10.0 (flush amplification), v0.11.0 (throughput)
 
 ## Context
@@ -310,6 +310,33 @@ Two consequences to document:
   the chunk, so the sticky error can land on a caller that wrote nothing.
   `OnFsync` fires correspondingly less often.
 
+> **Note, 2026-08-23 (v0.11.0 implementation).** "Durability comes from the
+> tick" above is **incomplete as written**, and the gap is a real one the
+> implementation had to close. `tickFlushLocked` does not always flush: since
+> v0.10.0 (ADR-007) it returns early when `len(w.records) == 0` and again when
+> `len(w.records) == w.tickWrittenLen`. Under `SyncOnTick` a burst that fills
+> and seals a chunk leaves `w.records` empty, so every subsequent tick takes
+> the first early return and the sealed — written, not durable — chunk would
+> have waited for `Close()`. On a daemon that is hours or days: precisely the
+> unbounded window `New` refuses to let a caller configure, reintroduced
+> through the one code path this section names as the fix.
+>
+> The fix is a `w.pendingSync` flag, set by `flushChunkLocked` when it skips
+> the sync and discharged as `tickFlushLocked`'s **first** action, ahead of
+> both early returns — ordering is the whole point, since a flag consulted
+> after them would never be reached in the case that needs it. Cleared by
+> every successful `f.Sync()`, including `rotate()`'s and
+> `finalizeLocked`'s. Pinned by
+> `TestSyncPolicy_TickSyncsASealedChunkWithNoPendingRecords`, which exists
+> separately from the general policy tests because those write continuously
+> and so never reach the quiet state.
+>
+> The generic lesson, recorded because it is not specific to this feature:
+> composing a new mechanism onto an existing one requires re-reading the
+> existing one's **early returns**, not only its main path. The tick's fast
+> paths were added for reasons unrelated to durability and became a
+> durability hole the moment durability started depending on the tick.
+
 Expected burst-path cost: encode 3.3 µs + amortized write ~0.03 µs ≈ 3.4 µs per
 record, against 74 µs today.
 
@@ -357,6 +384,25 @@ Writer-owned scratch buffers replace per-call allocation:
 - 64 KiB `chunkScratch` for `flushChunkLocked`
 - 512 B `hdrScratch` for the tick path
 - a reused `bytes.Buffer` and substitution backing array inside `buildBinXML`
+
+> **Correction, 2026-08-23 (v0.11.0 implementation).** "512 B `hdrScratch` for
+> the tick path" describes v0.10.0's **abandoned** header-only tick write, and
+> is wrong for the same reason that design was abandoned: `fillHashTables`
+> back-patches node offsets that live inside the records region, so the tick
+> must build and patch a full `evtxChunkSize` buffer even though it writes
+> only the used prefix to disk. See the v0.10.0 correction note above and
+> ADR-007. There is therefore **no `hdrScratch`**: both flush paths share the
+> one 64 KiB `w.chunkScratch`, obtained through `chunkScratchLocked()`, which
+> clears it before each use — a reused buffer still holding the previous
+> chunk's records would write those bytes into this chunk's padding tail,
+> leaking data into the file and breaking byte-identity with v0.10.0's
+> freshly allocated, zero-filled buffers.
+>
+> The substitution "backing array" shipped as a per-call arena inside
+> `collectSubstitutionsFromFields`, not as `Writer`-owned state — so unlike
+> `chunkScratch` and `encodeScratch` it adds nothing to the writer's resident
+> memory. The target of "56 allocs/record to under 10" was met: 54.0 measured
+> before, 5.0 after (`testing.AllocsPerRun`).
 
 All encoding happens under `w.mu`, so Writer-owned buffers beat a `sync.Pool` —
 no pool overhead and no escape-analysis surprises. Target: 56 allocs/record to

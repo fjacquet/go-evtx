@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RotationConfig.SyncPolicy`, with `SyncEveryChunk` and `SyncOnTick`.
+  `SyncEveryChunk` is the zero value and is the durability model go-evtx has
+  always had — every sealed chunk is fsynced before the writer commits it — so
+  **the default configuration is byte-identical to v0.10.0** and no existing
+  caller changes behaviour. `SyncOnTick` is opt-in group commit: sealed chunks
+  are written and the file header is patched, but the fsync is deferred to the
+  background flush tick, to `Rotate()` and to `Close()`, so one fsync covers
+  every chunk written since the previous tick. Measured at 2770 ns/op against
+  `SyncEveryChunk`'s 77 373 ns/op on `darwin/arm64 M1 Pro, APFS, go1.27.0` —
+  about 27.9x, with 1 total fsync across the run instead of one per ~81
+  records.
+
+  **`SyncOnTick` widens the crash-loss window** from at most one chunk to up
+  to `FlushIntervalSec` seconds of arrivals, which is why `New` returns an
+  error for `SyncOnTick` with `FlushIntervalSec <= 0` rather than applying a
+  default — with no tick the window would be unbounded. It also changes the
+  *shape* of a power-loss failure, not only its size: the chunk bytes and the
+  file header that advertises them are written with no sync between them, so a
+  torn image can show a header claiming a chunk whose bytes never landed — a
+  file a parser rejects, not merely a short one. A process crash is unaffected.
+  See [ADR-008](docs/adr/ADR-008-sync-policy-group-commit.md).
+
+- `WriteRecords(recs []RecordInput) error` and `RecordInput`, a batch write
+  API. Every record is validated before any record is encoded, so a batch
+  containing an invalid record writes nothing and returns an error naming that
+  record's index (`go_evtx: record 3: …`). The whole slice is written under a
+  single lock acquisition. The all-or-nothing guarantee covers *validation*,
+  not I/O: a batch spanning chunks seals them as it goes, and a write failure
+  partway through leaves earlier records written.
+
+  **`WriteRecords` is not faster per record — it is slower.** At a batch size
+  of 100 it runs roughly 1.4x slower per record than 100 sequential
+  `WriteRecord` calls (3934 vs 2770 ns/op, matched sync policy), because the
+  validation pre-pass collects each record's substitution values to size them
+  and the encode then collects them again. Adopt it for the contract, not for
+  throughput. See [ADR-009](docs/adr/ADR-009-batch-write-api.md).
+
+  The size check `WriteRecords` uses is an analytic upper bound
+  (`estimateMaxPayload`) derived from the encoder's own template and
+  substitution structures rather than from constants. It bounds the
+  inline-template worst case, so it is stricter than `WriteRecord`'s
+  post-encode check by roughly 2 KB: a record whose payload lands in
+  approximately the top 2 KB of the 64 996-byte limit is accepted by
+  `WriteRecord` and rejected by `WriteRecords`.
+
+### Changed
+
+- Per-record allocation cut by roughly an order of magnitude. `WriteRecord`
+  fell from **54.0 to 5.0** allocations per call by `testing.AllocsPerRun`
+  (60 → 5 allocs/op and 6822 → 5033 B/op in the benchmark rows), via a reused
+  64 KiB chunk assembly buffer shared by both flush paths, a reused BinXML
+  encode buffer, and a single arena backing every substitution value.
+  `TestWriteRecord_AllocationCeiling` fails the build if this regresses.
+
+  **This raises the per-`Writer` memory floor.** Each `Writer` now retains the
+  64 KiB chunk buffer for its lifetime after the first flush, plus an encode
+  buffer grown to the largest record it has encoded and never shrunk — so
+  budget roughly 64 KiB per `Writer` in steady state, rising toward 128 KiB for
+  one that has encoded a near-chunk-sized record. It was previously near zero
+  between calls. A process holding many concurrent `Writer`s should size for
+  it.
+
+- `RotationConfig` gained a field (`SyncPolicy`). Keyed struct literals — the
+  form used in every example, godoc snippet and test in this repository — are
+  unaffected. An unkeyed `RotationConfig{...}` literal would no longer
+  compile.
+
 ## [0.10.0] - 2026-08-22
 
 ### Changed
