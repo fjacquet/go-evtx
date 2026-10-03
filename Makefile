@@ -3,11 +3,11 @@
 DIST  ?= dist
 COVER ?= coverage.out
 # Go-1.24-compatible tool pins (go.mod is go 1.24; defaults need Go 1.25).
-GOLANGCI_VERSION ?= v2.8.0
-GORELEASER_VERSION ?= v2.7.0
+GOLANGCI_VERSION ?= v2.13.2
+GORELEASER_VERSION ?= v2.18.0
 # govulncheck @latest (v1.4.0) needs Go >= 1.25; the CI runner pins
 # GOTOOLCHAIN=local at go 1.24, so pin the last Go-1.24-safe release.
-GOVULNCHECK_VERSION ?= v1.1.4
+GOVULNCHECK_VERSION ?= v1.8.0
 # cyclonedx-gomod @latest (v1.10.0) also needs Go >= 1.25; pin Go-1.24-safe.
 CYCLONEDX_GOMOD_VERSION ?= v1.9.0
 
