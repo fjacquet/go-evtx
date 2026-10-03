@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-03
+
+### Added
+
+- CI: security workflow added, calling the shared `go-security` reusable workflow from `fjacquet/ci`.
+
+### Changed
+
+- Go 1.26.6 -> 1.27.1 (`go` directive in `go.mod`).
+- Makefile tool pins: golangci-lint v2.8.0 -> v2.13.2, goreleaser v2.7.0 -> v2.18.0, govulncheck v1.1.4 -> v1.8.0.
+- No dependencies: go-evtx has none, so this release carries no dependency changes.
+
 ## [0.11.0] - 2026-08-23
 
 ### Added
@@ -650,7 +662,8 @@ Windows writes. Neither was true in 0.6.0.
 - MIT license
 - GitHub Actions CI: `go test ./...` + `go vet` + `golangci-lint` on push/PR
 
-[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/fjacquet/go-evtx/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/fjacquet/go-evtx/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/fjacquet/go-evtx/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/fjacquet/go-evtx/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/fjacquet/go-evtx/compare/v0.8.3...v0.9.0
