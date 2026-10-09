@@ -3,7 +3,7 @@
 DIST  ?= dist
 COVER ?= coverage.out
 # Go-1.24-compatible tool pins (go.mod is go 1.24; defaults need Go 1.25).
-GOLANGCI_VERSION ?= v2.13.2
+GOLANGCI_VERSION ?= v2.14.0
 GORELEASER_VERSION ?= v2.18.0
 # govulncheck @latest (v1.4.0) needs Go >= 1.25; the CI runner pins
 # GOTOOLCHAIN=local at go 1.24, so pin the last Go-1.24-safe release.
